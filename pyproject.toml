@@ -126,7 +126,7 @@ skip-install = true
 [tool.hatch.metadata]
 allow-direct-references = true
 
-# Tell hatchling where the importable package lives (setup.sh rewrites the path)
+# Tell hatchling where the importable package lives
 [tool.hatch.build.targets.wheel]
 packages = ["src/vibepcb"]
 

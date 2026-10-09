@@ -6,6 +6,7 @@ vibepcb fix <board>     raw -> out/<board>/kicad, apply post-processing fixes
 vibepcb check <board>   KiCad DRC + ERC -> out/<board>/reports (after refill: drop tracks the GND pour provides)
 vibepcb all <board>     build + fix + check
 vibepcb fab <board>     gerbers/drill zip, BOM, pick-and-place, schematic PDF, 3D renders
+vibepcb list            list the boards under boards/
 vibepcb docs            download tscircuit's LLM docs to docs/tscircuit-llms.txt
 """
 

@@ -16,7 +16,7 @@ Requirements: [hatch](https://hatch.pypa.io), git, and for `check`/`fab` KiCad >
 
 ```bash
 hatch run setup            # Node.js into the hatch env + npm install (tscircuit, bun)
-sudo pacman -S kicad       # provides kicad-cli (or set $KICAD_CLI)
+sudo pacman -S kicad       # or your distro's KiCad >= 9 package; provides kicad-cli (or set $KICAD_CLI)
 hatch run pcb docs         # optional: tscircuit's LLM docs -> docs/tscircuit-llms.txt
 ```
 
@@ -24,6 +24,7 @@ hatch run pcb docs         # optional: tscircuit's LLM docs -> docs/tscircuit-ll
 
 ```bash
 hatch run pcb all led-indicator    # build + fix + check the smoke-test board (a worked example: ../VibePCB-co2-monitor)
+hatch run pcb list                 # list the boards
 hatch run pcb new my-board         # scaffold boards/my-board/index.circuit.tsx
 hatch run pcb build my-board       # tsci check + export (KiCad, netlist, PNG/SVG previews)
 hatch run pcb fix my-board         # -> out/my-board/kicad/my-board.kicad_pro
@@ -50,7 +51,11 @@ in the KiCad export becomes a fix in `src/vibepcb/fixes.py`.
 | `src/vibepcb/tscircuit.py` | wrapper around `tsci` |
 | `src/vibepcb/kicad.py` | project assembly + `kicad-cli` ERC/DRC/fab |
 | `src/vibepcb/fixes.py` | post-processing fixes on the KiCad files |
+| `src/vibepcb/tracks.py` | track-cleaning geometry (bends, junctions, clearances) |
 | `src/vibepcb/sexpr.py` | lossless KiCad S-expression reader/writer |
+| `src/vibepcb/paths.py` | project root and `boards/` / `out/` layout |
+| `tests/` | pytest suite, fixture board in `tests/data/` |
+| `docs/TOOLING.md` | full tooling reference (commands, fixes, checks, gotchas) |
 | `.claude/skills/tscircuit/` | official tscircuit agent skill (`hatch run update-skill`) |
 | `out/` | generated, gitignored |
 

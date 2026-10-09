@@ -101,7 +101,7 @@ test in `tests/test_fixes.py` against the fixtures in `tests/data/`.
 - Keep `schX/schY` compact (1 unit = 15 mm in KiCad): spread over ~25 x 16 units the
   schematic fits A3.
 - If `check` leaves a few sharp bends/junctions in a cramped spot, the routing there
-  is the problem: try `autorouterEffortLevel` (10x fixed this board) and 0.2-0.5 mm
+  is the problem: try `autorouterEffortLevel` (10x fixed one cramped board) and 0.2-0.5 mm
   nudges of the parts around it; tscircuit routing is deterministic, so compare
   variants as board copies (`boards/<copy>`) built in parallel.
 - Pad-to-pad traces between a capacitor and a chip pin get a hidden 1 mm max length

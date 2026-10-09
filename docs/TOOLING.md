@@ -420,9 +420,10 @@ Re-vendor with `hatch run update-skill`. pre-commit does not touch it.
 
 ## 12. Gotchas
 
-1. **Editable install is assumed.** `paths.ROOT = Path(__file__).resolve().parents[2]`
-   points to the repo root from `src/vibepcb/paths.py`. A non-editable install (the `ciall`
-   env) breaks `ROOT`, `boards/` and `out/`.
+1. **Project root lookup.** `paths.find_root()` uses `$VIBEPCB_ROOT`, else the nearest parent
+   of the cwd that holds `boards/` and `package.json`, else the checkout the code lives in
+   (`Path(__file__).resolve().parents[2]`). A non-editable install (the `ciall` env) run from
+   outside a project therefore needs `$VIBEPCB_ROOT`.
 2. **`hatch run setup` first.** `tscircuit._tsci()` checks for `node_modules/.bin/tsci` and
    `node` on PATH; without them `build` fails with "run `hatch run setup` first".
 3. **`fix` deletes `out/<board>/kicad/`.** Any manual edits in KiCad are lost on the next
