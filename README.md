@@ -23,7 +23,7 @@ hatch run pcb docs         # optional: tscircuit's LLM docs -> docs/tscircuit-ll
 ## Usage
 
 ```bash
-hatch run pcb all led-indicator    # build + fix + check the smoke-test board (a worked example: ../VibePCB-co2-monitor)
+hatch run pcb all led-indicator    # build + fix + check the smoke-test board (worked example: github.com/PaulBichl/vibepcb-example-co2-monitor)
 hatch run pcb list                 # list the boards
 hatch run pcb new my-board         # scaffold boards/my-board/index.circuit.tsx
 hatch run pcb build my-board       # tsci check + export (KiCad, netlist, PNG/SVG previews)
