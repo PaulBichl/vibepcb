@@ -1,0 +1,1705 @@
+"""Post-processing fixes applied to the KiCad files tscircuit exports.
+
+Each fix is a function ``(project: KicadProject) -> list[str]`` that edits the
+parsed trees in place and returns a human-readable line per change (empty when
+there was nothing to do). Register new fixes in ``FIXES``; they run in order.
+"""
+
+from __future__ import annotations
+
+import copy
+import datetime
+import functools
+import itertools
+import json
+import math
+import re
+import uuid
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+from vibepcb import sexpr, tracks
+from vibepcb.sexpr import Sym
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+    from pathlib import Path
+
+    from vibepcb.sexpr import Node
+
+STANDARD_BOARD_THICKNESS_MM = 1.6
+FOOTPRINT_LIB_NICKNAME = "tscircuit"  # what tscircuit writes into (footprint "tscircuit:<name>")
+
+
+@dataclass
+class KicadProject:
+    """The parsed .kicad_pcb / .kicad_sch of one project directory."""
+
+    directory: Path
+    pcb: list[Node]
+    sch: list[Node]
+    pcb_path: Path
+    sch_path: Path
+
+    @classmethod
+    def load(cls, directory: Path, stem: str) -> KicadProject:
+        pcb_path = directory / f"{stem}.kicad_pcb"
+        sch_path = directory / f"{stem}.kicad_sch"
+        return cls(directory, sexpr.load(pcb_path), sexpr.load(sch_path), pcb_path, sch_path)
+
+    def save(self) -> None:
+        sexpr.dump(self.pcb, self.pcb_path)
+        sexpr.dump(self.sch, self.sch_path)
+
+
+def _footprints_by_ref(pcb: list[Node]) -> dict[str, list[Node]]:
+    refs = {}
+    for fp in sexpr.children(pcb, "footprint"):
+        ref = sexpr.property_value(fp, "Reference")
+        if ref:
+            refs[ref] = fp
+    return refs
+
+
+# --- fixes ----------------------------------------------------------------------
+
+_AUTO_NET = re.compile(r"^\.|\s>\s|\sto\s")  # e.g. ".R1 > .pin2 to .D1 > .anode"
+
+
+def rename_auto_nets(project: KicadProject) -> list[str]:
+    """Replace tscircuit's selector-style net names with KiCad-style ``Net-(R1-Pad2)``."""
+    pcb = project.pcb
+    first_pad: dict[str, str] = {}  # net name -> "R1-Pad2" of its first pad
+    for fp in sexpr.children(pcb, "footprint"):
+        ref = sexpr.property_value(fp, "Reference") or "?"
+        for pad in sexpr.children(fp, "pad"):
+            net = sexpr.child(pad, "net")
+            if net is not None and len(net) > 2:
+                first_pad.setdefault(str(net[2]), f"{ref}-Pad{pad[1]}")
+
+    renames = {}
+    taken = {str(n[2]) for n in sexpr.children(pcb, "net") if len(n) > 2}
+    for name in sorted(taken):
+        if _AUTO_NET.search(name) and name in first_pad:
+            new = f"Net-({first_pad[name]})"
+            if new not in taken:
+                renames[name] = new
+    if not renames:
+        return []
+
+    for node in sexpr.walk(pcb):
+        if sexpr.head(node) in ("net", "net_name"):
+            for i, item in enumerate(node):
+                if isinstance(item, str) and not isinstance(item, Sym) and item in renames:
+                    node[i] = renames[item]
+    return [f"net {old!r} -> {new!r}" for old, new in renames.items()]
+
+
+def propagate_split_pad_nets(project: KicadProject) -> list[str]:
+    """Give every pad of a split pad (several pads sharing one number) the net of its siblings.
+
+    tscircuit exports e.g. a module's 3x3 grid of thermal pads "49" with the net on the
+    first pad only; KiCad then reports the rest as unconnected copper shorted to it.
+    The footprint is also flagged ``duplicate_pad_numbers_are_jumpers`` (KiCad >= 9), so
+    pads joined inside the part (a USB-C shell's front and rear tabs) count as connected.
+    """
+    changes = []
+    for fp in sexpr.children(project.pcb, "footprint"):
+        ref = sexpr.property_value(fp, "Reference") or "?"
+        pads = [pad for pad in sexpr.children(fp, "pad") if str(pad[1])]  # "" = mechanical NPTH
+        numbers = [str(pad[1]) for pad in pads]
+        if len(set(numbers)) == len(numbers):
+            continue
+        nets = {str(pad[1]): net for pad in pads if (net := sexpr.child(pad, "net")) is not None}
+        for pad in pads:
+            net = nets.get(str(pad[1]))
+            if net is None or sexpr.child(pad, "net") is not None:
+                continue
+            layers = sexpr.child(pad, "layers")
+            pad.insert(pad.index(layers) + 1 if layers is not None else len(pad), list(net))
+            changes.append(f"{ref} pad {pad[1]}: net {net[2]!r}")
+        if sexpr.child(fp, "duplicate_pad_numbers_are_jumpers") is None:
+            fp.insert(fp.index(pads[0]), [Sym("duplicate_pad_numbers_are_jumpers"), Sym("yes")])
+            changes.append(f"{ref}: duplicate pad numbers are jumpers")
+    return changes
+
+
+def _num(node: list[Node] | None, i: int, default: float = 0.0) -> float:
+    return float(str(node[i])) if node is not None and len(node) > i else default
+
+
+def _pad_box(pad: list[Node]) -> tuple[float, float, float, float]:
+    """Pad copper extent ``(xmin, ymin, xmax, ymax)`` in the pad's own frame (custom shapes included)."""
+    size = sexpr.child(pad, "size")
+    hw, hh = _num(size, 1) / 2, _num(size, 2) / 2
+    box = [-hw, -hh, hw, hh]
+    primitives = sexpr.child(pad, "primitives")
+    for xy in [] if primitives is None else (n for n in sexpr.walk(primitives) if sexpr.head(n) == "xy"):
+        x, y = _num(xy, 1), _num(xy, 2)
+        box = [min(box[0], x), min(box[1], y), max(box[2], x), max(box[3], y)]
+    return box[0], box[1], box[2], box[3]
+
+
+def _inside_pad(fp: list[Node], pad: list[Node], x: float, y: float) -> bool:
+    """Whether board point ``(x, y)`` lies within ``pad``'s copper bounding box."""
+    at, pad_at = sexpr.child(fp, "at"), sexpr.child(pad, "at")
+    fp_angle = math.radians(_num(at, 3))
+    dx, dy = x - _num(at, 1), y - _num(at, 2)
+    # board -> footprint frame (inverse of KiCad's y-down, counter-clockwise rotation)
+    lx = dx * math.cos(fp_angle) - dy * math.sin(fp_angle) - _num(pad_at, 1)
+    ly = dx * math.sin(fp_angle) + dy * math.cos(fp_angle) - _num(pad_at, 2)
+    # footprint -> pad frame; a pad's angle is stored absolute, footprint rotation included
+    pad_angle = math.radians(_num(pad_at, 3)) - fp_angle
+    u = lx * math.cos(pad_angle) - ly * math.sin(pad_angle)
+    v = lx * math.sin(pad_angle) + ly * math.cos(pad_angle)
+    xmin, ymin, xmax, ymax = _pad_box(pad)
+    return xmin <= u <= xmax and ymin <= v <= ymax
+
+
+def _pad_on_layer(pad: list[Node], layer: str) -> bool:
+    layers = sexpr.child(pad, "layers")
+    names = [] if layers is None else [str(x) for x in layers[1:]]
+    return layer in names or (layer.endswith(".Cu") and "*.Cu" in names)
+
+
+def drop_tracks_inside_pads(project: KicadProject) -> list[str]:
+    """Remove track segments lying entirely within a pad of their own net.
+
+    tscircuit can emit a stub (seen: 0.05 mm wide) inside a custom-shaped pad when it
+    routes to it; it adds no connectivity but fails KiCad's minimum track width check.
+    """
+    pads_by_net: dict[str, list[tuple[str, list[Node], list[Node]]]] = {}
+    for fp in sexpr.children(project.pcb, "footprint"):
+        ref = sexpr.property_value(fp, "Reference") or "?"
+        for pad in sexpr.children(fp, "pad"):
+            net = sexpr.child(pad, "net")
+            if net is not None:
+                pads_by_net.setdefault(str(net[1]), []).append((ref, fp, pad))
+
+    dropped: dict[str, int] = {}
+    for seg in list(sexpr.children(project.pcb, "segment")):
+        net, start, end = sexpr.child(seg, "net"), sexpr.child(seg, "start"), sexpr.child(seg, "end")
+        if net is None or start is None or end is None:
+            continue
+        layer = sexpr.child(seg, "layer")
+        for ref, fp, pad in pads_by_net.get(str(net[1]), []):
+            if layer is None or not _pad_on_layer(pad, str(layer[1])):
+                continue  # a track merely passing under/over an SMD pad on the other side
+            if all(_inside_pad(fp, pad, _num(p, 1), _num(p, 2)) for p in (start, end)):
+                project.pcb.remove(seg)
+                dropped[ref] = dropped.get(ref, 0) + 1
+                break
+    return [f"{ref}: dropped {n} track stub(s) inside its own pads" for ref, n in sorted(dropped.items())]
+
+
+def _npth_holes(pcb: list[Node]) -> list[tuple[str, float, float, float]]:
+    """``(ref, x, y, radius)`` of every round NPTH pad, in board coordinates."""
+    holes = []
+    for fp in sexpr.children(pcb, "footprint"):
+        ref = sexpr.property_value(fp, "Reference") or "?"
+        at = sexpr.child(fp, "at")
+        fx, fy = (float(str(at[1])), float(str(at[2]))) if at is not None else (0.0, 0.0)
+        angle = math.radians(float(str(at[3]))) if at is not None and len(at) > 3 else 0.0
+        for pad in sexpr.children(fp, "pad"):
+            drill = sexpr.child(pad, "drill")
+            pad_at = sexpr.child(pad, "at")
+            if str(pad[2]) != "np_thru_hole" or drill is None or pad_at is None or len(drill) != 2:
+                continue
+            px, py = float(str(pad_at[1])), float(str(pad_at[2]))
+            x = fx + px * math.cos(angle) + py * math.sin(angle)
+            y = fy - px * math.sin(angle) + py * math.cos(angle)
+            holes.append((ref, x, y, float(str(drill[1])) / 2))
+    return holes
+
+
+def drop_npth_edge_cuts(project: KicadProject) -> list[str]:
+    """Remove board-outline copies of footprint NPTH holes.
+
+    tscircuit exports a footprint's non-plated holes (e.g. a USB-C receptacle's locating
+    pegs) both as NPTH pads *and* as polygonal Edge.Cuts cut-outs, so DRC measures every
+    nearby pad/track against a 0.5 mm board-edge clearance instead of hole clearance.
+    """
+    holes = _npth_holes(project.pcb)
+    tolerance = 0.02  # mm; tscircuit's polygon vertices sit exactly on the drill circle
+
+    def hole_of(point: list[Node] | None) -> str | None:
+        if point is None:
+            return None
+        x, y = float(str(point[1])), float(str(point[2]))
+        for ref, hx, hy, r in holes:
+            if abs(math.hypot(x - hx, y - hy) - r) <= tolerance:
+                return ref
+        return None
+
+    dropped: dict[str, int] = {}
+    for line in list(sexpr.children(project.pcb, "gr_line")):
+        layer = sexpr.child(line, "layer")
+        if layer is None or str(layer[1]) != "Edge.Cuts":
+            continue
+        ref = hole_of(sexpr.child(line, "start"))
+        if ref is not None and ref == hole_of(sexpr.child(line, "end")):
+            project.pcb.remove(line)
+            dropped[ref] = dropped.get(ref, 0) + 1
+    return [f"{ref}: dropped {n} Edge.Cuts segments duplicating its NPTH holes" for ref, n in dropped.items()]
+
+
+def allow_footprints_in_keepouts(project: KicadProject) -> list[str]:
+    """Let footprints overlap keepout zones; keep the copper restrictions.
+
+    A tscircuit ``<keepout>`` blocks copper; placement against it is already checked by
+    tscircuit (honouring ``excludeRefs``). The export still writes ``footprints not_allowed``,
+    so e.g. an antenna keepout makes KiCad flag the very module that owns the antenna.
+    """
+    changes = []
+    for zone in sexpr.children(project.pcb, "zone"):
+        keepout = sexpr.child(zone, "keepout")
+        rule = None if keepout is None else sexpr.child(keepout, "footprints")
+        if rule is None or str(rule[1]) == "allowed":
+            continue
+        rule[1] = Sym("allowed")
+        net = sexpr.child(zone, "net_name")
+        changes.append(f"keepout zone{f' ({net[1]})' if net is not None and net[1] else ''}: footprints allowed")
+    return changes
+
+
+def standard_board_thickness(project: KicadProject) -> list[str]:
+    """tscircuit exports 1.4 mm; most fabs default to 1.6 mm."""
+    general = sexpr.child(project.pcb, "general")
+    thickness = None if general is None else sexpr.child(general, "thickness")
+    if thickness is None or float(str(thickness[1])) == STANDARD_BOARD_THICKNESS_MM:
+        return []
+    old = thickness[1]
+    thickness[1] = Sym(str(STANDARD_BOARD_THICKNESS_MM))
+    return [f"board thickness {old} mm -> {STANDARD_BOARD_THICKNESS_MM} mm"]
+
+
+def fill_schematic_footprints(project: KicadProject) -> list[str]:
+    """Copy each footprint's lib id from the PCB into the schematic symbol's empty Footprint field.
+
+    Without it, KiCad's "Update PCB from Schematic" would delete every footprint.
+    """
+    footprints = _footprints_by_ref(project.pcb)
+    changes = []
+    for symbol in sexpr.children(project.sch, "symbol"):
+        ref = sexpr.property_value(symbol, "Reference")
+        prop = sexpr.property_node(symbol, "Footprint")
+        fp = footprints.get(ref or "")
+        if prop is None or fp is None or prop[2]:
+            continue
+        prop[2] = str(fp[1])
+        changes.append(f"{ref}: Footprint = {fp[1]}")
+    return changes
+
+
+def fix_value_equals_reference(project: KicadProject) -> list[str]:
+    """tscircuit sets Value = Reference for parts without a value (J1 -> "J1"); derive one from the footprint."""
+    changes = []
+    for fp in sexpr.children(project.pcb, "footprint"):
+        ref = sexpr.property_value(fp, "Reference")
+        prop = sexpr.property_node(fp, "Value")
+        if prop is None or not ref or prop[2] != ref:
+            continue
+        value = str(fp[1]).split(":", 1)[-1]
+        prop[2] = value
+        for symbol in sexpr.children(project.sch, "symbol"):
+            sym_value = sexpr.property_node(symbol, "Value")
+            if sexpr.property_value(symbol, "Reference") == ref and sym_value is not None:
+                sym_value[2] = value
+        changes.append(f"{ref}: Value {ref!r} -> {value!r}")
+    return changes
+
+
+def link_footprint_library(project: KicadProject) -> list[str]:
+    """Register the exported footprint library under the nickname the board uses.
+
+    tscircuit names footprints ``tscircuit:<name>`` but exports the library as
+    ``tscircuit_builtin``; a project-local fp-lib-table bridges the two.
+    """
+    pretty = next(project.directory.glob("lib/footprints/*.pretty"), None)
+    table = project.directory / "fp-lib-table"
+    if pretty is None or table.exists():
+        return []
+    uri = "${KIPRJMOD}/" + pretty.relative_to(project.directory).as_posix()
+    tree: list[Node] = [
+        Sym("fp_lib_table"),
+        [Sym("version"), Sym("7")],
+        [
+            Sym("lib"),
+            [Sym("name"), FOOTPRINT_LIB_NICKNAME],
+            [Sym("type"), "KiCad"],
+            [Sym("uri"), uri],
+            [Sym("options"), ""],
+            [Sym("descr"), "Footprints exported by tscircuit"],
+        ],
+    ]
+    sexpr.dump(tree, table)
+    return [f"fp-lib-table: {FOOTPRINT_LIB_NICKNAME} -> {uri}"]
+
+
+LABEL_SNAP_MM = 3.0  # how far a net-name text may sit from the wire it names
+
+
+def _wire_segments(sch: list[Node]) -> list[tuple[float, float, float, float]]:
+    segments = []
+    for wire in sexpr.children(sch, "wire"):
+        pts = [(_num(xy, 1), _num(xy, 2)) for xy in sexpr.walk(wire) if sexpr.head(xy) == "xy"]
+        segments += [(*a, *b) for a, b in itertools.pairwise(pts)]
+    return segments
+
+
+def _mm(value: float) -> str:
+    """Coordinate with KiCad's 0.1 um file precision (``:g`` would round 116.0675 to 116.067)."""
+    return f"{value:.4f}".rstrip("0").rstrip(".")
+
+
+def _closest_on_segment(x: float, y: float, seg: tuple[float, float, float, float]) -> tuple[float, float]:
+    x1, y1, x2, y2 = seg
+    length2 = (x2 - x1) ** 2 + (y2 - y1) ** 2
+    t = 0.0 if length2 == 0 else max(0.0, min(1.0, ((x - x1) * (x2 - x1) + (y - y1) * (y2 - y1)) / length2))
+    return x1 + t * (x2 - x1), y1 + t * (y2 - y1)
+
+
+# label angle -> justification KiCad itself uses for that orientation (text reads away from the anchor)
+_LABEL_JUSTIFY = {0: "left", 90: "left", 180: "right", 270: "right"}
+
+
+def _label_anchor(
+    x: float, y: float, segments: list[tuple[float, float, float, float]], pins: set[tuple[float, float]]
+) -> tuple[float, float, int] | None:
+    """Anchor and angle for a net label whose text sits at ``(x, y)``: the free end of the nearest wire.
+
+    tscircuit's net-label stubs run from a pin outwards; the label goes on the end away from
+    the pin, reading away from it, so it doesn't cover pin numbers or names.
+    """
+    seg = min(segments, key=lambda s: math.dist((x, y), _closest_on_segment(x, y, s)))
+    if math.dist((x, y), _closest_on_segment(x, y, seg)) > LABEL_SNAP_MM:
+        return None
+    a, b = (seg[0], seg[1]), (seg[2], seg[3])
+    at_pin = [(round(p[0], 4), round(p[1], 4)) in pins for p in (a, b)]
+    if at_pin[0] == at_pin[1]:  # wire between two pins (or two wires): keep the text's place
+        px, py = _closest_on_segment(x, y, seg)
+        return px, py, 0
+    free, fixed = (b, a) if at_pin[0] else (a, b)
+    dx, dy = free[0] - fixed[0], free[1] - fixed[1]
+    # sheet y grows downwards: a stub going up gets 90 deg
+    angle = (0 if dx >= 0 else 180) if abs(dx) >= abs(dy) else (90 if dy < 0 else 270)
+    return free[0], free[1], angle
+
+
+def schematic_net_labels(project: KicadProject) -> list[str]:
+    """Turn net-name texts next to wires into real net labels.
+
+    tscircuit draws a net-label stub as a wire plus a plain ``text`` with the net name, so
+    in KiCad nothing connects through it and ERC reports the pins as unconnected. Each text
+    naming a board net is replaced by a ``label`` on the free end of its stub (see
+    :func:`_label_anchor`).
+    """
+    nets = {str(n[2]) for n in sexpr.children(project.pcb, "net") if len(n) > 2 and n[2]}
+    segments = _wire_segments(project.sch)
+    pins = set(_pin_positions(project.sch).values())
+    changes = []
+    for i, node in enumerate(project.sch):
+        if sexpr.head(node) != "text" or not isinstance(node, list) or str(node[1]) not in nets or not segments:
+            continue
+        at = sexpr.child(node, "at")
+        anchor = _label_anchor(_num(at, 1), _num(at, 2), segments, pins)
+        if anchor is None:
+            continue
+        px, py, angle = anchor
+        label = sexpr.loads(
+            f'(label "" (at {_mm(px)} {_mm(py)} {angle}) (effects (font (size 1.27 1.27))'
+            f" (justify {_LABEL_JUSTIFY[angle]} bottom)) (uuid {uuid.uuid4()}))"
+        )
+        label[1] = node[1]
+        project.sch[i] = label
+        changes.append(f"label {node[1]!r} at ({_mm(px)}, {_mm(py)})")
+    return changes
+
+
+def _pin_positions(sch: list[Node]) -> dict[tuple[str, str], tuple[float, float]]:
+    """``(reference, pin number) -> (x, y)`` connection point of every placed symbol pin."""
+    lib = sexpr.child(sch, "lib_symbols")
+    lib_pins: dict[str, list[tuple[str, float, float]]] = {}
+    for sym in [] if lib is None else sexpr.children(lib, "symbol"):
+        lib_pins[str(sym[1])] = [
+            (str(num[1]), _num(pin_at, 1), _num(pin_at, 2))
+            for pin in sexpr.walk(sym)
+            if sexpr.head(pin) == "pin"
+            and (pin_at := sexpr.child(pin, "at")) is not None
+            and (num := sexpr.child(pin, "number")) is not None
+        ]
+    positions: dict[tuple[str, str], tuple[float, float]] = {}
+    for sym in sexpr.children(sch, "symbol"):
+        ref, lib_id, at = sexpr.property_value(sym, "Reference"), sexpr.child(sym, "lib_id"), sexpr.child(sym, "at")
+        if not ref or lib_id is None or at is None or sexpr.child(sym, "mirror") is not None:
+            continue
+        angle = math.radians(_num(at, 3))
+        for number, px, py in lib_pins.get(str(lib_id[1]), []):
+            # library coordinates are y-up, the sheet is y-down
+            x = _num(at, 1) + px * math.cos(angle) - py * math.sin(angle)
+            y = _num(at, 2) - (px * math.sin(angle) + py * math.cos(angle))
+            positions[ref, number] = (round(x, 4), round(y, 4))
+    return positions
+
+
+def schematic_no_connects(project: KicadProject) -> list[str]:
+    """Put a no-connect flag on every schematic pin whose PCB pad has no net.
+
+    tscircuit already warns about pins left without a trace, and marks NC pins in its own
+    schematic, but exports no ``no_connect`` items, so KiCad ERC fails on every unused pin.
+    """
+    unused: set[tuple[str, str]] = set()
+    for ref, fp in _footprints_by_ref(project.pcb).items():
+        pads: dict[str, bool] = {}
+        for pad in sexpr.children(fp, "pad"):
+            if str(pad[1]):
+                pads[str(pad[1])] = pads.get(str(pad[1]), False) or sexpr.child(pad, "net") is not None
+        unused |= {(ref, number) for number, has_net in pads.items() if not has_net}
+
+    taken = {
+        (round(_num(at, 1), 4), round(_num(at, 2), 4))
+        for nc in sexpr.children(project.sch, "no_connect")
+        if (at := sexpr.child(nc, "at"))
+    }
+    for x1, y1, x2, y2 in _wire_segments(project.sch):
+        taken |= {(round(x1, 4), round(y1, 4)), (round(x2, 4), round(y2, 4))}
+
+    changes = []
+    for (ref, number), (x, y) in sorted(_pin_positions(project.sch).items()):
+        if (ref, number) not in unused or (x, y) in taken:
+            continue
+        project.sch.append(
+            [Sym("no_connect"), [Sym("at"), Sym(_mm(x)), Sym(_mm(y))], [Sym("uuid"), Sym(str(uuid.uuid4()))]]
+        )
+        taken.add((x, y))
+        changes.append(f"{ref} pin {number}: no-connect")
+    return changes
+
+
+RAIL_LIB_PREFIX = "Custom:rail_"  # tscircuit's GND (rail_down) / supply (rail_up) symbols
+PWR_FLAG_LIB = """(symbol "power:PWR_FLAG" (power) (pin_numbers (hide yes)) (pin_names (offset 0) (hide yes))
+  (exclude_from_sim no) (in_bom yes) (on_board yes)
+  (property "Reference" "#FLG" (at 0 1.905 0) (effects (font (size 1.27 1.27)) (hide yes)))
+  (property "Value" "PWR_FLAG" (at 0 3.81 0) (effects (font (size 1.27 1.27))))
+  (property "Footprint" "" (at 0 0 0) (effects (font (size 1.27 1.27)) (hide yes)))
+  (property "Datasheet" "~" (at 0 0 0) (effects (font (size 1.27 1.27)) (hide yes)))
+  (property "Description" "Special symbol for telling ERC where power comes from" (at 0 0 0)
+    (effects (font (size 1.27 1.27)) (hide yes)))
+  (symbol "PWR_FLAG_0_0" (pin power_out line (at 0 0 90) (length 0)
+    (name "~" (effects (font (size 1.27 1.27)))) (number "1" (effects (font (size 1.27 1.27))))))
+  (symbol "PWR_FLAG_0_1" (polyline (pts (xy 0 0) (xy 0 1.27) (xy -1.016 1.905) (xy 0 2.54) (xy 1.016 1.905) (xy 0 1.27))
+    (stroke (width 0) (type default)) (fill (type none))))
+  (embedded_fonts no))"""
+
+
+def _hide(prop: list[Node], *, hidden: bool) -> None:
+    effects = sexpr.child(prop, "effects")
+    if effects is None:
+        return
+    effects[:] = [x for x in effects if sexpr.head(x) != "hide"]
+    if hidden:
+        effects.append([Sym("hide"), Sym("yes")])
+
+
+def schematic_power_symbols(project: KicadProject) -> list[str]:
+    """Make tscircuit's GND / supply rail symbols real KiCad power symbols, plus one PWR_FLAG per rail.
+
+    They are exported as ordinary parts (Reference = net name, in BOM, on board) with a
+    passive pin, so every rail symbol is a net of its own: the schematic has a dozen GND
+    nets and "Update PCB from Schematic" would add footprint-less parts. As power symbols
+    (hidden power-input pin, ``#PWR`` reference, Value = net) they join globally by name.
+    Every pin in tscircuit's export is passive, so nothing drives the rails; a PWR_FLAG on
+    each tells ERC the rail is supplied (by the USB connector / regulator).
+    """
+    lib = sexpr.child(project.sch, "lib_symbols")
+    rails = [s for s in ([] if lib is None else sexpr.children(lib, "symbol")) if str(s[1]).startswith(RAIL_LIB_PREFIX)]
+    if lib is None or not rails or all(sexpr.child(s, "power") is not None for s in rails):
+        return []
+    for rail in rails:
+        if sexpr.child(rail, "power") is None:
+            rail.insert(2, [Sym("power")])
+        for pin in (n for n in sexpr.walk(rail) if sexpr.head(n) == "pin"):
+            pin[1] = Sym("power_in")
+            if sexpr.child(pin, "hide") is None:
+                pin.append([Sym("hide"), Sym("yes")])
+
+    changes = []
+    instances = [
+        s
+        for s in sexpr.children(project.sch, "symbol")
+        if (lib_id := sexpr.child(s, "lib_id")) is not None and str(lib_id[1]).startswith(RAIL_LIB_PREFIX)
+    ]
+    for n, symbol in enumerate(instances, start=1):
+        ref, net = f"#PWR{n:02d}", sexpr.property_value(symbol, "Value") or "?"
+        ref_prop, value_prop = sexpr.property_node(symbol, "Reference"), sexpr.property_node(symbol, "Value")
+        if ref_prop is None or value_prop is None:
+            continue
+        ref_prop[2] = ref
+        _hide(ref_prop, hidden=True)
+        _hide(value_prop, hidden=False)
+        for item in ("in_bom", "on_board"):
+            if (flag := sexpr.child(symbol, item)) is not None:
+                flag[1] = Sym("no")
+        for reference in (x for x in sexpr.walk(symbol) if sexpr.head(x) == "reference"):
+            reference[1] = ref
+        changes.append(f"{ref}: power symbol {net!r}")
+
+    lib.append(sexpr.loads(PWR_FLAG_LIB))
+    pins = _pin_positions(project.sch)
+    flagged: set[str] = set()
+    for symbol in instances:
+        rail_net, rail_ref = sexpr.property_value(symbol, "Value"), sexpr.property_value(symbol, "Reference")
+        path = next((x for x in sexpr.walk(symbol) if sexpr.head(x) == "path"), None)
+        if not rail_net or not rail_ref or rail_net in flagged or (rail_ref, "1") not in pins or path is None:
+            continue
+        flagged.add(rail_net)
+        x, y = (_mm(v) for v in pins[rail_ref, "1"])
+        flag_ref = f"#FLG{len(flagged):02d}"
+        project.sch.append(
+            sexpr.loads(
+                f'(symbol (lib_id "power:PWR_FLAG") (at {x} {y} 0) (unit 1) (exclude_from_sim no) (in_bom yes)'
+                f" (on_board yes) (dnp no) (uuid {uuid.uuid4()})"
+                f' (property "Reference" "{flag_ref}" (at {x} {y} 0) (effects (font (size 1.27 1.27)) (hide yes)))'
+                f' (property "Value" "PWR_FLAG" (at {x} {y} 0) (effects (font (size 1.27 1.27)) (hide yes)))'
+                f' (property "Footprint" "" (at {x} {y} 0) (effects (font (size 1.27 1.27)) (hide yes)))'
+                f' (property "Datasheet" "~" (at {x} {y} 0) (effects (font (size 1.27 1.27)) (hide yes)))'
+                f' (pin "1" (uuid {uuid.uuid4()}))'
+                f' (instances (project "" (path "{path[1]}" (reference "{flag_ref}") (unit 1)))))'
+            )
+        )
+        changes.append(f"{flag_ref}: PWR_FLAG on {rail_net!r}")
+    return changes
+
+
+def add_part_numbers(project: KicadProject) -> list[str]:
+    """Copy ``manufacturerPartNumber`` / JLCPCB part numbers from the circuit JSON onto the symbols.
+
+    tscircuit's KiCad export drops them, so the KiCad BOM could not say what to buy.
+    Adds hidden ``MPN`` and ``LCSC`` fields (read from ``../raw/<stem>.circuit.json``) and
+    uses the MPN as Value where the export left it empty.
+    """
+    circuit = project.directory.parent / "raw" / f"{project.pcb_path.stem}.circuit.json"
+    if not circuit.exists():
+        return []
+    parts: dict[str, dict[str, str]] = {}
+    for element in json.loads(circuit.read_text(encoding="utf-8")):
+        if element.get("type") != "source_component":
+            continue
+        fields = {}
+        if mpn := element.get("manufacturer_part_number"):
+            fields["MPN"] = str(mpn)
+        if lcsc := (element.get("supplier_part_numbers") or {}).get("jlcpcb"):
+            fields["LCSC"] = str(lcsc[0])
+        if fields:
+            parts[str(element.get("name"))] = fields
+
+    changes = []
+    for symbol in sexpr.children(project.sch, "symbol"):
+        ref = sexpr.property_value(symbol, "Reference") or ""
+        template = sexpr.property_node(symbol, "Datasheet")
+        if ref not in parts or template is None:
+            continue
+        for name, value in parts[ref].items():
+            if sexpr.property_node(symbol, name) is not None:
+                continue
+            prop = [item for item in copy.deepcopy(template) if sexpr.head(item) != "id"]
+            prop[1], prop[2] = name, value
+            effects = sexpr.child(prop, "effects")
+            if effects is not None and sexpr.child(effects, "hide") is None:
+                effects.append([Sym("hide"), Sym("yes")])
+            symbol.insert(symbol.index(template) + 1, prop)
+            changes.append(f"{ref}: {name} = {value}")
+        value_prop = sexpr.property_node(symbol, "Value")
+        if value_prop is not None and not value_prop[2] and "MPN" in parts[ref]:  # e.g. LEDs export no value
+            value_prop[2] = parts[ref]["MPN"]
+            changes.append(f"{ref}: Value = {value_prop[2]}")
+    return changes
+
+
+FOOTPRINT_INTERNAL_HOLE_CLEARANCE_MM = 0.15  # still comfortably within common 2-layer fab limits
+
+
+def footprint_internal_clearance_rule(project: KicadProject) -> list[str]:
+    """Add a custom DRC rule: hole clearance *within* one footprint follows its land pattern.
+
+    Imported manufacturer land patterns (e.g. a USB-C receptacle's GND pads 0.17 mm from
+    its locating-peg holes) can sit below the board-wide hole clearance; that geometry is
+    the part's, not something the layout can fix.
+    """
+    dru = project.pcb_path.with_suffix(".kicad_dru")
+    if dru.exists():
+        return []
+    dru.write_text(
+        "(version 1)\n"
+        '(rule "footprint-internal hole clearance"\n'
+        '  (condition "A.Parent == B.Parent")\n'
+        f"  (constraint hole_clearance (min {FOOTPRINT_INTERNAL_HOLE_CLEARANCE_MM}mm)))\n",
+        encoding="utf-8",
+    )
+    return [f"{dru.name}: footprint-internal hole clearance >= {FOOTPRINT_INTERNAL_HOLE_CLEARANCE_MM} mm"]
+
+
+THERMAL_GAP_MM = 0.3
+THERMAL_SPOKE_MM = 0.3
+
+
+def zone_thermal_reliefs(project: KicadProject) -> list[str]:
+    """Connect pads to copper zones through thermal-relief spokes instead of solid copper.
+
+    tscircuit's pours connect pads solid (``connect_pads yes``): a 0402 with one pad in a
+    plane and the other on a thin track heats unevenly in reflow (tombstoning) and the
+    plane-side pad is hard to rework. Spokes are narrowed from KiCad's 0.5 mm, which is as
+    wide as a 0402 pad and so barely relieves anything.
+    """
+    changes = []
+    for zone in sexpr.children(project.pcb, "zone"):
+        connect, fill = sexpr.child(zone, "connect_pads"), sexpr.child(zone, "fill")
+        if sexpr.child(zone, "keepout") is not None or connect is None or fill is None:
+            continue
+        changed = False
+        if len(connect) > 1 and connect[1] == Sym("yes"):
+            del connect[1]
+            changed = True
+        for key, value in (("thermal_gap", THERMAL_GAP_MM), ("thermal_bridge_width", THERMAL_SPOKE_MM)):
+            node = sexpr.child(fill, key)
+            if node is not None and float(str(node[1])) != value:
+                node[1] = Sym(_mm(value))
+                changed = True
+        if changed:
+            net = sexpr.child(zone, "net_name")
+            layer = sexpr.child(zone, "layer")
+            changes.append(
+                f"zone {net[1] if net is not None else '?'} on {layer[1] if layer is not None else '?'}: thermal reliefs"
+            )
+    return changes
+
+
+THERMAL_SPOKE_RULE = "zone pads: one thermal spoke is enough"
+
+
+def thermal_spoke_rule(project: KicadProject) -> list[str]:
+    """Accept a single thermal spoke per pad (KiCad wants 2 and reports ``starved_thermal`` errors).
+
+    With thermal reliefs on, a small pad hemmed in by its own tracks may only get one spoke
+    from the pour; it is still connected (often by a track as well), so where the router put
+    its tracks shouldn't fail DRC.
+    """
+    dru = project.pcb_path.with_suffix(".kicad_dru")
+    text = dru.read_text(encoding="utf-8") if dru.exists() else "(version 1)\n"
+    if THERMAL_SPOKE_RULE in text:
+        return []
+    text += f'(rule "{THERMAL_SPOKE_RULE}"\n  (constraint min_resolved_spokes 1))\n'
+    dru.write_text(text, encoding="utf-8")
+    return [f"{dru.name}: min. 1 thermal spoke per pad"]
+
+
+REF_TEXT_SIZE_MM = 0.8  # common fab minimum for legible silkscreen
+REF_TEXT_THICKNESS_MM = 0.15
+REF_CLEARANCE_MM = 0.15  # text box to pads / silk / other text
+REF_EDGE_CLEARANCE_MM = 0.3
+CHAR_ADVANCE = 0.8  # KiCad stroke font: average glyph advance per text size (rough)
+
+type Box = tuple[float, float, float, float]  # xmin, ymin, xmax, ymax (board, y down)
+
+
+def _fp_to_board(fp: list[Node]) -> Callable[[float, float], tuple[float, float]]:
+    at = sexpr.child(fp, "at")
+    fx, fy, angle = _num(at, 1), _num(at, 2), math.radians(_num(at, 3))
+    cos, sin = math.cos(angle), math.sin(angle)
+    return lambda px, py: (fx + px * cos + py * sin, fy - px * sin + py * cos)
+
+
+def _bbox(points: list[tuple[float, float]], grow: float = 0.0) -> Box:
+    xs, ys = [p[0] for p in points], [p[1] for p in points]
+    return min(xs) - grow, min(ys) - grow, max(xs) + grow, max(ys) + grow
+
+
+def _overlaps(a: Box, b: Box) -> bool:
+    return a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]
+
+
+def _text_box(x: float, y: float, text: str, size: float, angle: float, effects: list[Node] | None = None) -> Box:
+    """Approximate extent of a stroke-font text (``justify`` honoured, angle 0 or 90)."""
+    w, h = len(text) * size * CHAR_ADVANCE + REF_TEXT_THICKNESS_MM, size + REF_TEXT_THICKNESS_MM
+    justify = sexpr.child(effects, "justify") if effects is not None else None
+    flags = {str(f) for f in justify[1:]} if justify is not None else set()
+    dx = w / 2 if "left" in flags else -w / 2 if "right" in flags else 0.0
+    dy = -h / 2 if "bottom" in flags else h / 2 if "top" in flags else 0.0
+    if round(angle) % 180 == 90:
+        return x + dy - h / 2, y - dx - w / 2, x + dy + h / 2, y - dx + w / 2
+    return x + dx - w / 2, y + dy - h / 2, x + dx + w / 2, y + dy + h / 2
+
+
+def _graphic_points(node: list[Node]) -> list[tuple[float, float]]:
+    if sexpr.head(node) == "fp_circle":
+        center, end = sexpr.child(node, "center"), sexpr.child(node, "end")
+        cx, cy = _num(center, 1), _num(center, 2)
+        r = math.hypot(_num(end, 1) - cx, _num(end, 2) - cy)
+        return [(cx - r, cy - r), (cx + r, cy + r)]
+    if sexpr.head(node) == "fp_rect":
+        (x1, y1), (x2, y2) = ((_num(p, 1), _num(p, 2)) for p in (sexpr.child(node, "start"), sexpr.child(node, "end")))
+        return [(x1, y1), (x2, y1), (x2, y2), (x1, y2), (x1, y1)]
+    keys = ("start", "mid", "end")
+    pts = [(_num(p, 1), _num(p, 2)) for k in keys if (p := sexpr.child(node, k)) is not None]
+    return pts + [(_num(xy, 1), _num(xy, 2)) for xy in sexpr.walk(node) if sexpr.head(xy) == "xy"]
+
+
+def _segment_boxes(points: list[tuple[float, float]], grow: float) -> list[Box]:
+    if len(points) == 1:
+        return [_bbox(points, grow)]
+    return [_bbox([a, b], grow) for a, b in itertools.pairwise(points)]
+
+
+def _layer(node: list[Node]) -> str:
+    layer = sexpr.child(node, "layer")
+    return "" if layer is None else str(layer[1])
+
+
+@dataclass
+class _Footprint:
+    ref: str
+    node: list[Node]
+    prop: list[Node]
+    body: Box  # courtyard (or pads) extent
+    keepouts: list[Box]  # own pads + silk
+
+
+def _pad_corners(pad: list[Node], to_board: Callable[[float, float], tuple[float, float]]) -> list[tuple[float, float]]:
+    """Board coordinates of the pad's copper bounding box corners (pad rotation included)."""
+    pad_at = sexpr.child(pad, "at")
+    angle = math.radians(_num(pad_at, 3))
+    px, py = to_board(_num(pad_at, 1), _num(pad_at, 2))
+    xmin, ymin, xmax, ymax = _pad_box(pad)
+    # pad frame -> board: rotate by the pad's absolute angle around its board position
+    return [
+        (px + u * math.cos(angle) + v * math.sin(angle), py - u * math.sin(angle) + v * math.cos(angle))
+        for u, v in ((xmin, ymin), (xmax, ymin), (xmax, ymax), (xmin, ymax))
+    ]
+
+
+def _footprint_geometry(fp: list[Node]) -> _Footprint | None:
+    # tscircuit writes a visible ``(fp_text reference ...)`` next to a hidden Reference property
+    # (KiCad merges the two on save); both keep the text at index 2
+    prop = next((t for t in sexpr.children(fp, "fp_text") if str(t[1]) == "reference"), None)
+    prop = prop if prop is not None else sexpr.property_node(fp, "Reference")
+    if prop is None or not prop[2] or _layer(prop) != "F.SilkS" or _layer(fp) != "F.Cu":
+        return None
+    effects = sexpr.child(prop, "effects")
+    for parent in (prop, effects):
+        if parent is not None and (hide := sexpr.child(parent, "hide")) is not None and str(hide[-1]) != "no":
+            return None
+    to_board = _fp_to_board(fp)
+    keepouts, body_points = [], []
+    for pad in sexpr.children(fp, "pad"):
+        if not (_pad_on_layer(pad, "F.Cu") or str(pad[2]) == "np_thru_hole"):
+            continue
+        corners = _pad_corners(pad, to_board)
+        keepouts.append(_bbox(corners, REF_CLEARANCE_MM))
+        body_points += corners
+    courtyard = []
+    for item in fp:
+        if (
+            not isinstance(item, list)
+            or not str(sexpr.head(item) or "").startswith("fp_")
+            or sexpr.head(item) == "fp_text"
+        ):
+            continue
+        points = [to_board(x, y) for x, y in _graphic_points(item)]
+        if not points:
+            continue
+        if _layer(item) == "F.SilkS":
+            keepouts += _segment_boxes(points, REF_CLEARANCE_MM)
+        elif _layer(item) == "F.CrtYd":
+            courtyard += points
+    body_points = courtyard or body_points
+    if not body_points:
+        return None
+    return _Footprint(str(prop[2]), fp, prop, _bbox(body_points), keepouts)
+
+
+def _ref_candidates(body: Box, w: float, h: float) -> list[tuple[float, float, float]]:
+    """``(x, y, angle)`` text centres around ``body``, preferred first."""
+    xmin, ymin, xmax, ymax = body
+    cx, cy = (xmin + xmax) / 2, (ymin + ymax) / 2
+    out = []
+    for gap in (0.05, 0.35, 0.7):
+        for shift in (0.0, -0.5, 0.5, -1.0, 1.0, -1.5, 1.5):
+            out += [
+                (cx + shift, ymin - gap - h / 2, 0.0),  # above
+                (cx + shift, ymax + gap + h / 2, 0.0),  # below
+                (xmin - gap - h / 2, cy + shift, 90.0),  # left, reading upwards
+                (xmax + gap + h / 2, cy + shift, 90.0),  # right
+                (xmin - gap - w / 2, cy + shift, 0.0),
+                (xmax + gap + w / 2, cy + shift, 0.0),
+            ]
+    return out
+
+
+def _grow(box: Box, d: float) -> Box:
+    return box[0] - d, box[1] - d, box[2] + d, box[3] + d
+
+
+def _fixed_obstacles(pcb: list[Node], footprints: list[_Footprint]) -> list[Box]:
+    """Board-level things a reference must not cover: edges, silkscreen, vias, reference-less parts."""
+    obstacles: list[Box] = []
+    for item in pcb:
+        if not isinstance(item, list):
+            continue
+        kind, layer = sexpr.head(item), _layer(item)
+        if kind in ("gr_line", "gr_rect", "gr_arc", "gr_poly") and layer in ("Edge.Cuts", "F.SilkS"):
+            grow = REF_EDGE_CLEARANCE_MM if layer == "Edge.Cuts" else REF_CLEARANCE_MM
+            obstacles += _segment_boxes(_graphic_points(item), grow)
+        elif kind == "gr_text" and layer == "F.SilkS":
+            at, effects = sexpr.child(item, "at"), sexpr.child(item, "effects")
+            font = None if effects is None else sexpr.child(effects, "font")
+            size = _num(None if font is None else sexpr.child(font, "size"), 1, 1.0)
+            box = _text_box(_num(at, 1), _num(at, 2), str(item[1]), size, _num(at, 3), effects)
+            obstacles.append(_grow(box, REF_CLEARANCE_MM))
+        elif kind == "via":
+            at, r = sexpr.child(item, "at"), _num(sexpr.child(item, "size"), 1) / 2
+            obstacles.append(_grow((_num(at, 1), _num(at, 2), _num(at, 1), _num(at, 2)), r + REF_CLEARANCE_MM))
+    with_ref = {id(g.node) for g in footprints}
+    for fp in sexpr.children(pcb, "footprint"):  # mounting holes etc.
+        if id(fp) in with_ref:
+            continue
+        to_board = _fp_to_board(fp)
+        for pad in sexpr.children(fp, "pad"):
+            pad_size, pad_at = sexpr.child(pad, "size"), sexpr.child(pad, "at")
+            x, y = to_board(_num(pad_at, 1), _num(pad_at, 2))
+            r = max(_num(pad_size, 1), _num(pad_size, 2)) / 2
+            obstacles.append(_grow((x, y, x, y), r + REF_CLEARANCE_MM))
+    return obstacles
+
+
+def _set_ref_font(text: list[Node]) -> bool:
+    """Reference text to REF_TEXT_SIZE_MM, centred; returns whether the size changed."""
+    effects = sexpr.child(text, "effects")
+    font = None if effects is None else sexpr.child(effects, "font")
+    if effects is None or font is None:
+        return False
+    effects[:] = [e for e in effects if sexpr.head(e) != "justify"]
+    changed = False
+    size, thickness = Sym(_mm(REF_TEXT_SIZE_MM)), Sym(_mm(REF_TEXT_THICKNESS_MM))
+    for key, value in (("size", [size, size]), ("thickness", [thickness])):
+        node = sexpr.child(font, key)
+        if node is None:
+            font.append([Sym(key), *value])
+        elif [str(v) for v in node[1:]] != [str(v) for v in value]:
+            node[1:] = value
+        else:
+            continue
+        changed = True
+    return changed
+
+
+def place_reference_designators(project: KicadProject) -> list[str]:
+    """Size reference designators legibly and move each to a free spot next to its part.
+
+    tscircuit writes 0.4 mm references (below every fab's minimum) at a fixed offset, so
+    they land on pads, on neighbours' silkscreen, on each other or beyond the board edge.
+    Each reference gets 0.8 mm text, placed at the first candidate around its courtyard
+    that stays inside the board and clear of pads, vias, holes, silkscreen, board-level text
+    and references already placed; parts' bodies (courtyards) are avoided when possible.
+    """
+    pcb = project.pcb
+    edge_points = [
+        p for item in pcb if isinstance(item, list) and sexpr.head(item) in ("gr_line", "gr_rect", "gr_arc", "gr_poly")
+        and _layer(item) == "Edge.Cuts" for p in _graphic_points(item)
+    ]  # fmt: skip
+    if not edge_points:
+        return []
+    board = _bbox(edge_points, -REF_EDGE_CLEARANCE_MM)
+    footprints = [geo for fp in sexpr.children(pcb, "footprint") if (geo := _footprint_geometry(fp)) is not None]
+    hard = _fixed_obstacles(pcb, footprints) + [box for geo in footprints for box in geo.keepouts]
+
+    changes = []
+    placed: list[Box] = []
+    h = REF_TEXT_SIZE_MM + REF_TEXT_THICKNESS_MM
+    for geo in sorted(footprints, key=lambda geo: _natural_key(geo.ref)):
+        resized = _set_ref_font(geo.prop)
+        w = len(geo.ref) * REF_TEXT_SIZE_MM * CHAR_ADVANCE + REF_TEXT_THICKNESS_MM
+        bodies = [other.body for other in footprints if other is not geo]
+        choice = None
+        for obstacles in (hard + placed + bodies, hard + placed):  # avoid other parts' bodies if possible
+            for x, y, angle in _ref_candidates(geo.body, w, h):
+                box = _text_box(x, y, geo.ref, REF_TEXT_SIZE_MM, angle)
+                inside = board[0] <= box[0] and board[1] <= box[1] and box[2] <= board[2] and box[3] <= board[3]
+                if inside and not any(_overlaps(box, o) for o in obstacles):
+                    choice = (x, y, angle, box)
+                    break
+            if choice is not None:
+                break
+        if choice is None:
+            if resized:
+                changes.append(f"{geo.ref}: reference resized, no free spot found - check by eye")
+            continue
+        x, y, angle, box = choice
+        placed.append(_grow(box, REF_CLEARANCE_MM))
+        at, fp_at = sexpr.child(geo.prop, "at"), sexpr.child(geo.node, "at")
+        a = math.radians(_num(fp_at, 3))
+        dx, dy = x - _num(fp_at, 1), y - _num(fp_at, 2)
+        local = [
+            Sym("at"),
+            Sym(_mm(dx * math.cos(a) - dy * math.sin(a))),
+            Sym(_mm(dx * math.sin(a) + dy * math.cos(a))),
+            Sym(_mm(angle)),
+        ]
+        if at is not None and [str(v) for v in at] != [str(v) for v in local]:
+            at[:] = local
+            changes.append(f"{geo.ref}: reference at ({_mm(x)}, {_mm(y)}) {angle:g} deg")
+        elif resized:
+            changes.append(f"{geo.ref}: reference resized")
+    return changes
+
+
+def _natural_key(ref: str) -> tuple[str, int]:
+    m = re.match(r"(\D*)(\d*)", ref)
+    return (m[1], int(m[2] or 0)) if m else (ref, 0)
+
+
+PAPER_SIZES_MM = {
+    "A4": (297.0, 210.0),
+    "A3": (420.0, 297.0),
+    "A2": (594.0, 420.0),
+    "A1": (841.0, 594.0),
+    "A0": (1189.0, 841.0),
+}
+SHEET_FRAME_MM = 12.0  # border + margin on each side
+TITLE_BLOCK_MM = (115.0, 40.0)  # KiCad's title block in the bottom-right corner (+ margin)
+SCHEMATIC_GRID_MM = 1.27
+_SHEET_META = {"version", "generator", "generator_version", "uuid", "paper", "title_block", "lib_symbols", "sheet_instances", "symbol_instances", "embedded_fonts"}  # fmt: skip
+_COORDS = {"at", "xy", "start", "end", "center", "mid"}
+
+
+def _sheet_placement(points: list[tuple[float, float]]) -> tuple[str, float, float] | None:
+    """Smallest paper + grid-aligned shift that puts ``points`` inside the frame, clear of the title block.
+
+    Tries the drawing centred on the sheet, then pushed to the top, then to the top-left.
+    """
+    xmin, ymin, xmax, ymax = _bbox(points, 2 * SCHEMATIC_GRID_MM)  # room for texts sticking out
+    grid, frame = SCHEMATIC_GRID_MM, SHEET_FRAME_MM
+    for paper, (w, h) in PAPER_SIZES_MM.items():
+        if xmax - xmin > w - 2 * frame or ymax - ymin > h - 2 * frame:
+            continue
+        block_x, block_y = w - frame - TITLE_BLOCK_MM[0], h - frame - TITLE_BLOCK_MM[1]
+        centred_x, centred_y = (w - xmax - xmin) / 2, (h - ymax - ymin) / 2
+        for dx, dy in ((centred_x, centred_y), (centred_x, frame - ymin), (frame - xmin, frame - ymin)):
+            dx, dy = round(dx / grid) * grid, round(dy / grid) * grid
+            if not any(x + dx > block_x and y + dy > block_y for x, y in points):
+                return paper, dx, dy
+    return None
+
+
+def fit_schematic_sheet(project: KicadProject) -> list[str]:
+    """Put the schematic on the smallest landscape ISO sheet that holds it, centred, with a title block.
+
+    tscircuit picks a huge sheet (A0/A1) and draws in one corner of it, so the PDF is
+    mostly empty paper with unreadably small parts, and the title block stays empty.
+    """
+    sch = project.sch
+    items = [n for n in sch if isinstance(n, list) and sexpr.head(n) not in _SHEET_META]
+    points = [(_num(c, 1), _num(c, 2)) for item in items for c in sexpr.walk(item) if sexpr.head(c) in _COORDS]
+    points += list(_pin_positions(sch).values())
+    if not points:
+        return []
+    placement = _sheet_placement(points)
+    if placement is None:
+        return []
+    paper, dx, dy = placement
+
+    changes = []
+    paper_node = sexpr.child(sch, "paper")
+    if paper_node is None:
+        paper_node = [Sym("paper"), paper]
+        sch.insert(next(i for i, n in enumerate(sch) if sexpr.head(n) == "lib_symbols"), paper_node)
+    if str(paper_node[1]) != paper:
+        changes.append(f"paper {paper_node[1]} -> {paper}")
+        paper_node[1:] = [paper]
+    if abs(dx) >= SCHEMATIC_GRID_MM / 2 or abs(dy) >= SCHEMATIC_GRID_MM / 2:
+        for item in items:
+            for c in sexpr.walk(item):
+                if sexpr.head(c) in _COORDS and len(c) > 2:
+                    c[1], c[2] = Sym(_mm(_num(c, 1) + dx)), Sym(_mm(_num(c, 2) + dy))
+        changes.append(f"drawing moved by ({_mm(dx)}, {_mm(dy)}) mm onto the sheet")
+    if sexpr.child(sch, "title_block") is None:
+        stem = project.sch_path.stem
+        today = datetime.datetime.now(tz=datetime.UTC).date().isoformat()
+        block: list[Node] = [
+            Sym("title_block"),
+            [Sym("title"), stem],
+            [Sym("date"), today],
+            [Sym("comment"), Sym("1"), f"VibePCB: generated from boards/{stem}/index.circuit.tsx"],
+        ]
+        sch.insert(sch.index(paper_node) + 1, block)
+        changes.append(f"title block: {stem}")
+    return changes
+
+
+# --- track geometry: copper extraction for vibepcb.tracks ---------------------------
+
+COPPER_LAYERS = ("F.Cu", "B.Cu")
+DEFAULT_CLEARANCE_MM = 0.2
+DEFAULT_EDGE_CLEARANCE_MM = 0.5
+
+
+def _net_names(pcb: list[Node]) -> dict[str, str]:
+    """Net number -> name (tscircuit's export references nets by number)."""
+    return {str(n[1]): str(n[2]) for n in sexpr.children(pcb, "net") if len(n) > 2}
+
+
+def _net_of(node: list[Node], names: dict[str, str]) -> str:
+    """A node's net name, whether written as ``(net 3)``, ``(net 3 "GND")`` or ``(net "GND")``."""
+    net = sexpr.child(node, "net")
+    if net is None or len(net) < 2:
+        return ""
+    last = net[-1]
+    return names.get(str(last), "") if isinstance(last, Sym) else str(last)
+
+
+def _copper_layers(node: list[Node]) -> frozenset[str]:
+    layers = sexpr.child(node, "layers")
+    names = {str(x) for x in (layers or [])[1:]} | ({_layer(node)} if sexpr.child(node, "layer") is not None else set())
+    if "*.Cu" in names or "F&B.Cu" in names:
+        return frozenset(COPPER_LAYERS)
+    return frozenset(layer for layer in COPPER_LAYERS if layer in names)
+
+
+def _design_clearances(project: KicadProject) -> tuple[float, float]:
+    """(copper clearance, copper-to-edge clearance) from the project's default net class / rules."""
+    pro = project.pcb_path.with_suffix(".kicad_pro")
+    try:
+        data = json.loads(pro.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return DEFAULT_CLEARANCE_MM, DEFAULT_EDGE_CLEARANCE_MM
+    classes = data.get("net_settings", {}).get("classes", [])
+    clearance = float(classes[0].get("clearance", DEFAULT_CLEARANCE_MM)) if classes else DEFAULT_CLEARANCE_MM
+    rules = data.get("board", {}).get("design_settings", {}).get("rules", {})
+    return clearance, float(rules.get("min_copper_edge_clearance", DEFAULT_EDGE_CLEARANCE_MM))
+
+
+@dataclass
+class _Copper:
+    names: dict[str, str]
+    segs: list[tracks.Seg]
+    vias: list[tuple[list[Node], tracks.Point, float, str]]  # node, centre, radius, net
+    pads: list[tracks.Obstacle]
+    rect_pads: set[int]  # indices of pads whose copper is their bounding box (rect / roundrect)
+    edges: list[tracks.Obstacle]
+    zones: dict[tuple[str, str], list[list[tracks.Point]]]  # (net, layer) -> polygons
+
+    def obstacles(self) -> list[tracks.Obstacle]:
+        out = [tracks.Obstacle(s.net, frozenset({s.layer}), (s.a, s.b), s.width / 2) for s in self.segs]
+        out += [tracks.Obstacle(net, frozenset(COPPER_LAYERS), (c,), r) for _, c, r, net in self.vias]
+        return out + self.pads
+
+    @functools.cached_property
+    def pads_by_net(self) -> dict[str, list[tracks.Obstacle]]:
+        out: dict[str, list[tracks.Obstacle]] = {}
+        for o in self.pads:
+            out.setdefault(o.net, []).append(o)
+        return out
+
+    def on_pad_or_via(self, p: tracks.Point, net: str, layer: str) -> bool:
+        """Whether a point (a polyline node) lies on a pad or via of its net (no width involved)."""
+        if any(net == v_net and math.dist(p, c) <= r + tracks.EPS for _, c, r, v_net in self.vias):
+            return True
+        return any(layer in o.layers and o.distance(p, p) <= tracks.EPS for o in self.pads_by_net.get(net, []))
+
+    def attached(self, p: tracks.Point, s: tracks.Seg) -> bool:
+        """Whether track end p of s connects to a pad or via the way KiCad sees it.
+
+        A pad takes any track end inside it; a via only a track whose copper covers the via's centre.
+        """
+        if any(s.net == v_net and math.dist(p, c) <= s.width / 2 for _, c, _, v_net in self.vias):
+            return True
+        return any(s.layer in o.layers and o.distance(p, p) <= 0 for o in self.pads_by_net.get(s.net, []))
+
+    def in_zone(self, p: tracks.Point, net: str, layer: str) -> bool:
+        return any(tracks.point_in_polygon(p, poly) for poly in self.zones.get((net, layer), []))
+
+
+def _zone_polygons(zone: list[Node], *, filled: bool) -> list[tuple[str, list[tracks.Point]]]:
+    """(layer, polygon) of a zone: its fill (``filled``) or its outline on each of its layers."""
+    out = []
+    if filled:
+        for poly in sexpr.children(zone, "filled_polygon"):
+            pts = [(_num(xy, 1), _num(xy, 2)) for xy in sexpr.walk(poly) if sexpr.head(xy) == "xy"]
+            out.append((_layer(poly), pts))
+        return out
+    outline = sexpr.child(zone, "polygon")
+    pts = [(_num(xy, 1), _num(xy, 2)) for xy in sexpr.walk(outline or []) if sexpr.head(xy) == "xy"]
+    return [(layer, pts) for layer in _copper_layers(zone)] if pts else []
+
+
+def _copper(pcb: list[Node], *, filled_zones: bool = False) -> _Copper:
+    names = _net_names(pcb)
+    segs = [
+        tracks.Seg(
+            (_num(sexpr.child(s, "start"), 1), _num(sexpr.child(s, "start"), 2)),
+            (_num(sexpr.child(s, "end"), 1), _num(sexpr.child(s, "end"), 2)),
+            _num(sexpr.child(s, "width"), 1),
+            _layer(s),
+            _net_of(s, names),
+            s,
+        )
+        for s in sexpr.children(pcb, "segment")
+    ]
+    vias = []
+    for v in sexpr.children(pcb, "via"):
+        at = sexpr.child(v, "at")
+        vias.append((v, (_num(at, 1), _num(at, 2)), _num(sexpr.child(v, "size"), 1) / 2, _net_of(v, names)))
+    pads: list[tracks.Obstacle] = []
+    rect_pads: set[int] = set()
+    for fp in sexpr.children(pcb, "footprint"):
+        to_board = _fp_to_board(fp)
+        for pad in sexpr.children(fp, "pad"):
+            layers = _copper_layers(pad) if str(pad[2]) != "np_thru_hole" else frozenset(COPPER_LAYERS)
+            if layers:
+                if str(pad[3]) in ("rect", "roundrect") and sexpr.child(pad, "primitives") is None:
+                    rect_pads.add(len(pads))
+                pads.append(
+                    tracks.Obstacle(_net_of(pad, names), layers, tuple(_pad_corners(pad, to_board)), polygon=True)
+                )
+    edges = []
+    for g in pcb:
+        if (
+            isinstance(g, list)
+            and sexpr.head(g) in ("gr_line", "gr_rect", "gr_arc", "gr_poly")
+            and _layer(g) == "Edge.Cuts"
+        ):
+            pts = _graphic_points(g)
+            edges += [tracks.Obstacle("<edge>", frozenset(COPPER_LAYERS), (a, b)) for a, b in itertools.pairwise(pts)]
+    zones: dict[tuple[str, str], list[list[tracks.Point]]] = {}
+    for zone in sexpr.children(pcb, "zone"):
+        if sexpr.child(zone, "keepout") is None:
+            for layer, poly in _zone_polygons(zone, filled=filled_zones):
+                zones.setdefault((_net_of(zone, names), layer), []).append(poly)
+    return _Copper(names, segs, vias, pads, rect_pads, edges, zones)
+
+
+def _source(seg: tracks.Seg) -> list[Node]:
+    """The ``(segment ...)`` node a ``tracks.Seg`` was read from."""
+    assert isinstance(seg.source, list)
+    return seg.source
+
+
+def _segment_node(template: list[Node], a: tracks.Point, b: tracks.Point, width: float) -> list[Node]:
+    node = copy.deepcopy(template)
+    for key, values in (("start", a), ("end", b), ("width", (width,))):
+        child = sexpr.child(node, key)
+        if child is not None:
+            child[1:] = [Sym(_mm(v)) for v in values]
+    uid = sexpr.child(node, "uuid")
+    if uid is not None:  # derived from the content: the same board always gets the same file
+        new = str(
+            uuid.uuid5(uuid.NAMESPACE_OID, f"{uid[1]}:{_mm(a[0])},{_mm(a[1])}:{_mm(b[0])},{_mm(b[1])}:{_mm(width)}")
+        )
+        uid[1] = Sym(new) if isinstance(uid[1], Sym) else new
+    return node
+
+
+CLEAN_ROUNDS = 3
+
+
+def clean_tracks(project: KicadProject) -> list[str]:
+    """Straighten tscircuit's tracks and take out every corner sharper than 135 degrees.
+
+    The autorouter leaves overlapping duplicate routes of one net, polylines of many short
+    pieces, zig-zags inside the pads it connects, spikes where a track runs out and back on
+    itself (an antenna) and acute or 90 degree bends. Net by net (``vibepcb.tracks``):
+    duplicates covered by the net's other copper go; then per polyline between pads, vias
+    and junctions the part inside its end pads is trimmed, duplicate/spike/collinear points
+    go, and sharp corners are cut across or chamfered - every new piece only where it keeps
+    the net-class clearance to other nets' copper and the board-edge clearance. Each change
+    is kept only if the net's pads stay as connected as before (checked per net, else per
+    polyline).
+    """
+    clearance, edge_clearance = _design_clearances(project)
+    totals = {"duplicates": 0, "dropped": 0, "fixed": 0, "left": 0, "kept": 0}
+    for _ in range(CLEAN_ROUNDS):  # a round's own edits can leave new duplicates/corners
+        changed, last = _clean_round(project, clearance, edge_clearance)
+        for key, value in last.items():
+            totals[key] = totals[key] + value if key in ("duplicates", "dropped", "fixed") else value
+        if not changed:
+            break
+    changes = []
+    if totals["duplicates"]:
+        changes.append(
+            f"tracks: removed {totals['duplicates']} track segment(s) lying inside other copper of their net"
+        )
+    if totals["dropped"]:
+        changes.append(
+            f"tracks: dropped {totals['dropped']} redundant polyline point(s) (zig-zags in pads, spikes, straight runs)"
+        )
+    if totals["fixed"]:
+        changes.append(f"tracks: removed {totals['fixed']} sharp corner(s) (cut across or chamfered to 45 deg)")
+    if totals["left"]:
+        changes.append(f"tracks: {totals['left']} sharp corner(s) left - no room to fix, check by eye")
+    if totals["kept"]:
+        changes.append(f"tracks: {totals['kept']} polyline(s) left as routed - cleaning would have cut a connection")
+    return changes
+
+
+def _split_tees(project: KicadProject) -> int:
+    """Give every T-junction a vertex in its through track and snap the ending track onto it.
+
+    Track ends that already sit on a pad or via stay where they are (that is their connection).
+    """
+    copper = _copper(project.pcb)
+    found = [
+        t
+        for t in tracks.tees(copper.segs)
+        if not copper.attached(copper.segs[t[0]].b if t[1] else copper.segs[t[0]].a, copper.segs[t[0]])
+    ]
+    cuts: dict[int, list[tracks.Point]] = {}
+    for i, end, j, q in found:
+        node = sexpr.child(_source(copper.segs[i]), ("start", "end")[end])
+        if node is not None:
+            node[1:] = [Sym(_mm(q[0])), Sym(_mm(q[1]))]
+        cuts.setdefault(j, []).append(q)
+    for j, points in cuts.items():
+        node = _source(copper.segs[j])
+        a, b = ((_num(sexpr.child(node, k), 1), _num(sexpr.child(node, k), 2)) for k in ("start", "end"))
+        chain = [a, *sorted(points, key=lambda p: math.dist(a, p)), b]
+        index = project.pcb.index(node)
+        width = copper.segs[j].width
+        project.pcb[index : index + 1] = [
+            _segment_node(node, p, q, width) for p, q in itertools.pairwise(chain) if math.dist(p, q) > tracks.EPS
+        ]
+    return len(found)
+
+
+def _snap_via_ends(project: KicadProject) -> int:
+    """Move track ends lying inside a via of their net onto the via's centre.
+
+    KiCad connects a track to a via through the via centre anyway; with every end on the
+    centre, two tracks meeting at a via form one polyline whose bend the corner clean-up
+    can work on, instead of two overlapping ends at some angle.
+    """
+    copper = _copper(project.pcb)
+    moved = 0
+    for s in copper.segs:
+        for key, p in (("start", s.a), ("end", s.b)):
+            for _, centre, radius, net in copper.vias:
+                if net == s.net and 0 < math.dist(p, centre) <= min(radius, s.width / 2):
+                    node = sexpr.child(_source(s), key)
+                    if node is not None:
+                        node[1:] = [Sym(_mm(centre[0])), Sym(_mm(centre[1]))]
+                        moved += 1
+                    break
+    return moved
+
+
+def _open_junctions(project: KicadProject, clearance: float, edge_clearance: float) -> int:
+    """Move junctions (3+ tracks meeting, not on a pad/via) whose branches meet at an acute angle.
+
+    All tracks meeting there move their common end together, so nothing disconnects;
+    each moved track must keep its clearances (``tracks.move_junction``).
+    """
+    copper = _copper(project.pcb)
+    obstacles = copper.obstacles()
+    moved = 0
+    for (net, layer, _), users in tracks.junctions(copper.segs).items():
+        j = copper.segs[users[0][0]].b if users[0][1] else copper.segs[users[0][0]].a
+        others = [copper.segs[i].a if end else copper.segs[i].b for i, end in users]
+        if copper.on_pad_or_via(j, net, layer) or tracks.min_branch_angle(j, others) >= tracks.MIN_JUNCTION_DEG:
+            continue
+        relevant = [o for o in obstacles if o.net != net and layer in o.layers]
+        edges = [e for e in copper.edges if layer in e.layers]
+        width = max(copper.segs[i].width for i, _ in users)
+
+        def fits(
+            a: tracks.Point,
+            b: tracks.Point,
+            relevant: list[tracks.Obstacle] = relevant,
+            edges: list[tracks.Obstacle] = edges,
+            width: float = width,
+        ) -> bool:
+            return all(o.distance(a, b) >= clearance + width / 2 for o in relevant) and all(
+                e.distance(a, b) >= edge_clearance + width / 2 for e in edges
+            )
+
+        q = tracks.move_junction(j, others, fits)
+        if q is None:
+            continue
+        for i, end in users:
+            node = sexpr.child(_source(copper.segs[i]), ("start", "end")[end])
+            if node is not None:
+                node[1:] = [Sym(_mm(q[0])), Sym(_mm(q[1]))]
+        moved += 1
+    return moved
+
+
+def _clean_round(project: KicadProject, clearance: float, edge_clearance: float) -> tuple[bool, dict[str, int]]:
+    """One pass of :func:`clean_tracks` over all nets; returns (anything changed, stats)."""
+    totals = {"duplicates": 0, "dropped": 0, "fixed": 0, "left": 0, "kept": 0}
+    changed = _split_tees(project) + _snap_via_ends(project) + _open_junctions(project, clearance, edge_clearance) > 0
+    for net in sorted({s.net for s in _copper(project.pcb).segs}):
+        copper = _copper(project.pcb)  # fresh: earlier nets may have moved
+        segs = [s for s in copper.segs if s.net == net]
+        pads = [o for o in copper.pads if o.net == net]
+        vias = [(centre, radius) for _, centre, radius, via_net in copper.vias if via_net == net]
+        before = tracks.pad_groups(pads, vias, segs)
+
+        def connected(
+            pieces: list[_Piece],
+            pads: list[tracks.Obstacle] = pads,
+            vias: list[tuple[tracks.Point, float]] = vias,
+            before: list[set[int]] = before,
+        ) -> bool:
+            rebuilt = [tracks.Seg(a, b, w, layer, "") for _, a, b, w, layer in pieces]
+            return tracks.still_connected(before, tracks.pad_groups(pads, vias, rebuilt))
+
+        drop: set[int] = set()  # duplicates, each dropped only if the net stays connected without it
+        for i in tracks.redundant(segs):
+            remaining = [(_source(s), s.a, s.b, s.width, s.layer) for j, s in enumerate(segs) if j not in drop | {i}]
+            if connected(remaining):
+                drop.add(i)
+        drop |= _open_loops(copper, segs, drop, connected)
+        result = _clean_net(copper, segs, drop, clearance, edge_clearance)
+        if not connected(result.pieces()):
+            result.choose(connected)
+        if not result.changed():
+            continue
+        index = min(project.pcb.index(_source(s)) for s in segs)
+        for s in segs:
+            project.pcb.remove(_source(s))
+        project.pcb[index:index] = [_segment_node(template, a, b, w) for template, a, b, w, _ in result.pieces()]
+        changed = True
+        for key, value in result.stats().items():
+            totals[key] += value
+    return changed, totals
+
+
+def _open_loops(
+    copper: _Copper, segs: list[tracks.Seg], drop: set[int], connected: Callable[[list[_Piece]], bool]
+) -> set[int]:
+    """Tracks to remove where a net meets itself at a sharp angle (junction or T) on a loop.
+
+    Routing each connection separately leaves loops and lattices of one net; their
+    junctions have sharp angles that no chamfer fixes. A track at such a junction goes,
+    together with whatever is left dangling without it, if the net's pads stay connected.
+    Shortest first; each removal is checked against what is left.
+    """
+    removed: set[int] = set()
+    base = [j for j in range(len(segs)) if j not in drop]
+    for target in [base[k] for k in tracks.sharp_junctions([segs[j] for j in base])]:
+        if target in removed:
+            continue
+        rest_idx = [j for j in base if j not in removed and j != target]
+        rest = [segs[j] for j in rest_idx]
+        gone = {target} | {rest_idx[k] for k in tracks.dangling(rest, copper.attached)}
+        remaining = [
+            (_source(segs[j]), segs[j].a, segs[j].b, segs[j].width, segs[j].layer)
+            for j in base
+            if j not in removed | gone
+        ]
+        if connected(remaining):
+            removed |= gone
+    return removed
+
+
+type _Piece = tuple[list[Node], tracks.Point, tracks.Point, float, str]  # template node, a, b, width, layer
+
+
+@dataclass
+class _ChainEdit:
+    old: list[_Piece]
+    new: list[_Piece]
+    dropped: int
+    fixed: int
+    left: int
+    use_new: bool = True
+
+
+@dataclass
+class _NetClean:
+    fixed_pieces: list[_Piece] = field(default_factory=list)  # duplicates already dropped, untouched loops
+    edits: list[_ChainEdit] = field(default_factory=list)
+    duplicates: int = 0
+
+    def pieces(self) -> list[_Piece]:
+        return self.fixed_pieces + [p for e in self.edits for p in (e.new if e.use_new else e.old)]
+
+    def changed(self) -> bool:
+        return bool(self.duplicates) or any(e.use_new and e.new != e.old for e in self.edits)
+
+    def choose(self, connected: Callable[[list[_Piece]], bool]) -> None:
+        """Apply the polyline edits one by one, keeping each only while the net stays connected."""
+        for edit in self.edits:
+            edit.use_new = False
+        for edit in self.edits:
+            if edit.new != edit.old:
+                edit.use_new = True
+                if not connected(self.pieces()):
+                    edit.use_new = False
+
+    def stats(self) -> dict[str, int]:
+        used = [e for e in self.edits if e.use_new]
+        return {
+            "duplicates": self.duplicates,
+            "dropped": sum(e.dropped for e in used),
+            "fixed": sum(e.fixed for e in used),
+            "left": sum(e.left for e in used) + sum(e.fixed + e.left for e in self.edits if not e.use_new),
+            "kept": sum(1 for e in self.edits if not e.use_new and e.new != e.old),
+        }
+
+
+def _clean_net(
+    copper: _Copper, segs: list[tracks.Seg], duplicates: set[int], clearance: float, edge_clearance: float
+) -> _NetClean:
+    """The cleaned-up tracks of one net without ``duplicates`` (see :func:`clean_tracks`), not yet written to the board."""
+    out = _NetClean()
+    out.duplicates = len(duplicates)
+    kept = [s for i, s in enumerate(segs) if i not in duplicates]
+    min_width = min((s.width for s in copper.segs), default=0.15)
+    obstacles = copper.obstacles()
+
+    def region_of(p: tracks.Point, net: str, layer: str) -> int | None:
+        """Index of the same-net pad/via the point lies in (pads first)."""
+        for i, o in enumerate(copper.pads):
+            if o.net == net and layer in o.layers and o.distance(p, p) <= tracks.EPS:
+                return i
+        for j, (_, centre, radius, via_net) in enumerate(copper.vias):
+            if via_net == net and math.dist(p, centre) <= radius:
+                return len(copper.pads) + j
+        return None
+
+    def pad_region_of(p: tracks.Point, net: str, layer: str) -> int | None:
+        """Like region_of, but rectangular pads only and strictly inside: a track must keep
+        running to a via's centre, and round/oval pads are smaller than the box the pad
+        test uses."""
+        r = region_of(p, net, layer)
+        return r if r is not None and r in copper.rect_pads and copper.pads[r].distance(p, p) <= 0 else None
+
+    def touches(region: int, a: tracks.Point, b: tracks.Point, half_width: float) -> bool:
+        """Whether a piece a-b passing a pad/via still connects to it the way KiCad sees it: over its centre."""
+        centre = copper.pads[region].centre if region < len(copper.pads) else copper.vias[region - len(copper.pads)][1]
+        return tracks.point_seg_distance(centre, a, b) <= half_width - tracks.EPS
+
+    in_chain: set[int] = set()
+    for chain in tracks.chains(kept, lambda p, net, layer: pad_region_of(p, net, layer) is not None):
+        in_chain |= {id(s) for s in chain.segs}
+        fits = tracks.clearance_check(chain, obstacles, copper.edges, clearance, edge_clearance, min_width)
+        region = functools.partial(region_of, net=chain.net, layer=chain.layer)
+
+        def keeps(
+            old: tracks.Point,
+            a: tracks.Point,
+            b: tracks.Point,
+            region: Callable[[tracks.Point], int | None] = region,
+            chain: tracks.Chain = chain,
+        ) -> bool:
+            r = region(old)
+            return r is None or touches(r, a, b, chain.width_at(a, b) / 2)
+
+        original = chain.points
+        in_pad = functools.partial(pad_region_of, net=chain.net, layer=chain.layer)
+        end_vias = [
+            (c, r)
+            for _, c, r, net in copper.vias
+            if net == chain.net and min(math.dist(c, original[0]), math.dist(c, original[-1])) <= tracks.EPS
+        ]
+
+        def in_end_via(p: tracks.Point, end_vias: list[tuple[tracks.Point, float]] = end_vias) -> bool:
+            return any(math.dist(p, c) <= r for c, r in end_vias)
+
+        points = tracks.simplify(tracks.drop_inside_start(tracks.trim_ends(original, in_pad), in_end_via), keeps)
+        old_pieces = set(itertools.pairwise(original))
+        if not all(fits(a, b) for a, b in itertools.pairwise(points) if (a, b) not in old_pieces):
+            points = tracks.simplify(original, keeps)  # straightening would get too close to something
+            if not all(fits(a, b) for a, b in itertools.pairwise(points) if (a, b) not in old_pieces):
+                points = original
+        sharp = len(tracks.sharp_corners(points))
+        dropped = len(original) - len(points)
+        points = tracks.round_off_corners(points, fits, keeps)
+        remaining = len(tracks.sharp_corners(points))
+        old: list[_Piece] = [(_source(s), s.a, s.b, s.width, s.layer) for s in chain.segs]
+        if points == original:
+            out.edits.append(_ChainEdit(old, old, 0, 0, remaining))
+            continue
+        template = _source(chain.segs[0])
+        new: list[_Piece] = [(template, a, b, chain.width_at(a, b), chain.layer) for a, b in itertools.pairwise(points)]
+        out.edits.append(_ChainEdit(old, new, dropped, sharp - remaining, remaining))
+    out.fixed_pieces = [(_source(s), s.a, s.b, s.width, s.layer) for s in kept if id(s) not in in_chain]  # closed loops
+    return out
+
+
+def remove_antennas(project: KicadProject, *, filled_zones: bool = False) -> list[str]:
+    """Delete track stubs with a loose end and vias that connect fewer than two layers.
+
+    A loose end is one that touches no pad, via, other track of its net or (for a poured
+    net) its zone. Removal repeats until nothing is left dangling.
+    """
+    copper = _copper(project.pcb, filled_zones=filled_zones)
+
+    def connected(p: tracks.Point, s: tracks.Seg) -> bool:
+        return copper.attached(p, s) or copper.in_zone(p, s.net, s.layer)
+
+    removed_segs = [copper.segs[i] for i in tracks.dangling(copper.segs, connected)]
+    for s in removed_segs:
+        project.pcb.remove(_source(s))
+    alive = [s for s in copper.segs if all(s is not r for r in removed_segs)]
+
+    removed_vias = 0
+    for node, centre, radius, net in copper.vias:
+        layers = {
+            layer
+            for layer in COPPER_LAYERS
+            if copper.in_zone(centre, net, layer)
+            or any(
+                s.net == net and s.layer == layer and tracks.point_seg_distance(centre, s.a, s.b) <= s.width / 2
+                for s in alive
+            )
+            or any(o.net == net and layer in o.layers and o.distance(centre, centre) <= radius for o in copper.pads)
+        }
+        if len(layers) < 2:
+            project.pcb.remove(node)
+            removed_vias += 1
+    changes = []
+    if removed_segs:
+        changes.append(f"antennas: removed {len(removed_segs)} dangling track segment(s)")
+    if removed_vias:
+        changes.append(f"antennas: removed {removed_vias} via(s) connecting fewer than two layers")
+    return changes
+
+
+SHARP_CORNER_RULE = "no acute track angles"
+STRICT_SEVERITIES = {"track_dangling": "error", "via_dangling": "error", "track_angle": "error"}
+
+
+def strict_track_rules(project: KicadProject) -> list[str]:
+    """Make KiCad DRC fail on sharp track corners and on antennas (dangling tracks/vias).
+
+    KiCad 10's ``track_angle`` (interior angle, 180 = straight) applies one minimum to
+    plain bends and to the branches of junctions alike; three branches can't all be 135
+    degrees apart, so KiCad gets "no acute angles" and the 135 degree bend minimum is
+    checked by :func:`sharp_corners` (``check``). KiCad only warns about dangling tracks
+    and vias by default.
+    """
+    changes = []
+    dru = project.pcb_path.with_suffix(".kicad_dru")
+    text = dru.read_text(encoding="utf-8") if dru.exists() else "(version 1)\n"
+    if SHARP_CORNER_RULE not in text:
+        minimum = tracks.MIN_JUNCTION_DEG - 1
+        text += f'(rule "{SHARP_CORNER_RULE}"\n  (constraint track_angle (min {minimum:g})))\n'
+        dru.write_text(text, encoding="utf-8")
+        changes.append(f"{dru.name}: track angles >= {minimum:g} deg")
+    pro = project.pcb_path.with_suffix(".kicad_pro")
+    if pro.exists():
+        data = json.loads(pro.read_text(encoding="utf-8"))
+        severities = data.setdefault("board", {}).setdefault("design_settings", {}).setdefault("rule_severities", {})
+        missing = {k: v for k, v in STRICT_SEVERITIES.items() if severities.get(k) != v}
+        if missing:
+            severities.update(missing)
+            pro.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+            changes.append(f"{pro.name}: {', '.join(sorted(missing))} -> error")
+    return changes
+
+
+POUR_SAMPLE_MM = 0.05
+
+
+KEEP_RADIUS_MM = 1.5
+
+
+def prune_pour_tracks(project: KicadProject, keep_near: list[tracks.Point] | None = None) -> list[str]:
+    """Remove tracks of a poured net that the (KiCad-filled) pour already provides.
+
+    tscircuit routes every GND connection as a track before it pours; on a board with GND
+    pours those tracks are redundant, take routing room and short-circuit the thermal
+    reliefs. A track goes when every point along it lies in its net's fill on that layer,
+    in one of its net's pads or within the thermal gap around such a pad (so the pad then
+    joins the pour through its spokes). Tracks through gaps the pour cannot reach stay.
+    Tracks within ``KEEP_RADIUS_MM`` of a ``keep_near`` point stay (``check`` passes the
+    spots KiCad reported unconnected after an earlier attempt, e.g. where a pour island only
+    held on through the track). Needs zone fills, i.e. runs after KiCad's refill (``check``).
+    """
+    copper = _copper(project.pcb, filled_zones=True)
+    gap = THERMAL_GAP_MM + 0.05
+
+    def covered(p: tracks.Point, s: tracks.Seg) -> bool:
+        if copper.in_zone(p, s.net, s.layer):
+            return True
+        return any(o.net == s.net and s.layer in o.layers and o.distance(p, p) <= gap for o in copper.pads)
+
+    pruned = 0
+    for s in copper.segs:
+        if not copper.zones.get((s.net, s.layer)):
+            continue
+        if any(tracks.point_seg_distance(k, s.a, s.b) <= KEEP_RADIUS_MM for k in keep_near or []):
+            continue
+        n = max(2, math.ceil(math.dist(s.a, s.b) / POUR_SAMPLE_MM) + 1)
+        samples = [
+            (s.a[0] + (s.b[0] - s.a[0]) * k / (n - 1), s.a[1] + (s.b[1] - s.a[1]) * k / (n - 1)) for k in range(n)
+        ]
+        if all(covered(p, s) for p in samples):
+            project.pcb.remove(_source(s))
+            pruned += 1
+    changes = [f"pours: removed {pruned} track segment(s) the pour already connects"] if pruned else []
+    return changes + remove_antennas(project, filled_zones=True)
+
+
+def sharp_corners(project: KicadProject) -> list[tuple[str, tracks.Point, float]]:
+    """``(net, position, interior angle)`` of every bend sharper than 135 deg between exactly two tracks.
+
+    The bend half of the corner rule (KiCad's DRC covers acute angles, see
+    :func:`strict_track_rules`); uses the tolerance KiCad needs for its own rounding.
+    Bends lying on a pad or via of their net don't count: the pad copper covers them.
+    """
+    copper = _copper(project.pcb)
+    ends: dict[tuple[str, str, tuple[int, int]], list[tuple[tracks.Point, tracks.Point]]] = {}
+    for s in copper.segs:
+        ends.setdefault((s.net, s.layer, tracks._key(s.a)), []).append((s.a, s.b))
+        ends.setdefault((s.net, s.layer, tracks._key(s.b)), []).append((s.b, s.a))
+    out = []
+    for (net, layer, _), pairs in ends.items():
+        if len(pairs) == 2:
+            (p, a), (_, b) = pairs
+            angle = tracks.interior_angle(a, p, b)
+            if angle < tracks.MIN_CORNER_DEG - 1 and not copper.on_pad_or_via(p, net, layer):
+                out.append((net, p, angle))
+    return sorted(out)
+
+
+def apply_post_fill(project: KicadProject, keep_near: list[tracks.Point] | None = None) -> list[str]:
+    """Fixes that need KiCad's zone fill (run by ``check`` after the refill); saves when anything changed."""
+    changes = prune_pour_tracks(project, keep_near)
+    if changes:  # the pruned GND tracks leave room for corners that had none before
+        changes += [f"second pass: {c}" for c in clean_tracks(project) + remove_antennas(project, filled_zones=True)]
+        sexpr.dump(project.pcb, project.pcb_path)
+    return changes
+
+
+type Fix = Callable[[KicadProject], list[str]]
+
+FIXES: dict[str, Fix] = {
+    "rename_auto_nets": rename_auto_nets,
+    "propagate_split_pad_nets": propagate_split_pad_nets,
+    "drop_tracks_inside_pads": drop_tracks_inside_pads,
+    "clean_tracks": clean_tracks,
+    "remove_antennas": remove_antennas,
+    "drop_npth_edge_cuts": drop_npth_edge_cuts,
+    "allow_footprints_in_keepouts": allow_footprints_in_keepouts,
+    "standard_board_thickness": standard_board_thickness,
+    "fix_value_equals_reference": fix_value_equals_reference,
+    "fill_schematic_footprints": fill_schematic_footprints,
+    "schematic_net_labels": schematic_net_labels,
+    "schematic_no_connects": schematic_no_connects,
+    "schematic_power_symbols": schematic_power_symbols,
+    "add_part_numbers": add_part_numbers,
+    "link_footprint_library": link_footprint_library,
+    "footprint_internal_clearance_rule": footprint_internal_clearance_rule,
+    "zone_thermal_reliefs": zone_thermal_reliefs,
+    "thermal_spoke_rule": thermal_spoke_rule,
+    "strict_track_rules": strict_track_rules,
+    "place_reference_designators": place_reference_designators,
+    "fit_schematic_sheet": fit_schematic_sheet,
+}
+
+
+def apply_all(project: KicadProject, skip: set[str] | None = None) -> dict[str, list[str]]:
+    """Run every registered fix (except ``skip``), save, and return the changes per fix."""
+    report = {name: fix(project) for name, fix in FIXES.items() if name not in (skip or set())}
+    project.save()
+    return report
