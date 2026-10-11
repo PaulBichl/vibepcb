@@ -1037,7 +1037,9 @@ def fit_schematic_sheet(project: KicadProject) -> list[str]:
 
 # --- track geometry: copper extraction for vibepcb.tracks ---------------------------
 
-COPPER_LAYERS = ("F.Cu", "B.Cu")
+# every copper layer KiCad knows: "*.Cu" pads, vias and the board edge reach the inner layers
+# of 4+ layer boards too (a layer that does not exist simply carries no copper)
+COPPER_LAYERS = ("F.Cu", *(f"In{i}.Cu" for i in range(1, 31)), "B.Cu")
 DEFAULT_CLEARANCE_MM = 0.2
 DEFAULT_EDGE_CLEARANCE_MM = 0.5
 

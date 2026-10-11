@@ -345,6 +345,27 @@ def test_strict_track_rules(project: fixes.KicadProject) -> None:
     assert fixes.strict_track_rules(project) == []  # idempotent
 
 
+def test_remove_antennas_keeps_inner_layer_connections(project: fixes.KicadProject) -> None:
+    """A via joining an F.Cu track to an In2.Cu track (4-layer board) is a real connection."""
+    copper = fixes._copper(project.pcb)
+    tht = next(o for o in copper.pads if o.net and {"F.Cu", "B.Cu"} <= o.layers)  # through-hole
+    smd = next(o for o in copper.pads if o.net == tht.net and o.layers == {"F.Cu"})
+    net = next(n[1] for n in sexpr.children(project.pcb, "net") if len(n) > 2 and str(n[2]) == tht.net)
+    (sx, sy), (tx, ty) = smd.centre, tht.centre
+    vx, vy = (sx + tx) / 2, (sy + ty) / 2 + 3
+    for layer, (ax, ay), (bx, by) in (("F.Cu", (sx, sy), (vx, vy)), ("In2.Cu", (vx, vy), (tx, ty))):
+        project.pcb.append(
+            sexpr.loads(f"(segment (start {ax} {ay}) (end {bx} {by}) (width 0.2) (layer {layer}) (net {net}))")
+        )
+    project.pcb.append(sexpr.loads(f"(via (at {vx} {vy}) (size 0.6) (drill 0.3) (layers F.Cu B.Cu) (net {net}))"))
+    before = len(list(sexpr.children(project.pcb, "segment"))), len(list(sexpr.children(project.pcb, "via")))
+
+    fixes.remove_antennas(project)
+
+    after = len(list(sexpr.children(project.pcb, "segment"))), len(list(sexpr.children(project.pcb, "via")))
+    assert after == before
+
+
 def test_prune_pour_tracks_drops_tracks_inside_the_fill(project: fixes.KicadProject) -> None:
     copper = fixes._copper(project.pcb)
     target = copper.segs[0]
