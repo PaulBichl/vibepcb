@@ -26,6 +26,7 @@ CHAR_W = 1.0  # width per label/pin-name character at 1.27 mm (generous)
 ROW_WIDTH = 1050.0  # mm, flow width (fit_schematic_sheet picks the paper afterwards)
 CELL_GAP = 5.08
 ROW_GAP = 7.62
+INTERNAL_PORT = "_internal_"
 NAMESPACE = uuid.UUID("5b0e6c3e-6f43-4a51-9f7b-2c3f6d1e8a10")
 
 VALUE_KEYS = ("display_resistance", "display_capacitance", "display_inductance", "manufacturer_part_number")
@@ -87,7 +88,9 @@ def generate(circuit_json: Path, stem: str) -> str:
     nets = _nets(circuit)
     ports: dict[str, list[dict[str, Any]]] = {}
     for e in circuit:
-        if e.get("type") == "source_port":
+        # "<pin>_internal_<n>": tscircuit's copies of a pin for extra pads of it (split / exposed
+        # pads, 4-pad switches); the pin itself carries the net
+        if e.get("type") == "source_port" and INTERNAL_PORT not in str(e.get("name")):
             ports.setdefault(e["source_component_id"], []).append(e)
     comps = [e for e in circuit if e.get("type") == "source_component" and ports.get(e["source_component_id"])]
     root = _uid(stem, "root")

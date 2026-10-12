@@ -32,6 +32,7 @@ def _circuit(tmp_path: Path) -> Path:
         port(2, 1, "VCC", 0),
         port(3, 1, "OUT", 1),
         port(4, 1, "NC", 2),  # only on a net key of its own: not connected
+        port(5, 1, "pin1_internal_1", None),  # tscircuit's copy of a pin for an extra pad: no symbol pin
         {"type": "source_net", "name": "VCC", "subcircuit_connectivity_map_key": f"{KEY}0"},
         {"type": "source_trace", "connected_source_port_ids": ["p1", "p3"]},
     ]
@@ -55,6 +56,7 @@ def test_generate(tmp_path: Path) -> None:
 
     labels = sorted(str(n[1]) for n in sexpr.children(sch, "global_label"))
     assert labels == ["Net-(R1-Pad2)", "Net-(R1-Pad2)", "VCC", "VCC"]  # the NC pin gets no label
+    assert len(fixes._pin_positions(sch)) == 5  # R1: 2, U1: VCC, OUT, NC
     # every label sits on a pin end: same coordinates as fixes see the pins
     pins = fixes._pin_positions(sch)
     ends = {(round(x, 3), round(y, 3)) for x, y in pins.values()}

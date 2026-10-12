@@ -507,3 +507,21 @@ def test_drop_tracks_inside_pads_keeps_run_to_pad_edge(project: fixes.KicadProje
     project.pcb += [run, out]
     assert fixes.drop_tracks_inside_pads(project) == []  # dropping it would leave `out` ending on the edge
     assert run in project.pcb
+
+
+def test_relocate_vias(project: fixes.KicadProject) -> None:
+    assert fixes.relocate_vias(project) == []
+    # a GND via (net 2) overlapping J1 pad 1 (VCC, 1.5 mm square at (92.73, 100), edge x = 93.48)
+    via = sexpr.loads("(via (at 93.6 100) (size 0.6) (drill 0.3) (layers F.Cu B.Cu) (net 2))")
+    track = sexpr.loads("(segment (start 93.6 100) (end 93.6 103) (width 0.2) (layer B.Cu) (net 2))")
+    project.pcb += [via, track]
+    changes = fixes.relocate_vias(project)
+    assert len(changes) == 1
+    assert "clearance" in changes[0]
+    at, start = sexpr.child(via, "at"), sexpr.child(track, "start")
+    assert at is not None
+    assert start is not None
+    x, y = float(str(at[1])), float(str(at[2]))
+    assert (float(str(start[1])), float(str(start[2]))) == (x, y)  # the track end moved along
+    assert max(x - 93.48, abs(y - 100) - 0.75) >= 0.3 + 0.2 - 1e-6  # via copper >= clearance from the pad
+    assert fixes.relocate_vias(project) == []

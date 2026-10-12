@@ -1695,6 +1695,94 @@ def _clean_net(
     return out
 
 
+VIA_MOVE_STEPS_MM = tuple(round(0.05 * k, 2) for k in range(1, 41))  # up to 2 mm
+VIA_MOVE_DIRECTIONS = 32
+
+
+def relocate_vias(project: KicadProject) -> list[str]:
+    """Move vias that sit too close to other nets' copper to the nearest spot that keeps clearance.
+
+    In crowded fan-outs (an ESP32 module's 0.85 mm pitch pad rows) the autorouter places
+    vias against or onto neighbouring pads: shorts, hole-clearance and mask-bridge errors.
+    The via moves (nearest first, 32 directions, up to 2 mm) together with the ends of its
+    net's tracks that meet it; the via and every moved piece must keep the board clearance
+    to other nets and the edge clearance to the outline, else the via stays.
+    """
+    clearance, edge_clearance = _design_clearances(project)
+    copper = _copper(project.pcb)
+    obstacles = copper.obstacles()
+
+    def crowded(centre: tracks.Point, radius: float, net: str) -> bool:
+        return any(
+            o.net != net and o.distance(centre, centre) < radius + clearance - tracks.EPS / 10 for o in obstacles
+        )
+
+    todo = [node for node, centre, radius, net in copper.vias if crowded(centre, radius, net)]
+    changes = []
+    for via in todo:
+        copper = _copper(project.pcb)  # earlier moves changed the copper
+        obstacles = copper.obstacles()
+        node, centre, radius, net = next(v for v in copper.vias if v[0] is via)
+        others = [o for o in obstacles if o.net != net]
+        ends = [  # (segment, index of its end at the via, far end)
+            (s, k, (s.b if k == 0 else s.a))
+            for s in copper.segs_by_net.get(net, [])
+            for k, e in enumerate((s.a, s.b))
+            if math.dist(e, centre) <= radius
+        ]
+
+        def fits(
+            q: tracks.Point,
+            others: list[tracks.Obstacle] = others,
+            radius: float = radius,
+            ends: list[tuple[tracks.Seg, int, tracks.Point]] = ends,
+            edges: list[tracks.Obstacle] = copper.edges,
+        ) -> bool:
+            if any(o.distance(q, q) < radius + clearance for o in others):
+                return False
+            if any(e.distance(q, q) < radius + edge_clearance for e in edges):
+                return False
+            for s, _, far in ends:
+                half = s.width / 2
+                near = [o for o in others if s.layer in o.layers]
+                if any(o.distance(q, far) < half + clearance for o in near):
+                    return False
+                if any(e.distance(q, far) < half + edge_clearance for e in edges if s.layer in e.layers):
+                    return False
+            return True
+
+        target = next(
+            (
+                q
+                for step in VIA_MOVE_STEPS_MM
+                for k in range(VIA_MOVE_DIRECTIONS)
+                if fits(
+                    q := (
+                        centre[0] + step * math.cos(2 * math.pi * k / VIA_MOVE_DIRECTIONS),
+                        centre[1] + step * math.sin(2 * math.pi * k / VIA_MOVE_DIRECTIONS),
+                    )
+                )
+            ),
+            None,
+        )
+        if target is None:
+            changes.append(
+                f"via {net} at ({_mm(centre[0])}, {_mm(centre[1])}): too close to other copper, no room to move"
+            )
+            continue
+        at = sexpr.child(node, "at")
+        assert at is not None
+        at[1:3] = [Sym(_mm(target[0])), Sym(_mm(target[1]))]
+        for s, k, _ in ends:
+            end = sexpr.child(_source(s), "start" if k == 0 else "end")
+            assert end is not None
+            end[1:3] = [Sym(_mm(target[0])), Sym(_mm(target[1]))]
+        changes.append(
+            f"via {net} at ({_mm(centre[0])}, {_mm(centre[1])}) -> ({_mm(target[0])}, {_mm(target[1])}): clearance"
+        )
+    return changes
+
+
 def remove_antennas(project: KicadProject, *, filled_zones: bool = False) -> list[str]:
     """Delete track stubs with a loose end and vias that connect fewer than two layers.
 
@@ -1845,6 +1933,7 @@ FIXES: dict[str, Fix] = {
     "propagate_split_pad_nets": propagate_split_pad_nets,
     "repair_zero_width_tracks": repair_zero_width_tracks,
     "drop_tracks_inside_pads": drop_tracks_inside_pads,
+    "relocate_vias": relocate_vias,
     "clean_tracks": clean_tracks,
     "remove_antennas": remove_antennas,
     "drop_npth_edge_cuts": drop_npth_edge_cuts,
