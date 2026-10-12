@@ -93,9 +93,11 @@ def test_pad_groups_follow_kicad_connection_rules() -> None:
     p2 = Obstacle("N", LAYERS, ((4.5, -0.5), (5.5, -0.5), (5.5, 0.5), (4.5, 0.5)), polygon=True)
     joined = tracks.pad_groups([p1, p2], [], [seg((0, 0), (5, 0))])
     assert joined == [{0, 1}]
-    # a track merely passing a via's edge does not connect to it; over its centre it does
+    # a track end connects to a via while its copper overlaps the via (measured in KiCad 10:
+    # 0.15 mm track, 0.3 mm via radius: connected at 0.37 mm from the centre, not at 0.39 mm)
     via = [((2.5, 1.0), 0.3)]
-    assert len(tracks.pad_groups([p1, p2], via, [seg((0, 0), (2.5, 0.8)), seg((2.5, 1.0), (5, 0))])) == 2
+    assert tracks.pad_groups([p1, p2], via, [seg((0, 0), (2.5, 0.8)), seg((2.5, 1.0), (5, 0))]) == [{0, 1}]
+    assert len(tracks.pad_groups([p1, p2], via, [seg((0, 0), (2.5, 0.5)), seg((2.5, 1.0), (5, 0))])) == 2
     assert tracks.pad_groups([p1, p2], via, [seg((0, 0), (2.5, 1.0)), seg((2.5, 1.0), (5, 0))]) == [{0, 1}]
     assert tracks.still_connected([{0, 1}], [{0, 1}])
     assert not tracks.still_connected([{0, 1}], [{0}, {1}])
@@ -130,3 +132,12 @@ def test_obstacle_distance() -> None:
     assert box.distance((0.5, 0.5), (0.5, 0.5)) == 0
     assert math.isclose(box.distance((2, 0), (2, 1)), 1)
     assert box.distance((10, 10), (11, 11)) > tracks.FAR_MM  # far away: lower bound only
+
+
+def test_on_track_body_ignores_end_caps() -> None:
+    # a 0.8 mm strap ending 0.21 mm short of a pad centre: the round cap covers the centre,
+    # but KiCad does not connect them (seen on an ESP32 module's GND pads)
+    assert not tracks.on_track_body((0.0, 0.0), (0.0, 0.2125), (0.0, 0.65), 0.4)
+    assert tracks.on_track_body((0.0, 0.3), (0.0, 0.2125), (0.0, 0.65), 0.4)
+    assert tracks.on_track_body((0.3, 0.3), (0.0, 0.2125), (0.0, 0.65), 0.4)
+    assert not tracks.on_track_body((0.5, 0.3), (0.0, 0.2125), (0.0, 0.65), 0.4)

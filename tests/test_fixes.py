@@ -498,3 +498,12 @@ def test_fast_source(tmp_path: Path) -> None:
     assert f'from "{board / "imports"}"' in text
     source.write_text('<board autorouterEffortLevel="10x" width="1mm">')
     assert 'autorouterEffortLevel="2x"' in tscircuit.fast_source(source, tmp_path / "fast").read_text()
+
+
+def test_drop_tracks_inside_pads_keeps_run_to_pad_edge(project: fixes.KicadProject) -> None:
+    # J1 pad 1 (VCC = net 1): 1.5 mm square centred on (92.73, 100), right edge at x = 93.48
+    run = sexpr.loads("(segment (start 92.73 100) (end 93.48 100) (width 0.2) (layer F.Cu) (net 1))")
+    out = sexpr.loads("(segment (start 93.48 100) (end 96 100) (width 0.2) (layer F.Cu) (net 1))")
+    project.pcb += [run, out]
+    assert fixes.drop_tracks_inside_pads(project) == []  # dropping it would leave `out` ending on the edge
+    assert run in project.pcb

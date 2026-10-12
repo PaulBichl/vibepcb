@@ -95,6 +95,30 @@ def point_seg_distance(p: Point, a: Point, b: Point) -> float:
     return math.dist(p, (a[0] + t * ab[0], a[1] + t * ab[1]))
 
 
+def via_takes(centre: Point, radius: float, s: Seg) -> bool:
+    """Whether KiCad connects track ``s`` to a via: its copper over the via centre, or an end
+    whose copper overlaps the via (measured: connected up to radius + half width; EPS margin)."""
+    half = s.width / 2
+    return point_seg_distance(centre, s.a, s.b) <= half or min(math.dist(centre, s.a), math.dist(centre, s.b)) <= (
+        radius + half - EPS
+    )
+
+
+def on_track_body(p: Point, a: Point, b: Point, half: float) -> bool:
+    """``p`` within ``half`` of segment a-b, not counting the round end caps.
+
+    KiCad connects a pad to a track whose body crosses the pad centre; a centre covered only
+    by the track's end cap (track ending just short of the pad) is not connected.
+    """
+    ab, ap = _sub(b, a), _sub(p, a)
+    length2 = ab[0] ** 2 + ab[1] ** 2
+    if length2 == 0:
+        return False
+    length = math.sqrt(length2)
+    along = (ap[0] * ab[0] + ap[1] * ab[1]) / length
+    return -EPS <= along <= length + EPS and point_seg_distance(p, a, b) <= half
+
+
 def seg_seg_distance(a: Point, b: Point, c: Point, d: Point) -> float:
     d1, d2, d3, d4 = (
         _cross(_sub(b, a), _sub(c, a)),
@@ -480,8 +504,8 @@ def pad_groups(pads: list[Obstacle], vias: list[tuple[Point, float]], segs: list
     """Which of one net's pads are joined by its tracks and vias (pours not counted).
 
     Connections as KiCad makes them: a track end inside a pad or a pad centre on a track
-    (of a layer it is on); a via centre on a track (a track end merely inside a via is not
-    enough); a track end on another track of the same layer; a via inside a pad.
+    (of a layer it is on); a track over a via's centre or ending on the via's copper
+    (:func:`via_takes`); a track end on another track of the same layer; a via inside a pad.
     """
     n_pads, n_vias = len(pads), len(vias)
     parent = list(range(n_pads + n_vias + len(segs)))
@@ -511,11 +535,11 @@ def pad_groups(pads: list[Obstacle], vias: list[tuple[Point, float]], segs: list
         for i in pad_index.overlapping(sx0, sy0, sx1, sy1):
             pad = pads[i]
             if s.layer in pad.layers and (
-                any(pad.distance(e, e) <= 0 for e in (s.a, s.b)) or point_seg_distance(centres[i], s.a, s.b) <= half
+                any(pad.distance(e, e) <= 0 for e in (s.a, s.b)) or on_track_body(centres[i], s.a, s.b, half)
             ):
                 union(node, i)
         for v, (centre, radius) in enumerate(vias):
-            if sx0 <= centre[0] <= sx1 and sy0 <= centre[1] <= sy1 and point_seg_distance(centre, s.a, s.b) <= half:
+            if via_takes(centre, radius, s):
                 union(node, n_pads + v)
         for e in (s.a, s.b):
             for m in seg_index.at(e, k):

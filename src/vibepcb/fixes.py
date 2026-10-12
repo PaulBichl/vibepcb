@@ -205,11 +205,17 @@ def repair_zero_width_tracks(project: KicadProject) -> list[str]:
     return changes
 
 
+PAD_EDGE_MARGIN_MM = 0.05
+
+
 def drop_tracks_inside_pads(project: KicadProject) -> list[str]:
     """Remove track segments lying entirely within a pad of their own net.
 
     tscircuit can emit a stub (seen: 0.05 mm wide) inside a custom-shaped pad when it
     routes to it; it adds no connectivity but fails KiCad's minimum track width check.
+    A run of in-pad segments that a track outside the pad continues from at (nearly) the pad
+    edge stays: dropping it would leave that track ending on the edge, which KiCad may or may
+    not connect; :func:`clean_tracks` trims such runs to end properly inside the pad.
     """
     pads_by_net: dict[str, list[tuple[str, list[Node], list[Node]]]] = {}
     for fp in sexpr.children(project.pcb, "footprint"):
@@ -219,19 +225,66 @@ def drop_tracks_inside_pads(project: KicadProject) -> list[str]:
             if net is not None:
                 pads_by_net.setdefault(str(net[1]), []).append((ref, fp, pad))
 
-    dropped: dict[str, int] = {}
-    for seg in list(sexpr.children(project.pcb, "segment")):
+    def ends(seg: list[Node]) -> list[tuple[str, str, float, float]]:
+        net, layer = sexpr.child(seg, "net"), sexpr.child(seg, "layer")
+        key = (str(net[1]) if net else "", str(layer[1]) if layer else "")
+        return [
+            (*key, round(_num(sexpr.child(seg, k), 1), 4), round(_num(sexpr.child(seg, k), 2), 4))
+            for k in ("start", "end")
+        ]
+
+    segs = list(sexpr.children(project.pcb, "segment"))
+    inside: dict[int, tuple[str, int, list[Node], list[Node]]] = {}  # id(seg) -> (ref, id(pad), fp, pad)
+    for seg in segs:
         net, start, end = sexpr.child(seg, "net"), sexpr.child(seg, "start"), sexpr.child(seg, "end")
-        if net is None or start is None or end is None:
-            continue
         layer = sexpr.child(seg, "layer")
+        if net is None or start is None or end is None or layer is None:
+            continue
         for ref, fp, pad in pads_by_net.get(str(net[1]), []):
-            if layer is None or not _pad_on_layer(pad, str(layer[1])):
+            if not _pad_on_layer(pad, str(layer[1])):
                 continue  # a track merely passing under/over an SMD pad on the other side
             if all(_inside_pad(fp, pad, _num(p, 1), _num(p, 2)) for p in (start, end)):
-                project.pcb.remove(seg)
-                dropped[ref] = dropped.get(ref, 0) + 1
+                inside[id(seg)] = (ref, id(pad), fp, pad)
                 break
+
+    at_end: dict[tuple[str, str, float, float], list[list[Node]]] = {}
+    for seg in segs:
+        for e in ends(seg):
+            at_end.setdefault(e, []).append(seg)
+    # runs of in-pad segments of one pad, joined end to end; a run touching any other track stays
+    run_of = {id(seg): id(seg) for seg in segs if id(seg) in inside}
+
+    def find(k: int) -> int:
+        while run_of[k] != k:
+            run_of[k] = run_of[run_of[k]]
+            k = run_of[k]
+        return k
+
+    for group in at_end.values():
+        members = [s for s in group if id(s) in inside]
+        for a, b in itertools.pairwise(members):
+            if inside[id(a)][1] == inside[id(b)][1]:
+                run_of[find(id(a))] = find(id(b))
+
+    def near_edge(point: tuple[str, str, float, float], fp: list[Node], pad: list[Node]) -> bool:
+        x, y, m = point[2], point[3], PAD_EDGE_MARGIN_MM
+        return not all(_inside_pad(fp, pad, x + dx, y + dy) for dx, dy in ((m, 0), (-m, 0), (0, m), (0, -m)))
+
+    anchored = {
+        find(id(s))
+        for point, group in at_end.items()
+        for s in group
+        if id(s) in inside
+        and any(id(o) not in inside or inside[id(o)][1] != inside[id(s)][1] for o in group)
+        and near_edge(point, inside[id(s)][2], inside[id(s)][3])
+    }
+
+    dropped: dict[str, int] = {}
+    for seg in segs:
+        if id(seg) in inside and find(id(seg)) not in anchored:
+            project.pcb.remove(seg)
+            ref = inside[id(seg)][0]
+            dropped[ref] = dropped.get(ref, 0) + 1
     return [f"{ref}: dropped {n} track stub(s) inside its own pads" for ref, n in sorted(dropped.items())]
 
 
@@ -1134,6 +1187,19 @@ def _copper_layers(node: list[Node]) -> frozenset[str]:
     return frozenset(layer for layer in COPPER_LAYERS if layer in names)
 
 
+DEFAULT_MIN_TRACK_WIDTH_MM = 0.15
+
+
+def _design_min_track_width(project: KicadProject) -> float:
+    """The board's minimum track width (design rules), the floor for necking tracks down."""
+    try:
+        data = json.loads(project.pcb_path.with_suffix(".kicad_pro").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return DEFAULT_MIN_TRACK_WIDTH_MM
+    rules = data.get("board", {}).get("design_settings", {}).get("rules", {})
+    return float(rules.get("min_track_width", DEFAULT_MIN_TRACK_WIDTH_MM))
+
+
 def _design_clearances(project: KicadProject) -> tuple[float, float]:
     """(copper clearance, copper-to-edge clearance) from the project's default net class / rules."""
     pro = project.pcb_path.with_suffix(".kicad_pro")
@@ -1196,9 +1262,10 @@ class _Copper:
     def attached(self, p: tracks.Point, s: tracks.Seg) -> bool:
         """Whether track end p of s connects to a pad or via the way KiCad sees it.
 
-        A pad takes any track end inside it; a via only a track whose copper covers the via's centre.
+        A pad takes any track end inside it; a via a track end whose copper overlaps it (see
+        :func:`tracks.via_takes`).
         """
-        if any(math.dist(p, c) <= s.width / 2 for c, _ in self.vias_by_net.get(s.net, [])):
+        if any(math.dist(p, c) <= r + s.width / 2 - tracks.EPS for c, r in self.vias_by_net.get(s.net, [])):
             return True
         index = self.pad_index_by_net.get(s.net)
         if index is None:
@@ -1308,9 +1375,10 @@ def clean_tracks(project: KicadProject) -> list[str]:
     polyline).
     """
     clearance, edge_clearance = _design_clearances(project)
+    min_width = _design_min_track_width(project)
     totals = {"duplicates": 0, "dropped": 0, "fixed": 0, "left": 0, "kept": 0}
     for _ in range(CLEAN_ROUNDS):  # a round's own edits can leave new duplicates/corners
-        changed, last = _clean_round(project, clearance, edge_clearance)
+        changed, last = _clean_round(project, clearance, edge_clearance, min_width)
         for key, value in last.items():
             totals[key] = totals[key] + value if key in ("duplicates", "dropped", "fixed") else value
         if not changed:
@@ -1423,7 +1491,9 @@ def _open_junctions(project: KicadProject, clearance: float, edge_clearance: flo
     return moved
 
 
-def _clean_round(project: KicadProject, clearance: float, edge_clearance: float) -> tuple[bool, dict[str, int]]:
+def _clean_round(
+    project: KicadProject, clearance: float, edge_clearance: float, min_width: float
+) -> tuple[bool, dict[str, int]]:
     """One pass of :func:`clean_tracks` over all nets; returns (anything changed, stats)."""
     totals = {"duplicates": 0, "dropped": 0, "fixed": 0, "left": 0, "kept": 0}
     changed = _split_tees(project) + _snap_via_ends(project) + _open_junctions(project, clearance, edge_clearance) > 0
@@ -1452,7 +1522,7 @@ def _clean_round(project: KicadProject, clearance: float, edge_clearance: float)
             if connected(remaining):
                 drop.add(i)
         drop |= _open_loops(copper, segs, drop, connected)
-        result = _clean_net(copper, segs, drop, clearance, edge_clearance)
+        result = _clean_net(copper, segs, drop, clearance, edge_clearance, min_width)
         if not connected(result.pieces()):
             result.choose(connected)
         if not result.changed():
@@ -1542,13 +1612,17 @@ class _NetClean:
 
 
 def _clean_net(
-    copper: _Copper, segs: list[tracks.Seg], duplicates: set[int], clearance: float, edge_clearance: float
+    copper: _Copper,
+    segs: list[tracks.Seg],
+    duplicates: set[int],
+    clearance: float,
+    edge_clearance: float,
+    min_width: float,
 ) -> _NetClean:
     """The cleaned-up tracks of one net without ``duplicates`` (see :func:`clean_tracks`), not yet written to the board."""
     out = _NetClean()
     out.duplicates = len(duplicates)
     kept = [s for i, s in enumerate(segs) if i not in duplicates]
-    min_width = min((s.width for s in copper.segs), default=0.15)
     obstacles = copper.obstacles()
 
     def region_of(p: tracks.Point, net: str, layer: str) -> int | None:
@@ -1571,7 +1645,7 @@ def _clean_net(
     def touches(region: int, a: tracks.Point, b: tracks.Point, half_width: float) -> bool:
         """Whether a piece a-b passing a pad/via still connects to it the way KiCad sees it: over its centre."""
         centre = copper.pads[region].centre if region < len(copper.pads) else copper.vias[region - len(copper.pads)][1]
-        return tracks.point_seg_distance(centre, a, b) <= half_width - tracks.EPS
+        return tracks.on_track_body(centre, a, b, half_width - tracks.EPS)
 
     in_chain: set[int] = set()
     for chain in tracks.chains(kept, lambda p, net, layer: pad_region_of(p, net, layer) is not None):
@@ -1643,10 +1717,7 @@ def remove_antennas(project: KicadProject, *, filled_zones: bool = False) -> lis
             layer
             for layer in COPPER_LAYERS
             if copper.in_zone(centre, net, layer)
-            or any(
-                s.net == net and s.layer == layer and tracks.point_seg_distance(centre, s.a, s.b) <= s.width / 2
-                for s in alive
-            )
+            or any(s.net == net and s.layer == layer and tracks.via_takes(centre, radius, s) for s in alive)
             or any(o.net == net and layer in o.layers and o.distance(centre, centre) <= radius for o in copper.pads)
         }
         if len(layers) < 2:
