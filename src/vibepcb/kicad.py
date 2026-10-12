@@ -15,8 +15,6 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from pathlib import Path
 
-TSCIRCUIT_STEM = "index.circuit"  # tscircuit names everything after the entry file
-
 
 class KicadCliError(RuntimeError):
     pass
@@ -41,8 +39,10 @@ def assemble_project(kicad_zip: Path, library_dir: Path, target: Path, stem: str
     target.mkdir(parents=True)
     with zipfile.ZipFile(kicad_zip) as zf:
         zf.extractall(target)
-    for f in target.glob(f"{TSCIRCUIT_STEM}.*"):
-        f.rename(target / f"{stem}{f.name.removeprefix(TSCIRCUIT_STEM)}")
+    # tscircuit names everything after its input (index.circuit.tsx, <board>.circuit.json)
+    exported = next(target.glob("*.kicad_pro")).name.removesuffix(".kicad_pro")
+    for f in target.glob(f"{exported}.*"):
+        f.rename(target / f"{stem}{f.name.removeprefix(exported)}")
 
     pro_path = target / f"{stem}.kicad_pro"
     pro = json.loads(pro_path.read_text(encoding="utf-8"))

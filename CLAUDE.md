@@ -69,8 +69,9 @@ test in `tests/test_fixes.py` against the fixtures in `tests/data/`.
   as ordinary parts (not power symbols), MPN/LCSC numbers dropped, solid pad-to-pour
   connections (-> thermal reliefs), 0.4 mm reference text at fixed offsets (-> 0.8 mm,
   auto-placed in free space), oversized sheet + empty title block, net labels on the
-  pin end of their stub, and messy routing (`clean_tracks`, geometry in
-  `src/vibepcb/tracks.py`): overlapping duplicate routes, loops/lattices of one net,
+  pin end of their stub, router gaps 1-2 um short of the clearance (-> 5 um DRC
+  slack), and messy routing (`clean_tracks`, geometry in `src/vibepcb/tracks.py`):
+  overlapping duplicate routes, loops/lattices of one net,
   T-junctions without a vertex, zig-zags inside pads/vias, spikes, 90 deg / acute
   bends. Every track change there is verified against KiCad's connection rules
   (pad: track end inside it or pad centre on the track; via: via centre on the track;

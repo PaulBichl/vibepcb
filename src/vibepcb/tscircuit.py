@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-import re
+import json
 import shutil
 import subprocess
+from collections import Counter
 from typing import TYPE_CHECKING
 
 from vibepcb.paths import ROOT
@@ -46,14 +47,22 @@ def build(source: Path, out_dir: Path, stem: str, formats: dict[str, str]) -> li
     return written
 
 
-def check(source: Path) -> tuple[int, str]:
-    """``tsci check``: tscircuit's own validation (netlist, pin polarity vs. supplier part, ...).
+# tscircuit's DRC giving up (e.g. on a zero-width route point) is no finding of its own:
+# KiCad's DRC in `check` covers the board, and fixes.repair_zero_width_tracks the cause
+NON_BLOCKING_ERRORS = ("DRC could not complete",)
+REPORT_LINES = 40
 
-    Returns the number of errors and the report (autorouter chatter stripped).
-    """
-    cmd = [*_tsci(), "check", str(source)]
-    result = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, check=False)
-    lines = [ln for ln in (result.stdout + result.stderr).splitlines() if "autorouting" not in ln]
-    match = re.search(r"^Errors: (\d+)", "\n".join(lines), re.MULTILINE)
-    errors = int(match[1]) if match else int(result.returncode != 0)
-    return errors, "\n".join(lines).strip()
+
+def circuit_errors(circuit_json: Path) -> tuple[int, str]:
+    """Blocking errors in a circuit JSON (``*_error`` elements) and a short report of them."""
+    elements = json.loads(circuit_json.read_text(encoding="utf-8"))
+    errors = [
+        e
+        for e in elements
+        if str(e.get("type", "")).endswith("_error")
+        and not any(p in str(e.get("message", "")) for p in NON_BLOCKING_ERRORS)
+    ]
+    counts = Counter(str(e["type"]) for e in errors)
+    lines = [f"Errors: {len(errors)}", *(f"  {n} x {t}" for t, n in counts.most_common())]
+    lines += [f"- {e['type']}: {e.get('message', '')}" for e in errors[:REPORT_LINES]]
+    return len(errors), "\n".join(lines)

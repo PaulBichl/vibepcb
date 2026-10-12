@@ -141,7 +141,11 @@ def _pad_box(pad: list[Node]) -> tuple[float, float, float, float]:
 
 
 def _inside_pad(fp: list[Node], pad: list[Node], x: float, y: float) -> bool:
-    """Whether board point ``(x, y)`` lies within ``pad``'s copper bounding box."""
+    """Whether board point ``(x, y)`` lies within ``pad``'s copper.
+
+    Circle and oval pads are tested by their shape (a diagonal track leaving a round THT pad
+    is still inside its bounding box), every other pad by its bounding box.
+    """
     at, pad_at = sexpr.child(fp, "at"), sexpr.child(pad, "at")
     fp_angle = math.radians(_num(at, 3))
     dx, dy = x - _num(at, 1), y - _num(at, 2)
@@ -152,6 +156,11 @@ def _inside_pad(fp: list[Node], pad: list[Node], x: float, y: float) -> bool:
     pad_angle = math.radians(_num(pad_at, 3)) - fp_angle
     u = lx * math.cos(pad_angle) - ly * math.sin(pad_angle)
     v = lx * math.sin(pad_angle) + ly * math.cos(pad_angle)
+    if str(pad[3]) in ("circle", "oval") and sexpr.child(pad, "primitives") is None:
+        size = sexpr.child(pad, "size")
+        hw, hh = _num(size, 1) / 2, _num(size, 2) / 2
+        r = min(hw, hh)  # oval = stadium: distance to its centre line (a circle's is a point)
+        return math.hypot(max(abs(u) - (hw - r), 0.0), max(abs(v) - (hh - r), 0.0)) <= r
     xmin, ymin, xmax, ymax = _pad_box(pad)
     return xmin <= u <= xmax and ymin <= v <= ymax
 
@@ -160,6 +169,40 @@ def _pad_on_layer(pad: list[Node], layer: str) -> bool:
     layers = sexpr.child(pad, "layers")
     names = [] if layers is None else [str(x) for x in layers[1:]]
     return layer in names or (layer.endswith(".Cu") and "*.Cu" in names)
+
+
+FALLBACK_TRACK_WIDTH_MM = 0.15
+
+
+def repair_zero_width_tracks(project: KicadProject) -> list[str]:
+    """Give zero-width track segments the width of the tracks they join.
+
+    The autorouter occasionally emits a route point with width 0 (seen once on a GND route
+    of a ~250-part board); KiCad then has a copper-less segment, i.e. a broken connection.
+    """
+    segs = list(sexpr.children(project.pcb, "segment"))
+
+    def ends(seg: list[Node]) -> list[tuple[float, float]]:
+        return [(_num(sexpr.child(seg, k), 1), _num(sexpr.child(seg, k), 2)) for k in ("start", "end")]
+
+    changes = []
+    for seg in segs:
+        width = sexpr.child(seg, "width")
+        if width is None or _num(width, 1) > 0:
+            continue
+        net, mine = sexpr.child(seg, "net"), ends(seg)
+        neighbours = [
+            _num(sexpr.child(o, "width"), 1)
+            for o in segs
+            if o is not seg
+            and sexpr.child(o, "net") == net
+            and _num(sexpr.child(o, "width"), 1) > 0
+            and any(math.dist(p, q) < 1e-3 for p in mine for q in ends(o))
+        ]
+        new = max(neighbours, default=FALLBACK_TRACK_WIDTH_MM)
+        width[1] = Sym(_mm(new))
+        changes.append(f"track at ({_mm(mine[0][0])}, {_mm(mine[0][1])}): width 0 -> {_mm(new)} mm")
+    return changes
 
 
 def drop_tracks_inside_pads(project: KicadProject) -> list[str]:
@@ -691,6 +734,31 @@ def thermal_spoke_rule(project: KicadProject) -> list[str]:
     text += f'(rule "{THERMAL_SPOKE_RULE}"\n  (constraint min_resolved_spokes 1))\n'
     dru.write_text(text, encoding="utf-8")
     return [f"{dru.name}: min. 1 thermal spoke per pad"]
+
+
+ROUTER_CLEARANCE_RULE = "router clearance: float tolerance"
+ROUTER_CLEARANCE_SLACK_MM = 0.005  # far below any fab tolerance (~0.025 mm)
+
+
+def router_clearance_tolerance(project: KicadProject) -> list[str]:
+    """Accept copper gaps a few microns short of the net-class clearance.
+
+    The autorouter targets exactly the board's clearance, which becomes the KiCad net-class
+    clearance, and floating-point error leaves some via/track gaps 1-2 um short (seen:
+    0.1986 mm for 0.2 mm) - errors already in the raw export, no layout change fixes them.
+    """
+    dru = project.pcb_path.with_suffix(".kicad_dru")
+    text = dru.read_text(encoding="utf-8") if dru.exists() else "(version 1)\n"
+    if ROUTER_CLEARANCE_RULE in text:
+        return []
+    clearance = _design_clearances(project)[0] - ROUTER_CLEARANCE_SLACK_MM
+    text += (
+        f'(rule "{ROUTER_CLEARANCE_RULE}"\n'
+        "  (condition \"A.NetClass == 'Default' && B.NetClass == 'Default'\")\n"  # other classes keep theirs
+        f"  (constraint clearance (min {_mm(clearance)}mm)))\n"
+    )
+    dru.write_text(text, encoding="utf-8")
+    return [f"{dru.name}: copper clearance >= {_mm(clearance)} mm"]
 
 
 REF_TEXT_SIZE_MM = 0.8  # common fab minimum for legible silkscreen
@@ -1678,6 +1746,7 @@ type Fix = Callable[[KicadProject], list[str]]
 FIXES: dict[str, Fix] = {
     "rename_auto_nets": rename_auto_nets,
     "propagate_split_pad_nets": propagate_split_pad_nets,
+    "repair_zero_width_tracks": repair_zero_width_tracks,
     "drop_tracks_inside_pads": drop_tracks_inside_pads,
     "clean_tracks": clean_tracks,
     "remove_antennas": remove_antennas,
@@ -1694,6 +1763,7 @@ FIXES: dict[str, Fix] = {
     "footprint_internal_clearance_rule": footprint_internal_clearance_rule,
     "zone_thermal_reliefs": zone_thermal_reliefs,
     "thermal_spoke_rule": thermal_spoke_rule,
+    "router_clearance_tolerance": router_clearance_tolerance,
     "strict_track_rules": strict_track_rules,
     "place_reference_designators": place_reference_designators,
     "fit_schematic_sheet": fit_schematic_sheet,

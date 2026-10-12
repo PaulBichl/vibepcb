@@ -18,7 +18,7 @@ import subprocess
 import sys
 import urllib.request
 
-from vibepcb import fixes, kicad, paths, tscircuit
+from vibepcb import fixes, kicad, paths, schgen, tscircuit
 
 TSCIRCUIT_LLM_DOCS = "https://docs.tscircuit.com/llms.txt"
 
@@ -32,13 +32,12 @@ export default () => (
 )
 """
 
-# raw exports besides the KiCad project; kicad_zip/kicad-library are handled in build()
-PREVIEW_FORMATS = {
+# exported from the circuit JSON (no re-evaluation / re-routing); kicad-library needs the TSX
+JSON_FORMATS = {
+    "kicad_zip": ".kicad.zip",
     "readable-netlist": ".netlist.txt",
     "pcb-svg": ".pcb.svg",
-    "pcb-png": ".pcb.png",
     "schematic-svg": ".sch.svg",
-    "circuit-json": ".circuit.json",
 }
 
 
@@ -59,20 +58,21 @@ def cmd_build(board: str) -> int:
         print(f"no such board: {source} (boards: {', '.join(paths.list_boards())})", file=sys.stderr)
         return 1
     raw = paths.raw_dir(board)
-    print(f"checking {board} with tscircuit ...")
-    errors, report = tscircuit.check(source)
+    circuit = raw / f"{board}.circuit.json"
+    # tscircuit evaluates (places + routes) the board on every call: do it once, export the rest from the JSON
+    print(f"building {board} with tscircuit (placement + routing) ...")
+    tscircuit.export(source, "circuit-json", circuit)
+    errors, report = tscircuit.circuit_errors(circuit)
     print(report)
     if errors:
-        print(f"tsci check found {errors} error(s) - fix {source.relative_to(paths.ROOT)} first", file=sys.stderr)
+        print(f"tscircuit found {errors} error(s) - fix {source.relative_to(paths.ROOT)} first", file=sys.stderr)
         return 1
-    print(f"building {board} with tscircuit ...")
-    tscircuit.export(source, "kicad_zip", raw / f"{board}.kicad.zip")
+    written = [circuit, *tscircuit.build(circuit, raw, board, JSON_FORMATS)]
     tscircuit.export(source, "kicad-library", raw / "lib")
-    written = tscircuit.build(source, raw, board, PREVIEW_FORMATS)
-    sch_svg = raw / f"{board}.sch.svg"
-    if shutil.which("rsvg-convert"):  # PNG so an LLM can look at the schematic too
-        subprocess.run(["rsvg-convert", "-w", "1200", "-o", str(sch_svg.with_suffix(".png")), str(sch_svg)], check=True)
-        written.append(sch_svg.with_suffix(".png"))
+    if shutil.which("rsvg-convert"):  # PNGs so an LLM can look at the board / schematic
+        for svg in (raw / f"{board}.pcb.svg", raw / f"{board}.sch.svg"):
+            subprocess.run(["rsvg-convert", "-w", "1200", "-o", str(svg.with_suffix(".png")), str(svg)], check=True)
+            written.append(svg.with_suffix(".png"))
     for f in written:
         print(f"  {f.relative_to(paths.ROOT)}")
     return 0
@@ -81,6 +81,10 @@ def cmd_build(board: str) -> int:
 def cmd_fix(board: str) -> int:
     raw, target = paths.raw_dir(board), paths.kicad_dir(board)
     kicad.assemble_project(raw / f"{board}.kicad.zip", raw / "lib", target, board)
+    sch, circuit = target / f"{board}.kicad_sch", raw / f"{board}.circuit.json"
+    if not schgen.has_symbols(sch) and circuit.exists():  # schematicDisabled: netlist-style schematic
+        schgen.write(circuit, sch, board)
+        print(f"  schematic generated from {circuit.relative_to(paths.ROOT)} (boxes + net labels)")
     report = fixes.apply_all(fixes.KicadProject.load(target, board))
     for name, changes in report.items():
         for change in changes:

@@ -82,6 +82,22 @@ def test_drop_tracks_inside_pads(project: fixes.KicadProject) -> None:
     assert fixes.drop_tracks_inside_pads(project) == []
 
 
+def test_drop_tracks_inside_round_pads(project: fixes.KicadProject) -> None:
+    # J1 pad 2 (GND = net 2) is a 1.5 mm circle centred on (95.27, 100)
+    def segment(end_x: float, end_y: float) -> Node:
+        node = sexpr.loads(f"(segment (start 95.27 100) (end {end_x} {end_y}) (width 0.15) (layer F.Cu) (net 2))")
+        project.pcb.append(node)
+        return node
+
+    # leaves diagonally: 0.99 mm from the centre, past the circle but inside its bounding box
+    leaving = segment(95.97, 100.7)
+    assert fixes.drop_tracks_inside_pads(project) == []
+    assert leaving in project.pcb
+    stub = segment(95.6, 100.3)
+    assert fixes.drop_tracks_inside_pads(project) == ["J1: dropped 1 track stub(s) inside its own pads"]
+    assert stub not in project.pcb
+
+
 def _edge_cuts(tree: list[Node]) -> int:
     return sum(1 for n in sexpr.children(tree, "gr_line") if sexpr.child(n, "layer") == ["layer", "Edge.Cuts"])
 
@@ -270,6 +286,18 @@ def test_thermal_spoke_rule(project: fixes.KicadProject) -> None:
     assert fixes.thermal_spoke_rule(project) == []  # idempotent
 
 
+def test_router_clearance_tolerance(project: fixes.KicadProject) -> None:
+    assert fixes.thermal_spoke_rule(project)
+    # no project file in the fixture: the default 0.2 mm clearance applies
+    assert fixes.router_clearance_tolerance(project) == ["board.kicad_dru: copper clearance >= 0.195 mm"]
+    text = project.pcb_path.with_suffix(".kicad_dru").read_text(encoding="utf-8")
+    assert text.count("(version 1)") == 1
+    assert "(constraint min_resolved_spokes 1)" in text
+    assert "A.NetClass == 'Default' && B.NetClass == 'Default'" in text
+    assert "(constraint clearance (min 0.195mm))" in text
+    assert fixes.router_clearance_tolerance(project) == []  # idempotent
+
+
 def test_schematic_net_labels_sit_on_free_stub_end(project: fixes.KicadProject) -> None:
     (ref, number), (px, py) = next(iter(fixes._pin_positions(project.sch).items()))
     # a tscircuit net-label stub: wire from the pin 5 mm to the left, plain text near the pin
@@ -416,3 +444,17 @@ def test_jlcpcb_files(tmp_path: Path) -> None:
         "Designator,Mid X,Mid Y,Layer,Rotation",
         "R1,10.5000mm,-20.2500mm,Top,90",
     ]
+
+
+def test_repair_zero_width_tracks(project: fixes.KicadProject) -> None:
+    assert fixes.repair_zero_width_tracks(project) == []
+    wide = sexpr.loads("(segment (start 10 10) (end 12 10) (width 0.4) (layer F.Cu) (net 1))")
+    zero = sexpr.loads("(segment (start 12 10) (end 14 10) (width 0) (layer F.Cu) (net 1))")
+    lone = sexpr.loads("(segment (start 30 30) (end 31 30) (width 0) (layer F.Cu) (net 2))")
+    project.pcb += [wide, zero, lone]
+    assert fixes.repair_zero_width_tracks(project) == [
+        "track at (12, 10): width 0 -> 0.4 mm",
+        "track at (30, 30): width 0 -> 0.15 mm",
+    ]
+    assert sexpr.child(zero, "width") == ["width", sexpr.Sym("0.4")]
+    assert fixes.repair_zero_width_tracks(project) == []
