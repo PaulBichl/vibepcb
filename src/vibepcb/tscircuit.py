@@ -79,13 +79,24 @@ NON_BLOCKING_ERRORS = ("DRC could not complete",)
 REPORT_LINES = 40
 
 
-def circuit_errors(circuit_json: Path) -> tuple[int, str]:
-    """Blocking errors in a circuit JSON (``*_error`` elements) and a short report of them."""
+# what a placement-only evaluation (before routing) can already tell
+PLACEMENT_ERRORS = (
+    "pcb_placement_error",
+    "pcb_component_outside_board_error",
+    "pcb_courtyard_overlap_error",
+    "pcb_footprint_overlap_error",
+    "pcb_pad_pad_clearance_error",
+)
+
+
+def circuit_errors(circuit_json: Path, only: tuple[str, ...] | None = None) -> tuple[int, str]:
+    """Blocking errors in a circuit JSON (``*_error`` elements; just the types in ``only``) and a short report."""
     elements = json.loads(circuit_json.read_text(encoding="utf-8"))
     errors = [
         e
         for e in elements
         if str(e.get("type", "")).endswith("_error")
+        and (only is None or e["type"] in only)
         and not any(p in str(e.get("message", "")) for p in NON_BLOCKING_ERRORS)
     ]
     counts = Counter(str(e["type"]) for e in errors)

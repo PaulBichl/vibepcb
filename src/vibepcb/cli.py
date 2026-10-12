@@ -59,6 +59,13 @@ def cmd_build(board: str) -> int:
         return 1
     raw = paths.raw_dir(board)
     circuit = raw / f"{board}.circuit.json"
+    # placement gate: a placement-only evaluation takes about a minute and fails before the routing pass
+    print(f"checking the placement of {board} (routing disabled) ...")
+    errors, report = tscircuit.circuit_errors(tscircuit.evaluate_unrouted(source), tscircuit.PLACEMENT_ERRORS)
+    if errors:
+        print(report)
+        print(f"placement errors - fix {source.relative_to(paths.ROOT)} first", file=sys.stderr)
+        return 1
     # tscircuit evaluates (places + routes) the board on every call: do it once, export the rest from the JSON
     print(f"building {board} with tscircuit (placement + routing) ...")
     tscircuit.export(source, "circuit-json", circuit)
