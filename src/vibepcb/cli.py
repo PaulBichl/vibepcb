@@ -1,10 +1,10 @@
 """``vibepcb`` command line - the build/fix/check loop for LLM-designed boards.
 
 vibepcb new <board>     scaffold boards/<board>/index.circuit.tsx
-vibepcb build <board>   tscircuit -> out/<board>/raw (KiCad zip, netlist, SVG/PNG previews)
+vibepcb build <board>   [--fast] tscircuit -> out/<board>/raw (KiCad zip, netlist, SVG/PNG previews)
 vibepcb fix <board>     raw -> out/<board>/kicad, apply post-processing fixes
 vibepcb check <board>   KiCad DRC + ERC -> out/<board>/reports (after refill: drop tracks the GND pour provides)
-vibepcb all <board>     build + fix + check
+vibepcb all <board>     [--fast] build + fix + check
 vibepcb fab <board>     part availability check, gerbers/drill zip, BOM, pick-and-place, schematic PDF, 3D renders
 vibepcb list            list the boards under boards/
 vibepcb docs            download tscircuit's LLM docs to docs/tscircuit-llms.txt
@@ -53,11 +53,14 @@ def cmd_new(board: str) -> int:
     return 0
 
 
-def cmd_build(board: str) -> int:
+def cmd_build(board: str, *, fast: bool = False) -> int:
     source = paths.board_source(board)
     if not source.exists():
         print(f"no such board: {source} (boards: {', '.join(paths.list_boards())})", file=sys.stderr)
         return 1
+    if fast:  # quick experiments: router effort 2x on a temp copy; final runs go without --fast
+        print(f"--fast: autorouterEffortLevel forced to {tscircuit.FAST_EFFORT} (not for final runs)")
+        source = tscircuit.fast_source(source, paths.OUT_DIR / board / "fast")
     raw = paths.raw_dir(board)
     circuit = raw / f"{board}.circuit.json"
     # placement gate: a placement-only evaluation takes about a minute and fails before the routing pass
@@ -162,7 +165,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="vibepcb", description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
     for name in ("new", "build", "fix", "check", "all", "fab"):
-        sub.add_parser(name).add_argument("board")
+        command_parser = sub.add_parser(name)
+        command_parser.add_argument("board")
+        if name in ("build", "all"):
+            command_parser.add_argument("--fast", action="store_true", help="router effort 2x (quick experiments)")
     sub.add_parser("list")
     sub.add_parser("docs")
     args = parser.parse_args(argv)
@@ -175,9 +181,11 @@ def main(argv: list[str] | None = None) -> int:
             case "docs":
                 return cmd_docs()
             case "all":
-                return cmd_build(args.board) or cmd_fix(args.board) or cmd_check(args.board)
+                return cmd_build(args.board, fast=args.fast) or cmd_fix(args.board) or cmd_check(args.board)
             case command:
-                handler = {"new": cmd_new, "build": cmd_build, "fix": cmd_fix, "check": cmd_check, "fab": cmd_fab}
+                if command == "build":
+                    return cmd_build(args.board, fast=args.fast)
+                handler = {"new": cmd_new, "fix": cmd_fix, "check": cmd_check, "fab": cmd_fab}
                 return handler[command](args.board)
     except (tscircuit.TscircuitError, kicad.KicadCliError, FileNotFoundError) as exc:
         print(f"error: {exc}", file=sys.stderr)

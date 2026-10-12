@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from vibepcb import fixes, kicad, sexpr, tracks
+from vibepcb import fixes, kicad, sexpr, tracks, tscircuit
 from vibepcb.sexpr import Sym
 
 if TYPE_CHECKING:
@@ -485,3 +485,16 @@ def test_write_footprint_library_round_trip(project: fixes.KicadProject, tmp_pat
         assert sexpr.child(lib_pad, "net") is None
         assert sexpr.child(lib_pad, "at") == sexpr.child(pad, "at")
     assert sexpr.property_value(lib, "Reference") == "REF**"
+
+
+def test_fast_source(tmp_path: Path) -> None:
+    board = tmp_path / "boards" / "b"
+    board.mkdir(parents=True)
+    source = board / "index.circuit.tsx"
+    source.write_text('import { X } from "./imports"\nexport default () => (\n  <board width="1mm">\n  </board>\n)\n')
+    fast = tscircuit.fast_source(source, tmp_path / "fast")
+    text = fast.read_text()
+    assert '<board autorouterEffortLevel="2x" width="1mm">' in text
+    assert f'from "{board / "imports"}"' in text
+    source.write_text('<board autorouterEffortLevel="10x" width="1mm">')
+    assert 'autorouterEffortLevel="2x"' in tscircuit.fast_source(source, tmp_path / "fast").read_text()

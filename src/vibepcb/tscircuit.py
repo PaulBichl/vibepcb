@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from collections import Counter
@@ -36,6 +37,35 @@ def export(source: Path, fmt: str, output: Path) -> None:
     if result.returncode != 0 or not output.exists():
         msg = f"tsci export -f {fmt} failed:\n{result.stdout}{result.stderr}"
         raise TscircuitError(msg)
+
+
+FAST_EFFORT = "2x"
+_RELATIVE_IMPORT = re.compile(r"""(\bfrom\s*|\bimport\s*\(?\s*)(["'])(\.{1,2}/[^"']*|\.{1,2})\2""")
+_EFFORT_PROP = re.compile(r"autorouterEffortLevel\s*=\s*(?:\"[^\"]*\"|'[^']*'|\{[^}]*\})")
+_BOARD_TAG = re.compile(r"<board(?=[\s>/])")
+
+
+def fast_source(source: Path, target_dir: Path) -> Path:
+    """A copy of ``source`` in ``target_dir`` with the board's ``autorouterEffortLevel`` forced to ``"2x"``.
+
+    Relative imports are made absolute so the copy evaluates from its new place. For quick
+    placement experiments only: the router result differs from the final (full effort) one.
+    """
+    text = source.read_text(encoding="utf-8")
+    here = source.resolve().parent
+    text = _RELATIVE_IMPORT.sub(lambda m: f"{m[1]}{m[2]}{(here / m[3]).resolve()}{m[2]}", text)
+    prop = f'autorouterEffortLevel="{FAST_EFFORT}"'
+    if _EFFORT_PROP.search(text):
+        text = _EFFORT_PROP.sub(prop, text, count=1)
+    elif _BOARD_TAG.search(text):
+        text = _BOARD_TAG.sub(f"<board {prop}", text, count=1)
+    else:
+        msg = f"no <board> tag found in {source}"
+        raise TscircuitError(msg)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = target_dir / source.name
+    target.write_text(text, encoding="utf-8")
+    return target
 
 
 def evaluate_unrouted(source: Path, *, parts_engine: bool = False) -> Path:
