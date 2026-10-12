@@ -108,6 +108,12 @@ test in `tests/test_fixes.py` against the fixtures in `tests/data/`.
 - Pad-to-pad traces between a capacitor and a chip pin get a hidden 1 mm max length
   (tscircuit's decoupling heuristic; routing is skipped if it can't be met): set
   `maxLength` on such traces and on the cap's GND trace.
+- Imported parts (`tsci import`) that carry a custom `symbol={<symbol><port name="pin3" .../>...</symbol>}`
+  make `.U1 > port.pin3` match two ports ("PCB port selector is not unique"), so tscircuit cannot save the
+  autorouting paths (`.tscircuit/autorouting-artifacts/<entry>/*.pcb-trace-paths.json`, the replayable route
+  cache: import the JSON into `<autoroutingphase pcbTracePaths={...} />`). Verified on a one-part board:
+  with the symbol it fails, with the `symbol` prop deleted (keep `pinLabels`, `footprint`, `cadModel`) the
+  paths are saved. Delete the symbol block of imported chips; the schematic is generated from the netlist anyway.
 - SPICE: chips have no models, so per-board ngspice decks with behavioural models live in
   `boards/<name>/sim/*.cir` (`ngspice -b <deck>`).
 
