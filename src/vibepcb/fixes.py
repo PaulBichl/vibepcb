@@ -1961,3 +1961,26 @@ def apply_all(project: KicadProject, skip: set[str] | None = None) -> dict[str, 
     report = {name: fix(project) for name, fix in FIXES.items() if name not in (skip or set())}
     project.save()
     return report
+
+
+def unpoured_copper_layers(project: KicadProject) -> list[str]:
+    """Copper layers without any pour (common practice: every layer carries a plane - GND or a supply).
+
+    Without one, every pad of the plane's net on that layer needs its own track, which the
+    router lays as chains of pad-to-pad links meeting at acute angles.
+    """
+    layers_node = sexpr.child(project.pcb, "layers")
+    copper = [
+        str(layer[1])
+        for layer in ([] if layers_node is None else layers_node[1:])
+        if isinstance(layer, list) and len(layer) > 1 and str(layer[1]).endswith(".Cu")
+    ]
+    poured: set[str] = set()
+    for zone in sexpr.children(project.pcb, "zone"):
+        if sexpr.child(zone, "keepout") is not None:
+            continue
+        for key in ("layer", "layers"):
+            node = sexpr.child(zone, key)
+            if node is not None:
+                poured |= {str(x) for x in node[1:]}
+    return [layer for layer in copper if layer not in poured and "*.Cu" not in poured]

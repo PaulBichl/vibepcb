@@ -525,3 +525,13 @@ def test_relocate_vias(project: fixes.KicadProject) -> None:
     assert (float(str(start[1])), float(str(start[2]))) == (x, y)  # the track end moved along
     assert max(x - 93.48, abs(y - 100) - 0.75) >= 0.3 + 0.2 - 1e-6  # via copper >= clearance from the pad
     assert fixes.relocate_vias(project) == []
+
+
+def test_unpoured_copper_layers(project: fixes.KicadProject) -> None:
+    # the fixture has a GND pad but no zones
+    assert fixes.unpoured_copper_layers(project) == ["F.Cu", "B.Cu"]
+    zone = '(zone (net 2) (net_name "GND") (layer "{}") (polygon (pts (xy 0 0) (xy 1 0) (xy 1 1))))'
+    project.pcb.append(sexpr.loads(zone.format("B.Cu")))
+    assert fixes.unpoured_copper_layers(project) == ["F.Cu"]
+    project.pcb.append(sexpr.loads(zone.format("F.Cu")))
+    assert fixes.unpoured_copper_layers(project) == []

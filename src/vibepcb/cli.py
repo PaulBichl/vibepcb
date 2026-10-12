@@ -135,13 +135,18 @@ def cmd_check(board: str) -> int:
     else:
         print(f"  post-fill: gave up after {POST_FILL_ATTEMPTS} attempts, board left as filled")
         drc = kicad.run_drc(pcb, reports / "drc.json")
-    corners = fixes.sharp_corners(fixes.KicadProject.load(project, board))
+    loaded = fixes.KicadProject.load(project, board)
+    corners = fixes.sharp_corners(loaded)
+    unpoured = fixes.unpoured_copper_layers(loaded)
     print(erc)
     print(drc)
     print(f"Track bends: {len(corners)} sharper than 135 deg")
     for net, (x, y), angle in corners:
         print(f"  [error] sharp_corner: {net} bend of {angle:.1f} deg @ ({x:.3f}, {y:.3f}) mm")
-    return 1 if erc.errors or drc.errors or corners else 0
+    print(f"Pours: {len(unpoured)} copper layer(s) without a plane")
+    for layer in unpoured:
+        print(f"  [error] no_pour: {layer} - add a <copperpour> (GND or a supply net) on it")
+    return 1 if erc.errors or drc.errors or corners or unpoured else 0
 
 
 def cmd_fab(board: str) -> int:

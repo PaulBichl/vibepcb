@@ -48,7 +48,8 @@ run with `--disable-parts-engine`; `pcb fab` checks part availability once.
    top/bottom 3D renders in `out/<name>/fab/`, JLCPCB upload set in `fab/jlcpcb/`.
    Never hand over fab files of a board whose `check` fails.
 
-Layout quality bar, enforced by `check` (not by eye): GND connects through the pours
+Layout quality bar, enforced by `check` (not by eye): a pour on every copper layer
+(GND or a supply plane; `check` fails a layer without one), GND connects through the pours
 (no redundant GND tracks), no track bend sharper than 135 deg and no acute angle at
 junctions, no antennas (dangling track ends / vias), nothing unconnected.
 
@@ -94,6 +95,9 @@ test in `tests/test_fixes.py` against the fixtures in `tests/data/`.
   fill depends on item order, so random UUIDs make `check` results vary run to run.
 
 ## Board design lessons (tscircuit autorouter / parts)
+
+- Follow common PCB practice by default (every copper layer poured with GND or a supply, clearances at
+  what the fab allows); any deviation needs a reason written in the board source.
 
 - The router's results jump with tiny placement changes; if `tsci check` shows a
   few clearance/via-in-pad errors, nudge the nearby passive 0.5 mm and rebuild.
