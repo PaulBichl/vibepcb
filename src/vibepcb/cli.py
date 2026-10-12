@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import sys
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 
 from vibepcb import fixes, kicad, paths, schgen, tscircuit
 
@@ -105,8 +106,10 @@ POST_FILL_ATTEMPTS = 4
 def cmd_check(board: str) -> int:
     project, reports = paths.kicad_dir(board), paths.OUT_DIR / board / "reports"
     pcb = project / f"{board}.kicad_pcb"
-    erc = kicad.run_erc(project / f"{board}.kicad_sch", reports / "erc.json")
-    drc = kicad.run_drc(pcb, reports / "drc.json")
+    with ThreadPoolExecutor(max_workers=2) as pool:  # independent kicad-cli processes
+        erc_job = pool.submit(kicad.run_erc, project / f"{board}.kicad_sch", reports / "erc.json")
+        drc_job = pool.submit(kicad.run_drc, pcb, reports / "drc.json")
+        erc, drc = erc_job.result(), drc_job.result()
     # fixes that need KiCad's zone fill; refill + DRC again. Where that loses a connection,
     # retry keeping the tracks around the reported spots; give up (restore) after a few tries
     backup, before = pcb.read_bytes(), drc.unconnected
