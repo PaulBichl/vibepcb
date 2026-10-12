@@ -65,7 +65,9 @@ def cmd_build(board: str, *, fast: bool = False) -> int:
     circuit = raw / f"{board}.circuit.json"
     # placement gate: a placement-only evaluation takes about a minute and fails before the routing pass
     print(f"checking the placement of {board} (routing disabled) ...")
-    errors, report = tscircuit.circuit_errors(tscircuit.evaluate_unrouted(source), tscircuit.PLACEMENT_ERRORS)
+    errors, report = tscircuit.circuit_errors(
+        tscircuit.evaluate_unrouted(source, raw / f"{board}.unrouted.circuit.json"), tscircuit.PLACEMENT_ERRORS
+    )
     if errors:
         print(report)
         print(f"placement errors - fix {source.relative_to(paths.ROOT)} first", file=sys.stderr)

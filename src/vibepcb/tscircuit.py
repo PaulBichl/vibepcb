@@ -6,13 +6,11 @@ import json
 import re
 import shutil
 import subprocess
+import tempfile
 from collections import Counter
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 from vibepcb.paths import ROOT
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 class TscircuitError(RuntimeError):
@@ -68,7 +66,7 @@ def fast_source(source: Path, target_dir: Path) -> Path:
     return target
 
 
-def evaluate_unrouted(source: Path, *, parts_engine: bool = False) -> Path:
+def evaluate_unrouted(source: Path, output: Path, *, parts_engine: bool = False) -> Path:
     """``tsci build --routing-disabled``: evaluate placement only (no autorouter); returns the circuit JSON.
 
     With ``parts_engine`` the supplier lookup runs too, which adds ``*_availability_warning`` elements.
@@ -84,12 +82,18 @@ def evaluate_unrouted(source: Path, *, parts_engine: bool = False) -> Path:
     if result.returncode != 0 or not circuit.exists():
         msg = f"tsci build --routing-disabled failed:\n{result.stdout}{result.stderr}"
         raise TscircuitError(msg)
-    return circuit
+    # tsci reuses dist/ output: left there, the unrouted JSON comes back from the routed export
+    output.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(circuit, output)
+    shutil.rmtree(circuit.parent)
+    return output
 
 
 def availability_warnings(source: Path) -> list[str]:
     """Supplier availability warnings (one line per part) from a parts-engine evaluation of ``source``."""
-    elements = json.loads(evaluate_unrouted(source, parts_engine=True).read_text(encoding="utf-8"))
+    with tempfile.TemporaryDirectory() as tmp:
+        circuit = evaluate_unrouted(source, Path(tmp) / "unrouted.circuit.json", parts_engine=True)
+        elements = json.loads(circuit.read_text(encoding="utf-8"))
     return [str(e.get("message", "")) for e in elements if str(e.get("type", "")).endswith("availability_warning")]
 
 
