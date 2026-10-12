@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import csv
 import json
 import os
@@ -12,8 +13,13 @@ from collections import Counter
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from vibepcb import sexpr
+from vibepcb.sexpr import Sym
+
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from vibepcb.sexpr import Node
 
 
 class KicadCliError(RuntimeError):
@@ -32,8 +38,12 @@ def _kicad_cli(*args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run([cli, *args], capture_output=True, text=True, check=False)
 
 
-def assemble_project(kicad_zip: Path, library_dir: Path, target: Path, stem: str) -> None:
-    """Unpack tscircuit's ``kicad_zip`` export into ``target`` as ``<stem>.kicad_*`` plus ``lib/``."""
+def assemble_project(kicad_zip: Path, target: Path, stem: str) -> None:
+    """Unpack tscircuit's ``kicad_zip`` export into ``target`` as ``<stem>.kicad_*`` plus ``lib/``.
+
+    The footprint library is rebuilt from the footprints embedded in the board
+    (:func:`write_footprint_library`); no second tscircuit export is needed.
+    """
     if target.exists():
         shutil.rmtree(target)
     target.mkdir(parents=True)
@@ -51,8 +61,70 @@ def assemble_project(kicad_zip: Path, library_dir: Path, target: Path, stem: str
     pro["board"]["last_opened_board"] = f"{stem}.kicad_pcb"
     pro_path.write_text(json.dumps(pro, indent=2) + "\n", encoding="utf-8")
 
-    if library_dir.exists():
-        shutil.copytree(library_dir, target / "lib", ignore=shutil.ignore_patterns("*-lib-table"))
+    write_footprint_library(sexpr.load(target / f"{stem}.kicad_pcb"), target / "lib" / "footprints" / LIBRARY_DIR)
+
+
+LIBRARY_DIR = "tscircuit_builtin.pretty"
+FOOTPRINT_NICKNAME = "tscircuit"
+
+
+def _fmt(value: float) -> Sym:
+    return Sym(f"{value:.6f}".rstrip("0").rstrip(".") or "0")
+
+
+def _unrotate(node: list[Node], angle: float) -> None:
+    """Subtract the footprint angle from an ``(at x y a)`` (angles are stored absolute on the board)."""
+    if angle and len(node) > 3:
+        node[3] = _fmt((float(str(node[3])) - angle) % 360)
+
+
+def library_footprint(fp: list[Node]) -> list[Node]:
+    """A board footprint as a library footprint: no placement, no nets, angles relative to the footprint."""
+    lib = copy.deepcopy(fp)
+    name = str(lib[1]).split(":", 1)[-1]
+    lib[1] = name
+    at = sexpr.child(lib, "at")
+    angle = float(str(at[3])) if at is not None and len(at) > 3 else 0.0
+    drop = {"at", "uuid", "path", "sheetname", "sheetfile", "locked", "tstamp"}
+    lib[2:] = [n for n in lib[2:] if not (isinstance(n, list) and sexpr.head(n) in drop)]
+    for node in lib[2:]:
+        if not isinstance(node, list):
+            continue
+        if sexpr.head(node) == "property" and node[1] == "Reference":
+            node[2] = "REF**"
+        elif sexpr.head(node) == "property" and node[1] == "Value":
+            node[2] = name
+        if sexpr.head(node) in ("property", "fp_text", "pad"):
+            place = sexpr.child(node, "at")
+            if place is not None:
+                _unrotate(place, angle)
+            if sexpr.head(node) == "pad":
+                node[:] = [
+                    n for n in node if not (isinstance(n, list) and sexpr.head(n) in ("net", "pinfunction", "pintype"))
+                ]
+    return lib
+
+
+def write_footprint_library(pcb: list[Node], pretty: Path) -> list[Path]:
+    """One ``<name>.kicad_mod`` per distinct ``tscircuit:<name>`` footprint of the board into ``pretty``.
+
+    The first top-side instance is used (a bottom-side one is mirrored; the name is skipped
+    when it only occurs there, KiCad keeps the embedded copy on the board anyway).
+    """
+    found: dict[str, list[Node]] = {}
+    for fp in sexpr.children(pcb, "footprint"):
+        lib_id = str(fp[1])
+        layer = sexpr.child(fp, "layer")
+        if not lib_id.startswith(f"{FOOTPRINT_NICKNAME}:") or layer is None or layer[1] != "F.Cu":
+            continue
+        found.setdefault(lib_id.split(":", 1)[1], fp)
+    pretty.mkdir(parents=True, exist_ok=True)
+    written = []
+    for name, fp in sorted(found.items()):
+        path = pretty / f"{name}.kicad_mod"
+        sexpr.dump(library_footprint(fp), path)
+        written.append(path)
+    return written
 
 
 # --- checks -----------------------------------------------------------------------

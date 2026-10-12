@@ -458,3 +458,30 @@ def test_repair_zero_width_tracks(project: fixes.KicadProject) -> None:
     ]
     assert sexpr.child(zero, "width") == ["width", sexpr.Sym("0.4")]
     assert fixes.repair_zero_width_tracks(project) == []
+
+
+def test_write_footprint_library_round_trip(project: fixes.KicadProject, tmp_path: Path) -> None:
+    """A rotated board footprint comes back as the unrotated, net-free library footprint."""
+    original = next(f for f in sexpr.children(project.pcb, "footprint") if "pin_header" in str(f[1]))
+    rotated = copy.deepcopy(original)
+    at_node = sexpr.child(rotated, "at")
+    assert at_node is not None
+    at_node[:] = [Sym("at"), Sym("94"), Sym("100"), Sym("90")]
+    for pad in sexpr.children(rotated, "pad"):
+        pad_at = sexpr.child(pad, "at")
+        assert pad_at is not None
+        pad_at[3] = Sym("90")
+        pad.append([Sym("net"), Sym("1"), "VCC"])
+    for pad in sexpr.children(original, "pad"):
+        pad[:] = [n for n in pad if not (isinstance(n, list) and sexpr.head(n) == "net")]
+    pretty = tmp_path / "lib.pretty"
+    written = kicad.write_footprint_library([Sym("kicad_pcb"), rotated], pretty)
+    assert [p.name for p in written] == ["pin_header_pinrow2_p2_54_nopinlabels.kicad_mod"]
+    lib = sexpr.load(written[0])
+    assert lib[1] == "pin_header_pinrow2_p2_54_nopinlabels"
+    assert sexpr.child(lib, "at") is None
+    assert sexpr.child(lib, "uuid") is None
+    for lib_pad, pad in zip(sexpr.children(lib, "pad"), sexpr.children(original, "pad"), strict=True):
+        assert sexpr.child(lib_pad, "net") is None
+        assert sexpr.child(lib_pad, "at") == sexpr.child(pad, "at")
+    assert sexpr.property_value(lib, "Reference") == "REF**"

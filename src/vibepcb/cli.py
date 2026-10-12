@@ -32,7 +32,7 @@ export default () => (
 )
 """
 
-# exported from the circuit JSON (no re-evaluation / re-routing); kicad-library needs the TSX
+# exported from the circuit JSON (no re-evaluation / re-routing); the footprint library is rebuilt from the board
 JSON_FORMATS = {
     "kicad_zip": ".kicad.zip",
     "readable-netlist": ".netlist.txt",
@@ -68,7 +68,6 @@ def cmd_build(board: str) -> int:
         print(f"tscircuit found {errors} error(s) - fix {source.relative_to(paths.ROOT)} first", file=sys.stderr)
         return 1
     written = [circuit, *tscircuit.build(circuit, raw, board, JSON_FORMATS)]
-    tscircuit.export(source, "kicad-library", raw / "lib")
     if shutil.which("rsvg-convert"):  # PNGs so an LLM can look at the board / schematic
         for svg in (raw / f"{board}.pcb.svg", raw / f"{board}.sch.svg"):
             subprocess.run(["rsvg-convert", "-w", "1200", "-o", str(svg.with_suffix(".png")), str(svg)], check=True)
@@ -80,7 +79,7 @@ def cmd_build(board: str) -> int:
 
 def cmd_fix(board: str) -> int:
     raw, target = paths.raw_dir(board), paths.kicad_dir(board)
-    kicad.assemble_project(raw / f"{board}.kicad.zip", raw / "lib", target, board)
+    kicad.assemble_project(raw / f"{board}.kicad.zip", target, board)
     sch, circuit = target / f"{board}.kicad_sch", raw / f"{board}.circuit.json"
     if not schgen.has_symbols(sch) and circuit.exists():  # schematicDisabled: netlist-style schematic
         schgen.write(circuit, sch, board)
