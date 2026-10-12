@@ -75,6 +75,8 @@ def cmd_build(board: str, *, fast: bool = False) -> int:
     # tscircuit evaluates (places + routes) the board on every call: do it once, export the rest from the JSON
     print(f"building {board} with tscircuit (placement + routing) ...")
     tscircuit.export(source, "circuit-json", circuit)
+    for change in tscircuit.repair_trace_nets(circuit):
+        print(f"  re-linked route {change}")
     errors, report = tscircuit.circuit_errors(circuit)
     print(report)
     if errors:

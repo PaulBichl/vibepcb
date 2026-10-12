@@ -137,3 +137,52 @@ def circuit_errors(circuit_json: Path, only: tuple[str, ...] | None = None) -> t
     lines = [f"Errors: {len(errors)}", *(f"  {n} x {t}" for t, n in counts.most_common())]
     lines += [f"- {e['type']}: {e.get('message', '')}" for e in errors[:REPORT_LINES]]
     return len(errors), "\n".join(lines)
+
+
+def repair_trace_nets(circuit_json: Path) -> list[str]:
+    """Re-link routed traces to a ``source_trace`` of the net their end ports belong to.
+
+    The autorouter sometimes tags a route with another net's ``source_trace_id`` (seen: 15 of 557
+    routes on a 4-layer board, e.g. an A_MOSI route tagged ".U30 > .AVDD to net.V3V3A"); the KiCad
+    export takes the track's net from that link, so the board gets shorts and broken nets.
+    Rewrites ``circuit_json`` in place; returns one line per re-linked trace.
+    """
+    elements = json.loads(circuit_json.read_text(encoding="utf-8"))
+    key_of_port = {
+        e["source_port_id"]: e.get("subcircuit_connectivity_map_key")
+        for e in elements
+        if e.get("type") == "source_port"
+    }
+    port_source = {e["pcb_port_id"]: e.get("source_port_id") for e in elements if e.get("type") == "pcb_port"}
+    traces = {e["source_trace_id"]: e for e in elements if e.get("type") == "source_trace"}
+    trace_of_key: dict[str, str] = {}
+    for tid, t in traces.items():
+        trace_of_key.setdefault(str(t.get("subcircuit_connectivity_map_key")), tid)
+
+    changes = []
+    relinked: dict[str, str] = {}  # pcb_trace_id -> net key
+    for e in elements:
+        if e.get("type") != "pcb_trace" or e.get("source_trace_id") not in traces:
+            continue
+        ends = {p.get(k) for p in e.get("route", []) for k in ("start_pcb_port_id", "end_pcb_port_id") if p.get(k)}
+        keys = {key_of_port.get(port_source.get(str(p))) for p in ends} - {None}
+        current = traces[e["source_trace_id"]].get("subcircuit_connectivity_map_key")
+        if len(keys) != 1 or current in keys:
+            continue  # no end port, ends on two nets (the router's own short: KiCad DRC reports it), or fine
+        key = keys.pop()
+        if key not in trace_of_key:
+            continue
+        changes.append(
+            f"{e.get('pcb_trace_id')}: {traces[e['source_trace_id']].get('display_name')}"
+            f" -> {traces[trace_of_key[key]].get('display_name')}"
+        )
+        e["source_trace_id"] = trace_of_key[key]
+        relinked[str(e.get("pcb_trace_id"))] = key
+        if "subcircuit_connectivity_map_key" in e:
+            e["subcircuit_connectivity_map_key"] = key
+    for e in elements:  # the route's vias carry the net too
+        if e.get("type") == "pcb_via" and e.get("pcb_trace_id") in relinked:
+            e["subcircuit_connectivity_map_key"] = relinked[str(e["pcb_trace_id"])]
+    if changes:
+        circuit_json.write_text(json.dumps(elements), encoding="utf-8")
+    return changes
