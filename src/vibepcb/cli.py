@@ -5,7 +5,7 @@ vibepcb build <board>   tscircuit -> out/<board>/raw (KiCad zip, netlist, SVG/PN
 vibepcb fix <board>     raw -> out/<board>/kicad, apply post-processing fixes
 vibepcb check <board>   KiCad DRC + ERC -> out/<board>/reports (after refill: drop tracks the GND pour provides)
 vibepcb all <board>     build + fix + check
-vibepcb fab <board>     gerbers/drill zip, BOM, pick-and-place, schematic PDF, 3D renders
+vibepcb fab <board>     part availability check, gerbers/drill zip, BOM, pick-and-place, schematic PDF, 3D renders
 vibepcb list            list the boards under boards/
 vibepcb docs            download tscircuit's LLM docs to docs/tscircuit-llms.txt
 """
@@ -128,6 +128,12 @@ def cmd_check(board: str) -> int:
 
 
 def cmd_fab(board: str) -> int:
+    # build/export run with the parts engine off (no network lookups); do the availability check once, here
+    source = paths.board_source(board)
+    if source.exists():
+        print("checking part availability (tscircuit parts engine) ...")
+        warnings = tscircuit.availability_warnings(source)
+        print("\n".join(f"  {w}" for w in warnings) if warnings else "  all parts available")
     for f in kicad.export_fab(paths.kicad_dir(board) / f"{board}.kicad_pcb", paths.OUT_DIR / board / "fab"):
         print(f"  {f.relative_to(paths.ROOT)}")
     return 0

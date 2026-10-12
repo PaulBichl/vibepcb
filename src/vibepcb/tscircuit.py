@@ -30,11 +30,37 @@ def _tsci() -> list[str]:
 def export(source: Path, fmt: str, output: Path) -> None:
     """``tsci export <source> -f <fmt> -o <output>``; raises with tsci's output on failure."""
     output.parent.mkdir(parents=True, exist_ok=True)
-    cmd = [*_tsci(), "export", str(source), "-f", fmt, "-o", str(output.resolve())]
+    # the parts engine looks up every part on the network on each run; `fab` checks availability once
+    cmd = [*_tsci(), "export", str(source), "-f", fmt, "-o", str(output.resolve()), "--disable-parts-engine"]
     result = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, check=False)
     if result.returncode != 0 or not output.exists():
         msg = f"tsci export -f {fmt} failed:\n{result.stdout}{result.stderr}"
         raise TscircuitError(msg)
+
+
+def evaluate_unrouted(source: Path, *, parts_engine: bool = False) -> Path:
+    """``tsci build --routing-disabled``: evaluate placement only (no autorouter); returns the circuit JSON.
+
+    With ``parts_engine`` the supplier lookup runs too, which adds ``*_availability_warning`` elements.
+    """
+    cmd = [*_tsci(), "build", str(source), "--routing-disabled", "--ignore-errors"]
+    if not parts_engine:
+        cmd.append("--disable-parts-engine")
+    result = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, check=False)
+    relative = source.resolve().relative_to(ROOT)
+    circuit = (
+        ROOT / "dist" / relative.parent / relative.name.removesuffix(".tsx").removesuffix(".circuit") / "circuit.json"
+    )
+    if result.returncode != 0 or not circuit.exists():
+        msg = f"tsci build --routing-disabled failed:\n{result.stdout}{result.stderr}"
+        raise TscircuitError(msg)
+    return circuit
+
+
+def availability_warnings(source: Path) -> list[str]:
+    """Supplier availability warnings (one line per part) from a parts-engine evaluation of ``source``."""
+    elements = json.loads(evaluate_unrouted(source, parts_engine=True).read_text(encoding="utf-8"))
+    return [str(e.get("message", "")) for e in elements if str(e.get("type", "")).endswith("availability_warning")]
 
 
 def build(source: Path, out_dir: Path, stem: str, formats: dict[str, str]) -> list[Path]:

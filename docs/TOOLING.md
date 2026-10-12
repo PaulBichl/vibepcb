@@ -458,7 +458,12 @@ Re-vendor with `hatch run update-skill`. pre-commit does not touch it.
     It is git-ignored.
 16. **`hatch run clean`** removes every git-ignored file under `out` and `.tmp`. It does not
     touch `node_modules/` (ignored, but outside those paths) or `.hatch/`.
-17. **Output is LLM-oriented.** `tsci check` strips autorouter chatter lines; `CheckResult`
+17. **Parts engine off for exports.** `tscircuit.export` passes `--disable-parts-engine` (no per-part
+    network lookups on each build; all parts carry LCSC numbers). `vibepcb fab` runs the availability check
+    once (`tscircuit.availability_warnings`, a placement-only `tsci build --routing-disabled`). Measured on
+    smu-front, circuit-json export: 7 s with, 6 s without (network up); the output differs only by the
+    availability warnings and `supplier_pin1_location_map`, and was byte-deterministic only without the engine.
+18. **Output is LLM-oriented.** `tsci check` strips autorouter chatter lines; `CheckResult`
     prints a summary plus per-violation lines. Keep that format if you extend the CLI.
 
 ---
