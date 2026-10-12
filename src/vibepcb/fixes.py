@@ -1169,6 +1169,24 @@ class _Copper:
             out.setdefault(o.net, []).append(o)
         return out
 
+    @functools.cached_property
+    def pad_index_by_net(self) -> dict[str, tracks.BoxIndex]:
+        return {net: tracks.BoxIndex([o.box for o in pads]) for net, pads in self.pads_by_net.items()}
+
+    @functools.cached_property
+    def vias_by_net(self) -> dict[str, list[tuple[tracks.Point, float]]]:
+        out: dict[str, list[tuple[tracks.Point, float]]] = {}
+        for _, c, r, net in self.vias:
+            out.setdefault(net, []).append((c, r))
+        return out
+
+    @functools.cached_property
+    def segs_by_net(self) -> dict[str, list[tracks.Seg]]:
+        out: dict[str, list[tracks.Seg]] = {}
+        for s in self.segs:
+            out.setdefault(s.net, []).append(s)
+        return out
+
     def on_pad_or_via(self, p: tracks.Point, net: str, layer: str) -> bool:
         """Whether a point (a polyline node) lies on a pad or via of its net (no width involved)."""
         if any(net == v_net and math.dist(p, c) <= r + tracks.EPS for _, c, r, v_net in self.vias):
@@ -1180,9 +1198,14 @@ class _Copper:
 
         A pad takes any track end inside it; a via only a track whose copper covers the via's centre.
         """
-        if any(s.net == v_net and math.dist(p, c) <= s.width / 2 for _, c, _, v_net in self.vias):
+        if any(math.dist(p, c) <= s.width / 2 for c, _ in self.vias_by_net.get(s.net, [])):
             return True
-        return any(s.layer in o.layers and o.distance(p, p) <= 0 for o in self.pads_by_net.get(s.net, []))
+        index = self.pad_index_by_net.get(s.net)
+        if index is None:
+            return False
+        pads = self.pads_by_net[s.net]
+        # a point outside a pad's bounding box is never inside the pad
+        return any(s.layer in pads[i].layers and pads[i].distance(p, p) <= 0 for i in index.overlapping(*p, *p))
 
     def in_zone(self, p: tracks.Point, net: str, layer: str) -> bool:
         return any(tracks.point_in_polygon(p, poly) for poly in self.zones.get((net, layer), []))
@@ -1404,11 +1427,14 @@ def _clean_round(project: KicadProject, clearance: float, edge_clearance: float)
     """One pass of :func:`clean_tracks` over all nets; returns (anything changed, stats)."""
     totals = {"duplicates": 0, "dropped": 0, "fixed": 0, "left": 0, "kept": 0}
     changed = _split_tees(project) + _snap_via_ends(project) + _open_junctions(project, clearance, edge_clearance) > 0
-    for net in sorted({s.net for s in _copper(project.pcb).segs}):
-        copper = _copper(project.pcb)  # fresh: earlier nets may have moved
-        segs = [s for s in copper.segs if s.net == net]
-        pads = [o for o in copper.pads if o.net == net]
-        vias = [(centre, radius) for _, centre, radius, via_net in copper.vias if via_net == net]
+    stale = False
+    copper = _copper(project.pcb)
+    for net in sorted({s.net for s in copper.segs}):
+        if stale:  # earlier nets moved
+            copper, stale = _copper(project.pcb), False
+        segs = copper.segs_by_net.get(net, [])
+        pads = copper.pads_by_net.get(net, [])
+        vias = copper.vias_by_net.get(net, [])
         before = tracks.pad_groups(pads, vias, segs)
 
         def connected(
@@ -1435,7 +1461,7 @@ def _clean_round(project: KicadProject, clearance: float, edge_clearance: float)
         for s in segs:
             project.pcb.remove(_source(s))
         project.pcb[index:index] = [_segment_node(template, a, b, w) for template, a, b, w, _ in result.pieces()]
-        changed = True
+        changed = stale = True
         for key, value in result.stats().items():
             totals[key] += value
     return changed, totals

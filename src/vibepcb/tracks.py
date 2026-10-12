@@ -440,9 +440,40 @@ def _boxes(segs: list[Seg]) -> list[tuple[float, float, float, float]]:
     ]
 
 
-def _near(boxes: list[tuple[float, float, float, float]], p: Point, skip: int = -1) -> list[int]:
-    """Indices of tracks whose (width-grown) bounding box contains p."""
-    return [i for i, (x0, y0, x1, y1) in enumerate(boxes) if i != skip and x0 <= p[0] <= x1 and y0 <= p[1] <= y1]
+GRID_MM = 2.0
+
+
+class BoxIndex:
+    """Uniform grid over bounding boxes: which boxes may contain a point / overlap a box."""
+
+    def __init__(self, boxes: list[tuple[float, float, float, float]]) -> None:
+        self.boxes = boxes
+        self.cells: dict[tuple[int, int], list[int]] = {}
+        for i, (x0, y0, x1, y1) in enumerate(boxes):
+            for cx in range(math.floor(x0 / GRID_MM), math.floor(x1 / GRID_MM) + 1):
+                for cy in range(math.floor(y0 / GRID_MM), math.floor(y1 / GRID_MM) + 1):
+                    self.cells.setdefault((cx, cy), []).append(i)
+
+    def overlapping(self, x0: float, y0: float, x1: float, y1: float) -> set[int]:
+        """Indices of boxes that overlap (or touch) the given box."""
+        found: set[int] = set()
+        boxes = self.boxes
+        for cx in range(math.floor(x0 / GRID_MM), math.floor(x1 / GRID_MM) + 1):
+            for cy in range(math.floor(y0 / GRID_MM), math.floor(y1 / GRID_MM) + 1):
+                for i in self.cells.get((cx, cy), ()):
+                    bx0, by0, bx1, by1 = boxes[i]
+                    if bx0 <= x1 and x0 <= bx1 and by0 <= y1 and y0 <= by1:
+                        found.add(i)
+        return found
+
+    def at(self, p: Point, skip: int = -1) -> list[int]:
+        """Indices of boxes containing p (ascending, except ``skip``)."""
+        boxes = self.boxes
+        return sorted(
+            i
+            for i in self.cells.get((math.floor(p[0] / GRID_MM), math.floor(p[1] / GRID_MM)), ())
+            if i != skip and boxes[i][0] <= p[0] <= boxes[i][2] and boxes[i][1] <= p[1] <= boxes[i][3]
+        )
 
 
 def pad_groups(pads: list[Obstacle], vias: list[tuple[Point, float]], segs: list[Seg]) -> list[set[int]]:
@@ -455,6 +486,9 @@ def pad_groups(pads: list[Obstacle], vias: list[tuple[Point, float]], segs: list
     n_pads, n_vias = len(pads), len(vias)
     parent = list(range(n_pads + n_vias + len(segs)))
     boxes = _boxes(segs)
+    seg_index = BoxIndex(boxes)
+    pad_index = BoxIndex([p.box for p in pads])
+    centres = [p.centre for p in pads]
 
     def find(i: int) -> int:
         while parent[i] != i:
@@ -466,22 +500,25 @@ def pad_groups(pads: list[Obstacle], vias: list[tuple[Point, float]], segs: list
         parent[find(i)] = find(j)
 
     for v, (centre, _) in enumerate(vias):
-        for i, pad in enumerate(pads):
-            if pad.distance(centre, centre) <= 0:
+        for i in pad_index.overlapping(*centre, *centre):  # outside a pad's box: never inside the pad
+            if pads[i].distance(centre, centre) <= 0:
                 union(i, n_pads + v)
     for k, s in enumerate(segs):
         node = n_pads + n_vias + k
-        for i, pad in enumerate(pads):
+        half = s.width / 2
+        sx0, sy0 = min(s.a[0], s.b[0]) - half, min(s.a[1], s.b[1]) - half
+        sx1, sy1 = max(s.a[0], s.b[0]) + half, max(s.a[1], s.b[1]) + half
+        for i in pad_index.overlapping(sx0, sy0, sx1, sy1):
+            pad = pads[i]
             if s.layer in pad.layers and (
-                any(pad.distance(e, e) <= 0 for e in (s.a, s.b))
-                or point_seg_distance(pad.centre, s.a, s.b) <= s.width / 2
+                any(pad.distance(e, e) <= 0 for e in (s.a, s.b)) or point_seg_distance(centres[i], s.a, s.b) <= half
             ):
                 union(node, i)
         for v, (centre, radius) in enumerate(vias):
-            if point_seg_distance(centre, s.a, s.b) <= s.width / 2:
+            if sx0 <= centre[0] <= sx1 and sy0 <= centre[1] <= sy1 and point_seg_distance(centre, s.a, s.b) <= half:
                 union(node, n_pads + v)
         for e in (s.a, s.b):
-            for m in _near(boxes, e, k):
+            for m in seg_index.at(e, k):
                 t = segs[m]
                 if t.layer == s.layer and point_seg_distance(e, t.a, t.b) <= t.width / 2:
                     union(node, n_pads + n_vias + m)
@@ -554,11 +591,11 @@ def tees(segs: list[Seg]) -> list[tuple[int, int, int, Point]]:
     end-to-end contacts as connected track ends, so the through track needs a vertex there
     and the ending track's end is moved exactly onto it.
     """
-    boxes = _boxes(segs)
+    index = BoxIndex(_boxes(segs))
     out = []
     for i, s in enumerate(segs):
         for end, p in enumerate((s.a, s.b)):
-            for j in _near(boxes, p, i):
+            for j in index.at(p, i):
                 t = segs[j]
                 if t.net != s.net or t.layer != s.layer or min(math.dist(p, t.a), math.dist(p, t.b)) <= EPS:
                     continue
@@ -692,7 +729,7 @@ def redundant(segs: list[Seg]) -> list[int]:
 def dangling(segs: list[Seg], connected: Callable[[Point, Seg], bool]) -> list[int]:
     """Indices of tracks that are (or, once their neighbours go, become) loose at one end."""
     alive = set(range(len(segs)))
-    boxes = _boxes(segs)
+    index = BoxIndex(_boxes(segs))
 
     def touches(p: Point, s: Seg, others: Iterable[int]) -> bool:
         """End p of s lies on another track, or another track's end lies on s right at p."""
@@ -711,7 +748,7 @@ def dangling(segs: list[Seg], connected: Callable[[Point, Seg], bool]) -> list[i
         changed = False
         for i in sorted(alive):
             s = segs[i]
-            others = [j for j in set(_near(boxes, s.a, i) + _near(boxes, s.b, i)) if j in alive]
+            others = [j for j in set(index.at(s.a, i) + index.at(s.b, i)) if j in alive]
             if not all(connected(p, s) or touches(p, s, others) for p in (s.a, s.b)):
                 alive.discard(i)
                 changed = True
