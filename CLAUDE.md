@@ -8,10 +8,12 @@ opens cleanly in KiCad for final touches and fab output.
 
 ```
 boards/<name>/index.circuit.tsx      <- you edit this (the source of truth)
-        │  hatch run pcb build <name>   (tsci check, then tsci export)
+        │  hatch run pcb build <name>   (placement gate, ONE routed evaluation -> circuit.json,
+        │                                everything else converted from that JSON; --fast = router 2x)
         ▼
 out/<name>/raw/                       <- untouched tscircuit output, never edit
-   <name>.kicad.zip, lib/, .netlist.txt, .pcb.png, .sch.png, .circuit.json
+   <name>.kicad.zip, .netlist.txt, .pcb.png, .sch.png, .circuit.json
+   (the footprint library lib/ is derived from the board in `fix`, not exported)
         │  hatch run pcb fix <name>     (src/vibepcb/fixes.py)
         ▼
 out/<name>/kicad/<name>.kicad_pro     <- KiCad project, open this in KiCad
@@ -21,6 +23,10 @@ out/<name>/reports/{erc,drc}.json
 ```
 
 `hatch run pcb all <name>` = build + fix + check. `out/` is generated and gitignored.
+
+**Never evaluate the TSX more than once per build** (each evaluation re-places and re-routes; 10+ min on
+a big board). The only extra evaluation is the placement-only gate (`--routing-disabled`, ~1 min). Exports
+run with `--disable-parts-engine`; `pcb fab` checks part availability once.
 
 ## How to work on a board
 

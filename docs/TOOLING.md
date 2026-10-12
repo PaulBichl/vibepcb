@@ -15,10 +15,10 @@ Contents: 1. Pipeline - 2. Requirements and setup - 3. CLI commands - 4. Hatch s
 
 ```
 boards/<name>/index.circuit.tsx        source of truth (tscircuit / React TSX)
-    │  vibepcb build <name>   tsci check (stops on errors), then tsci export
+    │  vibepcb build <name>   placement gate (tsci build --routing-disabled), one routed evaluation, exports from the JSON
     ▼
 out/<name>/raw/                        untouched tscircuit output, regenerated each build
-    <name>.kicad.zip, lib/, <name>.netlist.txt, .pcb.png, .pcb.svg, .sch.svg (+ .sch.png),
+    <name>.kicad.zip, <name>.netlist.txt, .pcb.png, .pcb.svg, .sch.svg (+ .sch.png),
     <name>.circuit.json
     │  vibepcb fix <name>     unpack zip, rename to <name>.kicad_*, run registered fixes
     ▼
@@ -82,11 +82,11 @@ docstring of `cli.py` doubles as `--help` text.
 | Command | Does | Writes | Exit code |
 |---------|------|--------|-----------|
 | `new <board>` | writes a starter board (a 30x20 mm board with R1, C1 and a trace) to `boards/<board>/index.circuit.tsx`; refuses if the file exists | `boards/<board>/` | 1 if it exists |
-| `build <board>` | `tscircuit.check` (`tsci check`); on errors stops and prints the count. Otherwise exports `kicad_zip` -> `raw/<board>.kicad.zip`, `kicad-library` -> `raw/lib/`, and the preview formats; converts `sch.svg` to PNG if `rsvg-convert` is on PATH | `out/<board>/raw/` | 1 on tsci errors or unknown board |
-| `fix <board>` | removes and re-creates `out/<board>/kicad/` from the raw zip and `lib/`, renames the files to the board name, then runs `fixes.apply_all` and prints one line per change | `out/<board>/kicad/` | 0 (exceptions reported as `error:`, exit 1) |
+| `build <board> [--fast]` | placement gate: `tsci build --routing-disabled`, stops on placement/outside-board/overlap/clearance errors (about 1 min on a 238-part board); then ONE routed `tsci export -f circuit-json` (stops on `*_error` elements), and `kicad_zip`, netlist, SVGs are converted from that JSON; PNGs via `rsvg-convert`. `--fast` evaluates a temp copy in `out/<board>/fast/` with `autorouterEffortLevel="2x"` | `out/<board>/raw/` | 1 on errors or unknown board |
+| `fix <board>` | removes and re-creates `out/<board>/kicad/` from the raw zip (the footprint library `lib/footprints/tscircuit_builtin.pretty` is written from the footprints embedded in the board, `kicad.write_footprint_library`), renames the files to the board name, then runs `fixes.apply_all` and prints one line per change | `out/<board>/kicad/` | 0 (exceptions reported as `error:`, exit 1) |
 | `check <board>` | `kicad-cli sch erc`, `kicad-cli pcb drc` (refills zones, saves the board), post-fill loop, sharp-corner check, prints both reports | `out/<board>/reports/{erc,drc}.json`, modifies the KiCad PCB | 1 if ERC errors, DRC errors or sharp corners |
 | `all <board>` | `build`, then `fix`, then `check`, short-circuiting on a non-zero result | all of the above | first non-zero, else `check`'s result |
-| `fab <board>` | `kicad.export_fab` on `out/<board>/kicad/<board>.kicad_pcb` | `out/<board>/fab/` | 0 |
+| `fab <board>` | part availability check once (parts engine, placement-only evaluation), then `kicad.export_fab` on `out/<board>/kicad/<board>.kicad_pcb` | `out/<board>/fab/` | 0 |
 | `list` | prints board names (folders with `index.circuit.tsx` under `boards/`) | none | 0 |
 | `docs` | downloads `https://docs.tscircuit.com/llms.txt` to `docs/tscircuit-llms.txt` (60 s timeout) | `docs/` | 0 |
 
@@ -317,7 +317,7 @@ has `test_clean_tracks_*` and `test_strict_track_rules` on the fixture board.
 
 `check` does not just run ERC and DRC:
 
-1. Run ERC, then DRC. The DRC refills zones with KiCad and saves the board
+1. Run ERC and DRC in parallel (two independent kicad-cli processes). The DRC refills zones with KiCad and saves the board
    (tscircuit's pre-computed pour is a mosaic with floating islands; KiCad's fill has
    thermal reliefs and island removal, and the Gerbers use it).
 2. Remember the board bytes (`backup`) and the number of unconnected items (`before`).
@@ -415,6 +415,14 @@ fails" (CLAUDE.md).
 The tscircuit skill is vendored in `.claude/skills/tscircuit/` (`SKILL.md`, `elements/*.md`,
 `CLI.md`, `SYNTAX.md`, ...). `SKILL.md` frontmatter: `name`, `description`, `allowed-tools`.
 Re-vendor with `hatch run update-skill`. pre-commit does not touch it.
+
+---
+
+### Build flow and timings (smu-main, 238 parts, 4 layers)
+
+Before: circuit-json export (routing ~10 min) + a second `kicad-library` export that re-routed the board
+(32 min) + `fix` 17 min. After: one routing pass; the library comes from the board. Rule: never evaluate the TSX
+more than once per build. smu-main step timings are recorded below as measured.
 
 ---
 
