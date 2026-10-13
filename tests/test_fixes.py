@@ -653,3 +653,22 @@ def test_snap_near_ends(project: fixes.KicadProject) -> None:
     assert sexpr.child(a, "end") == ["end", Sym("55"), Sym("70")]
     assert sexpr.child(c, "end") == ["end", Sym("60"), Sym("76")]
     assert fixes.snap_near_ends(project) == []
+
+
+def test_drop_loose_power_symbols(project: fixes.KicadProject) -> None:
+    assert fixes.schematic_power_symbols(project)
+    assert fixes.drop_loose_power_symbols(project) == []  # every rail symbol of the fixture is wired
+    power = [
+        s
+        for s in sexpr.children(project.sch, "symbol")
+        if (sexpr.property_value(s, "Reference") or "").startswith("#PWR")
+    ]
+    loose = power[0]
+    at = sexpr.child(loose, "at")
+    assert at is not None
+    at[1:3] = [Sym("250"), Sym("250")]  # off into empty sheet space
+    changes = fixes.drop_loose_power_symbols(project)
+    assert len(changes) == 1
+    assert loose not in project.sch
+    assert all(s in project.sch for s in power[1:])
+    assert fixes.drop_loose_power_symbols(project) == []

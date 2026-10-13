@@ -520,6 +520,39 @@ def schematic_net_labels(project: KicadProject) -> list[str]:
     return changes
 
 
+def drop_loose_power_symbols(project: KicadProject) -> list[str]:
+    """Remove power symbols whose pin touches no wire, label or other pin.
+
+    tscircuit's schematic layout can leave a GND/supply rail symbol standing alone (seen after
+    a part's custom symbol was dropped); it joins nothing, and KiCad's ERC reports its hidden
+    power pin as unconnected.
+    """
+    pins = _pin_positions(project.sch)
+    points: dict[tuple[float, float], int] = {}
+    for x1, y1, x2, y2 in _wire_segments(project.sch):
+        for q in ((round(x1, 4), round(y1, 4)), (round(x2, 4), round(y2, 4))):
+            points[q] = points.get(q, 0) + 1
+    for kind in ("label", "global_label", "hierarchical_label"):
+        for node in sexpr.children(project.sch, kind):
+            at = sexpr.child(node, "at")
+            if at is not None:
+                q = (round(_num(at, 1), 4), round(_num(at, 2), 4))
+                points[q] = points.get(q, 0) + 1
+    pin_count: dict[tuple[float, float], int] = {}
+    for q in pins.values():
+        pin_count[q] = pin_count.get(q, 0) + 1
+    changes = []
+    for symbol in list(sexpr.children(project.sch, "symbol")):
+        ref = sexpr.property_value(symbol, "Reference") or ""
+        if not ref.startswith("#PWR"):
+            continue
+        spots = [q for (r, _), q in pins.items() if r == ref]
+        if spots and all(q not in points and pin_count[q] == 1 for q in spots):
+            project.sch.remove(symbol)
+            changes.append(f"{ref} ({sexpr.property_value(symbol, 'Value')}): loose power symbol removed")
+    return changes
+
+
 def _pin_positions(sch: list[Node]) -> dict[tuple[str, str], tuple[float, float]]:
     """``(reference, pin number) -> (x, y)`` connection point of every placed symbol pin."""
     lib = sexpr.child(sch, "lib_symbols")
@@ -2817,6 +2850,7 @@ FIXES: dict[str, Fix] = {
     "schematic_net_labels": schematic_net_labels,
     "schematic_no_connects": schematic_no_connects,
     "schematic_power_symbols": schematic_power_symbols,
+    "drop_loose_power_symbols": drop_loose_power_symbols,
     "add_part_numbers": add_part_numbers,
     "link_footprint_library": link_footprint_library,
     "footprint_internal_clearance_rule": footprint_internal_clearance_rule,
