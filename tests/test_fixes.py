@@ -577,3 +577,15 @@ def test_merge_duplicate_vias(project: fixes.KicadProject) -> None:
     assert through in project.pcb
     assert blind not in project.pcb
     assert fixes.merge_duplicate_vias(project) == []
+
+
+def test_square_tees(project: fixes.KicadProject) -> None:
+    assert fixes.square_tees(project) == []
+    body = sexpr.loads("(segment (start 60 60) (end 70 60) (width 0.2) (layer F.Cu) (net 2))")
+    branch = sexpr.loads("(segment (start 63 63) (end 66 60) (width 0.2) (layer F.Cu) (net 2))")  # 45 deg onto the body
+    project.pcb += [body, branch]
+    changes = fixes.square_tees(project)
+    assert len(changes) == 1
+    assert "squared" in changes[0]
+    assert sexpr.child(branch, "end") == ["end", Sym("63"), Sym("60")]  # foot of the perpendicular from (63, 63)
+    assert fixes.square_tees(project) == []

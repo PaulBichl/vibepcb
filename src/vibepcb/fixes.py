@@ -1846,6 +1846,71 @@ def relocate_vias(project: KicadProject) -> list[str]:
     return changes
 
 
+def square_tees(project: KicadProject) -> list[str]:
+    """Make a track that ends on the side of another track of its net meet it at 90 deg.
+
+    KiCad's ``track_angle`` rule measures such T-junctions too; where the branch arrives at
+    an acute angle, its end slides along the other track to the foot of the perpendicular
+    from the branch's far end. Done only if the new piece keeps its clearance, the foot lies
+    within the other track and no bend sharper than 135 deg appears at the far end.
+    """
+    clearance, edge_clearance = _design_clearances(project)
+    copper = _copper(project.pcb)
+    obstacles = copper.obstacles()
+    changes = []
+    for s in copper.segs:
+        for k, (end, far) in enumerate(((s.a, s.b), (s.b, s.a))):
+            body = next(
+                (
+                    t
+                    for t in copper.segs_by_net.get(s.net, [])
+                    if t is not s
+                    and t.layer == s.layer
+                    and min(math.dist(end, t.a), math.dist(end, t.b)) > tracks.EPS
+                    and tracks.point_seg_distance(end, t.a, t.b) <= t.width / 2
+                ),
+                None,
+            )
+            if body is None or copper.on_pad_or_via(end, s.net, s.layer):
+                continue
+            if any(  # the end is shared with another track: moving it would cut that one off
+                o is not s and o.layer == s.layer and min(math.dist(o.a, end), math.dist(o.b, end)) <= tracks.EPS
+                for o in copper.segs_by_net.get(s.net, [])
+            ):
+                continue
+            angle = min(tracks.interior_angle(far, end, body.a), tracks.interior_angle(far, end, body.b))
+            if angle >= tracks.MIN_JUNCTION_DEG - 1:
+                continue
+            ab = (body.b[0] - body.a[0], body.b[1] - body.a[1])
+            length2 = ab[0] ** 2 + ab[1] ** 2
+            t = ((far[0] - body.a[0]) * ab[0] + (far[1] - body.a[1]) * ab[1]) / length2
+            foot = (body.a[0] + t * ab[0], body.a[1] + t * ab[1])
+            margin = tracks.EPS / math.sqrt(length2)
+            if not margin < t < 1 - margin or math.dist(foot, far) <= tracks.EPS:
+                continue
+            half = s.width / 2
+            if any(
+                o.distance(foot, far) < clearance + half for o in obstacles if o.net != s.net and s.layer in o.layers
+            ):
+                continue
+            if any(e.distance(foot, far) < edge_clearance + half for e in copper.edges if s.layer in e.layers):
+                continue
+            # the bend at the far end, where the branch continues
+            nxt = [
+                (o.b if math.dist(o.a, far) <= tracks.EPS else o.a)
+                for o in copper.segs_by_net.get(s.net, [])
+                if o is not s and o.layer == s.layer and min(math.dist(o.a, far), math.dist(o.b, far)) <= tracks.EPS
+            ]
+            if len(nxt) == 1 and tracks.interior_angle(foot, far, nxt[0]) < tracks.MIN_CORNER_DEG:
+                continue
+            node = sexpr.child(_source(s), ("start", "end")[k])
+            assert node is not None
+            node[1:3] = [Sym(_mm(foot[0])), Sym(_mm(foot[1]))]
+            changes.append(f"{s.net} at ({_mm(end[0])}, {_mm(end[1])}): T-junction squared ({angle:.0f} -> 90 deg)")
+            break
+    return changes
+
+
 SEPARATE_STEPS_MM = (0.05, 0.1, 0.15, 0.2, 0.3)
 
 
@@ -2105,7 +2170,12 @@ def apply_post_fill(
     """Fixes that need KiCad's zone fill (run by ``check`` after the refill); saves when anything changed."""
     changes = prune_pour_tracks(project, keep_near, only_near)
     if changes:  # the pruned GND tracks leave room for corners that had none before
-        second = clean_tracks(project) + separate_ends_on_pads(project) + remove_antennas(project, filled_zones=True)
+        second = (
+            clean_tracks(project)
+            + separate_ends_on_pads(project)
+            + square_tees(project)
+            + remove_antennas(project, filled_zones=True)
+        )
         changes += [f"second pass: {c}" for c in second]
         sexpr.dump(project.pcb, project.pcb_path)
     return changes
@@ -2122,6 +2192,7 @@ FIXES: dict[str, Fix] = {
     "relocate_vias": relocate_vias,
     "clean_tracks": clean_tracks,
     "separate_ends_on_pads": separate_ends_on_pads,
+    "square_tees": square_tees,
     "remove_antennas": remove_antennas,
     "drop_npth_edge_cuts": drop_npth_edge_cuts,
     "allow_footprints_in_keepouts": allow_footprints_in_keepouts,
