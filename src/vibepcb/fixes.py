@@ -1913,6 +1913,13 @@ def relocate_vias(project: KicadProject) -> list[str]:
             None,
         )
         if target is None:
+            moved_to = _relocate_via_rerouting(project, copper, node, centre, radius, net, clearance, edge_clearance)
+            if moved_to is not None:
+                changes.append(
+                    f"via {net} at ({_mm(centre[0])}, {_mm(centre[1])}) -> ({_mm(moved_to[0])}, {_mm(moved_to[1])}):"
+                    " clearance, its tracks rerouted"
+                )
+                continue
             changes.append(
                 f"via {net} at ({_mm(centre[0])}, {_mm(centre[1])}): too close to other copper, no room to move"
             )
@@ -1928,6 +1935,111 @@ def relocate_vias(project: KicadProject) -> list[str]:
             f"via {net} at ({_mm(centre[0])}, {_mm(centre[1])}) -> ({_mm(target[0])}, {_mm(target[1])}): clearance"
         )
     return changes
+
+
+def _relocate_via_rerouting(
+    project: KicadProject,
+    copper: _Copper,
+    node: list[Node],
+    centre: tracks.Point,
+    radius: float,
+    net: str,
+    clearance: float,
+    edge_clearance: float,
+) -> tracks.Point | None:
+    """Move a crowded via to the nearest spot where it fits and reroute its tracks from there.
+
+    The tracks leaving the via (runs up to their next pad, via or junction) get new 45-degree
+    routes from the new spot on their own layers (see :func:`reroute_tracks`); the move happens
+    only if every one of them routes. Returns the new centre, or None.
+    """
+    obstacles = copper.obstacles()
+    others_all = [o for o in obstacles if o.net != net]
+    attached = [
+        r
+        for r in tracks.chains(copper.segs, copper.on_pad_or_via)
+        if r.net == net and (math.dist(r.points[0], centre) <= radius or math.dist(r.points[-1], centre) <= radius)
+    ]
+    # stubs inside the via's copper go with the old position; the rest are rerouted from the new one
+    stubs = [r for r in attached if all(math.dist(p, centre) <= radius for p in (r.points[0], r.points[-1]))]
+    runs = [r for r in attached if not any(r is t for t in stubs)]
+    if not runs:
+        return None
+    spots = [
+        (
+            centre[0] + step * math.cos(2 * math.pi * k / VIA_MOVE_DIRECTIONS),
+            centre[1] + step * math.sin(2 * math.pi * k / VIA_MOVE_DIRECTIONS),
+        )
+        for step in VIA_MOVE_STEPS_MM
+        for k in range(VIA_MOVE_DIRECTIONS)
+    ]
+    spots = [q for q in spots if all(o.distance(q, q) >= radius + clearance for o in others_all)][:VIA_REROUTE_SPOTS]
+    for q in spots:
+        new_runs = []
+        for r in runs:
+            far = r.points[-1] if math.dist(r.points[0], centre) <= radius else r.points[0]
+            width = max(s.width for s in r.segs)
+            half = width / 2
+            near = [o for o in others_all if r.layer in o.layers]
+            edges = [e for e in copper.edges if r.layer in e.layers]
+            index = tracks.BoxIndex([o.box for o in near])
+            need = clearance + half + REROUTE_GRID_MARGIN_MM
+            box = (min(q[0], far[0]) - 3, min(q[1], far[1]) - 3, max(q[0], far[0]) + 3, max(q[1], far[1]) + 3)
+
+            def free(
+                pt: tracks.Point,
+                near: list[tracks.Obstacle] = near,
+                edges: list[tracks.Obstacle] = edges,
+                index: tracks.BoxIndex = index,
+                need: float = need,
+                half: float = half,
+                box: tuple[float, float, float, float] = box,
+            ) -> bool:
+                x, y = pt
+                if not (box[0] <= x <= box[2] and box[1] <= y <= box[3]):
+                    return False
+                hits = index.overlapping(x - need, y - need, x + need, y + need)
+                return all(near[i].distance(pt, pt) >= need for i in hits) and all(
+                    e.distance(pt, pt) >= edge_clearance + half for e in edges
+                )
+
+            def fits(
+                a: tracks.Point,
+                b: tracks.Point,
+                near: list[tracks.Obstacle] = near,
+                edges: list[tracks.Obstacle] = edges,
+                half: float = half,
+            ) -> bool:
+                return all(o.distance(a, b) >= clearance + half for o in near) and all(
+                    e.distance(a, b) >= edge_clearance + half for e in edges
+                )
+
+            route = tracks.grid_route(q, far, free, REROUTE_STEP_MM, None, fits)
+            if route is None or not all(fits(a, b) for a, b in itertools.pairwise(route)):
+                break
+            bends = [tracks.interior_angle(route[i - 1], route[i], route[i + 1]) for i in range(1, len(route) - 1)]
+            if any(b < tracks.MIN_CORNER_DEG - 0.5 for b in bends):
+                break
+            new_runs.append((r, route, width))
+        else:
+            at = sexpr.child(node, "at")
+            assert at is not None
+            at[1:3] = [Sym(_mm(q[0])), Sym(_mm(q[1]))]
+            for r in stubs:
+                for seg in r.segs:
+                    project.pcb.remove(_source(seg))
+            for r, route, width in new_runs:
+                template = _source(r.segs[0])
+                index_ = min(project.pcb.index(_source(s)) for s in r.segs)
+                for s in r.segs:
+                    project.pcb.remove(_source(s))
+                for k, (a, b) in enumerate(itertools.pairwise(route)):
+                    project.pcb.insert(index_ + k, _segment_node(template, a, b, width))
+            return q
+    return None
+
+
+VIA_REROUTE_SPOTS = 12  # spots tried by _relocate_via_rerouting, nearest first
 
 
 def snap_near_ends(project: KicadProject) -> list[str]:
@@ -2717,7 +2829,7 @@ FIXES: dict[str, Fix] = {
 }
 
 
-TRACK_FIXES_START = "clean_tracks"  # restore_nets rolls nets back to the board as it was before this
+TRACK_FIXES_START = "repair_zero_width_tracks"  # first geometry fix: restore_nets rolls back to before it
 
 
 def apply_all(project: KicadProject, skip: set[str] | None = None) -> dict[str, list[str]]:
