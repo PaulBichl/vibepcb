@@ -77,7 +77,7 @@ def cmd_build(board: str, *, fast: bool = False) -> int:
     tscircuit.export(source, "circuit-json", circuit)
     for change in tscircuit.repair_trace_nets(circuit):
         print(f"  re-linked route {change}")
-    errors, report = tscircuit.circuit_errors(circuit)
+    errors, report = tscircuit.routed_errors(circuit)
     print(report)
     if errors:
         print(f"tscircuit found {errors} error(s) - fix {source.relative_to(paths.ROOT)} first", file=sys.stderr)

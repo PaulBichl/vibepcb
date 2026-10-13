@@ -143,6 +143,30 @@ def circuit_errors(circuit_json: Path, only: tuple[str, ...] | None = None) -> t
     return len(errors), "\n".join(lines)
 
 
+def routed_errors(circuit_json: Path) -> tuple[int, str]:
+    """Errors that stop the build after routing, and a report that also counts the rest.
+
+    Blocking: source/netlist errors and an aborted autorouter - things KiCad can't judge.
+    tscircuit's own copper DRC (clearances, via near pad, unrouted pins of a poured net...)
+    is reported only: ``fix`` repairs what it can and KiCad's DRC in ``check`` decides.
+    """
+    elements = json.loads(circuit_json.read_text(encoding="utf-8"))
+    errors = [e for e in elements if str(e.get("type", "")).endswith("_error")]
+    blocking = [
+        e
+        for e in errors
+        if (str(e["type"]).startswith("source_") or e["type"] == "pcb_autorouting_error")
+        and not any(p in str(e.get("message", "")) for p in NON_BLOCKING_ERRORS)
+    ]
+    others = Counter(str(e["type"]) for e in errors if not any(e is b for b in blocking))
+    lines = [f"Errors: {len(blocking)}", *(f"- {e['type']}: {e.get('message', '')}" for e in blocking[:REPORT_LINES])]
+    if others:
+        lines.append(
+            "tscircuit copper DRC (left to fix/check): " + ", ".join(f"{n} x {t}" for t, n in others.most_common())
+        )
+    return len(blocking), "\n".join(lines)
+
+
 def repair_trace_nets(circuit_json: Path) -> list[str]:
     """Re-link routed traces to a ``source_trace`` of the net their end ports belong to.
 

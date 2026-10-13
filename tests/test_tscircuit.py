@@ -53,3 +53,21 @@ def test_repair_trace_nets(tmp_path: Path) -> None:
     via = next(e for e in json.loads(path.read_text()) if e["type"] == "pcb_via")
     assert via["subcircuit_connectivity_map_key"] == "netA"
     assert tscircuit.repair_trace_nets(path) == []
+
+
+def test_routed_errors_block_only_source_and_routing_failures(tmp_path: Path) -> None:
+    path = tmp_path / "board.circuit.json"
+    path.write_text(
+        json.dumps(
+            [
+                {"type": "pcb_pad_pad_clearance_error", "message": "Via and pad U1.1 are too close"},
+                {"type": "pcb_trace_error", "message": "too close"},
+                {"type": "source_failed_to_create_component_error", "message": "bad props"},
+            ]
+        ),
+        encoding="utf-8",
+    )
+    errors, report = tscircuit.routed_errors(path)
+    assert errors == 1
+    assert "source_failed_to_create_component_error" in report
+    assert "1 x pcb_pad_pad_clearance_error" in report
