@@ -566,3 +566,14 @@ def test_restore_nets(project: fixes.KicadProject) -> None:
     assert (
         sum(1 for n in sexpr.children(project.pcb, "segment") if sexpr.child(n, "net") == ["net", Sym("1")]) == routed
     )
+
+
+def test_merge_duplicate_vias(project: fixes.KicadProject) -> None:
+    assert fixes.merge_duplicate_vias(project) == []
+    through = sexpr.loads("(via (at 50 50) (size 0.6) (drill 0.3) (layers F.Cu B.Cu) (net 2))")
+    blind = sexpr.loads("(via (at 50 50) (size 0.6) (drill 0.3) (layers F.Cu In2.Cu) (net 2))")
+    project.pcb += [blind, through]
+    assert fixes.merge_duplicate_vias(project) == ["via GND at (50.0, 50.0): 1 duplicate(s) merged"]
+    assert through in project.pcb
+    assert blind not in project.pcb
+    assert fixes.merge_duplicate_vias(project) == []

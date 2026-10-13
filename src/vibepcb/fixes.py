@@ -1722,6 +1722,38 @@ def _clean_net(
     return out
 
 
+def merge_duplicate_vias(project: KicadProject) -> list[str]:
+    """Keep one via where tscircuit exported several of one net on one spot.
+
+    Seen: a through via plus a blind F.Cu-In2 via at the same centre; moving or judging one
+    of them alone (relocate_vias, remove_antennas) leaves the other in the way. The via
+    spanning the most layers stays (a through via covers every layer the others joined).
+    """
+    copper = _copper(project.pcb)
+    spots: dict[tuple[str, tuple[int, int]], list[list[Node]]] = {}
+    for node, centre, _, net in copper.vias:
+        spots.setdefault((net, tracks._key(centre)), []).append(node)
+    changes = []
+    for (net, _), nodes in spots.items():
+        if len(nodes) < 2:
+            continue
+
+        def span(node: list[Node]) -> int:
+            layers = sexpr.child(node, "layers")
+            names = [] if layers is None else [str(x) for x in layers[1:]]
+            order = list(COPPER_LAYERS)
+            idx = [order.index(n) for n in names if n in order]
+            return max(idx) - min(idx) if idx else 0
+
+        keep = max(nodes, key=span)
+        for node in nodes:
+            if node is not keep:
+                project.pcb.remove(node)
+        at = sexpr.child(keep, "at")
+        changes.append(f"via {net} at ({_num(at, 1)}, {_num(at, 2)}): {len(nodes) - 1} duplicate(s) merged")
+    return changes
+
+
 VIA_MOVE_STEPS_MM = tuple(round(0.05 * k, 2) for k in range(1, 41))  # up to 2 mm
 VIA_MOVE_DIRECTIONS = 32
 
@@ -1778,17 +1810,21 @@ def relocate_vias(project: KicadProject) -> list[str]:
                     return False
             return True
 
+        # back along its own tracks first (keeps that track straight), then all round
+        directions = [
+            ((far[0] - centre[0]) / n, (far[1] - centre[1]) / n)
+            for _, _, far in ends
+            if (n := math.dist(far, centre)) > tracks.EPS
+        ] + [
+            (math.cos(2 * math.pi * k / VIA_MOVE_DIRECTIONS), math.sin(2 * math.pi * k / VIA_MOVE_DIRECTIONS))
+            for k in range(VIA_MOVE_DIRECTIONS)
+        ]
         target = next(
             (
                 q
                 for step in VIA_MOVE_STEPS_MM
-                for k in range(VIA_MOVE_DIRECTIONS)
-                if fits(
-                    q := (
-                        centre[0] + step * math.cos(2 * math.pi * k / VIA_MOVE_DIRECTIONS),
-                        centre[1] + step * math.sin(2 * math.pi * k / VIA_MOVE_DIRECTIONS),
-                    )
-                )
+                for dx, dy in directions
+                if fits(q := (centre[0] + step * dx, centre[1] + step * dy))
             ),
             None,
         )
@@ -2082,6 +2118,7 @@ FIXES: dict[str, Fix] = {
     "propagate_split_pad_nets": propagate_split_pad_nets,
     "repair_zero_width_tracks": repair_zero_width_tracks,
     "drop_tracks_inside_pads": drop_tracks_inside_pads,
+    "merge_duplicate_vias": merge_duplicate_vias,
     "relocate_vias": relocate_vias,
     "clean_tracks": clean_tracks,
     "separate_ends_on_pads": separate_ends_on_pads,
