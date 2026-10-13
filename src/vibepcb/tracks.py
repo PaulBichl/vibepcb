@@ -118,6 +118,19 @@ def on_track_body(p: Point, a: Point, b: Point, half: float) -> bool:
     return -EPS <= along <= length + EPS and point_seg_distance(p, a, b) <= half
 
 
+def crossing(a: Point, b: Point, c: Point, d: Point) -> Point | None:
+    """Where segments a-b and c-d properly cross (not parallel), else None."""
+    r, q = _sub(b, a), _sub(d, c)
+    den = _cross(r, q)
+    if abs(den) < 1e-12:
+        return None
+    t = _cross(_sub(c, a), q) / den
+    u = _cross(_sub(c, a), r) / den
+    if not (0.0 < t < 1.0 and 0.0 < u < 1.0):
+        return None
+    return a[0] + t * r[0], a[1] + t * r[1]
+
+
 def seg_seg_distance(a: Point, b: Point, c: Point, d: Point) -> float:
     d1, d2, d3, d4 = (
         _cross(_sub(b, a), _sub(c, a)),

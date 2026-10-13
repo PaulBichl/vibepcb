@@ -171,3 +171,9 @@ def test_grid_route_goes_round_with_45_degree_bends() -> None:
     assert all(blocker.distance(a, b) >= 0.25 for a, b in itertools.pairwise(route))
     bends = [tracks.interior_angle(route[i - 1], route[i], route[i + 1]) for i in range(1, len(route) - 1)]
     assert all(b >= 134.9 for b in bends)
+
+
+def test_crossing() -> None:
+    assert tracks.crossing((0, 0), (2, 2), (0, 2), (2, 0)) == (1.0, 1.0)
+    assert tracks.crossing((0, 0), (1, 0), (0, 1), (1, 1)) is None  # parallel
+    assert tracks.crossing((0, 0), (1, 0), (2, -1), (2, 1)) is None  # beyond the end

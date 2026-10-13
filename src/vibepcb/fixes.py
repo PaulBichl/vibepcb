@@ -1287,6 +1287,15 @@ class _Copper:
             for i in index.overlapping(p[0] - e, p[1] - e, p[0] + e, p[1] + e)
         )
 
+    def same_anchor(self, p: tracks.Point, q: tracks.Point, net: str, layer: str) -> bool:
+        """Whether p and q both lie on one pad or via of the net (on that layer)."""
+        if any(math.dist(p, c) <= r and math.dist(q, c) <= r for c, r in self.vias_by_net.get(net, [])):
+            return True
+        e = tracks.ON_EDGE_MM
+        return any(
+            layer in o.layers and o.distance(p, p) <= e and o.distance(q, q) <= e for o in self.pads_by_net.get(net, [])
+        )
+
     def in_zone(self, p: tracks.Point, net: str, layer: str) -> bool:
         return any(tracks.point_in_polygon(p, poly) for poly in self.zones.get((net, layer), []))
 
@@ -1433,6 +1442,36 @@ def clean_tracks(project: KicadProject) -> list[str]:
     return changes
 
 
+def _split_crossings(project: KicadProject) -> int:
+    """Cut tracks of one net that cross each other (an X, no shared vertex) at the crossing.
+
+    The router sometimes runs a net across itself; KiCad joins the two there and measures
+    the angle. With a vertex at the crossing the loop and junction clean-up can handle it.
+    """
+    copper = _copper(project.pcb)
+    cuts: dict[int, list[tracks.Point]] = {}
+    for _net, segs in copper.segs_by_net.items():
+        for i, j in itertools.combinations(range(len(segs)), 2):
+            s, t = segs[i], segs[j]
+            if s.layer != t.layer:
+                continue
+            q = tracks.crossing(s.a, s.b, t.a, t.b)
+            if q is None or min(math.dist(q, e) for e in (s.a, s.b, t.a, t.b)) <= tracks.EPS:
+                continue
+            cuts.setdefault(id(s), []).append(q)
+            cuts.setdefault(id(t), []).append(q)
+    by_id = {id(s): s for s in copper.segs}
+    for sid, points in cuts.items():
+        seg = by_id[sid]
+        node = _source(seg)
+        chain = [seg.a, *sorted(points, key=lambda p: math.dist(seg.a, p)), seg.b]
+        index = project.pcb.index(node)
+        project.pcb[index : index + 1] = [
+            _segment_node(node, p, q, seg.width) for p, q in itertools.pairwise(chain) if math.dist(p, q) > tracks.EPS
+        ]
+    return len(cuts) // 2
+
+
 def _split_tees(project: KicadProject) -> int:
     """Give every T-junction a vertex in its through track and snap the ending track onto it.
 
@@ -1563,7 +1602,8 @@ def _clean_round(
     """One pass of :func:`clean_tracks` over all nets; returns (anything changed, stats)."""
     totals = {"duplicates": 0, "dropped": 0, "fixed": 0, "left": 0, "kept": 0}
     changed = (
-        _split_tees(project)
+        _split_crossings(project)
+        + _split_tees(project)
         + _snap_via_ends(project, clearance, edge_clearance)
         + _open_junctions(project, clearance, edge_clearance)
         > 0
@@ -2352,7 +2392,64 @@ def separate_ends_on_pads(project: KicadProject) -> list[str]:
                     break
         if moved:
             changes.append(f"{net} at ({_mm(j[0])}, {_mm(j[1])}): {moved} track end(s) separated on the pad/via")
+    return changes + _pull_back_overlapping_ends(project)
+
+
+PULL_BACK_STEPS_MM = tuple(round(0.05 * k, 2) for k in range(1, 21))  # up to 1 mm
+
+
+def _pull_back_overlapping_ends(project: KicadProject) -> list[str]:
+    """A track ending on a pad/via whose copper overlaps another track of its net at an acute
+    angle (KiCad measures it) retreats along its own line until they no longer touch, as long
+    as its end stays on the pad/via."""
+    copper = _copper(project.pcb)
+    changes = []
+    touched: set[int] = set()
+    for s in copper.segs:
+        if id(s) in touched:
+            continue
+        for k, (end, far) in enumerate(((s.a, s.b), (s.b, s.a))):
+            if not copper.attached(end, s):
+                continue
+            crossing = [
+                t
+                for t in copper.segs_by_net.get(s.net, [])
+                if t is not s
+                and t.layer == s.layer
+                and id(t) not in touched
+                and min(math.dist(e, f) for e in (s.a, s.b) for f in (t.a, t.b)) > tracks.EPS  # no shared corner
+                and tracks.seg_seg_distance(s.a, s.b, t.a, t.b) <= (s.width + t.width) / 2
+                and _line_angle(s, t) < tracks.MIN_JUNCTION_DEG - 1
+                # only where t is joined to the same pad/via anyway: else the overlap may be its link
+                and any(copper.same_anchor(end, f, s.net, s.layer) for f in (t.a, t.b))
+            ]
+            if not crossing:
+                continue
+            length = math.dist(end, far)
+            for step in PULL_BACK_STEPS_MM:
+                if step >= length - tracks.EPS:
+                    break
+                q = (end[0] + (far[0] - end[0]) * step / length, end[1] + (far[1] - end[1]) * step / length)
+                if not copper.attached(q, s):
+                    break
+                if all(tracks.seg_seg_distance(q, far, t.a, t.b) > (s.width + t.width) / 2 for t in crossing):
+                    node = sexpr.child(_source(s), ("start", "end")[k])
+                    assert node is not None
+                    node[1:3] = [Sym(_mm(q[0])), Sym(_mm(q[1]))]
+                    touched.add(id(s))
+                    changes.append(f"{s.net} at ({_mm(end[0])}, {_mm(end[1])}): end pulled back off a crossing track")
+                    break
+            break
     return changes
+
+
+def _line_angle(s: tracks.Seg, t: tracks.Seg) -> float:
+    """Angle between the two tracks' lines in degrees, 0..90."""
+    u, v = (s.b[0] - s.a[0], s.b[1] - s.a[1]), (t.b[0] - t.a[0], t.b[1] - t.a[1])
+    nu, nv = math.hypot(*u), math.hypot(*v)
+    if nu == 0 or nv == 0:
+        return 90.0
+    return math.degrees(math.acos(min(1.0, abs(u[0] * v[0] + u[1] * v[1]) / (nu * nv))))
 
 
 def remove_antennas(project: KicadProject, *, filled_zones: bool = False) -> list[str]:

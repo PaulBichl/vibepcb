@@ -545,8 +545,8 @@ def test_separate_ends_on_pads(project: fixes.KicadProject) -> None:
     b = sexpr.loads("(segment (start 92.73 100) (end 90 97.27) (width 0.2) (layer F.Cu) (net 1))")
     project.pcb += [a, b]
     changes = fixes.separate_ends_on_pads(project)  # the fixture's own VCC track ends there too
-    assert len(changes) == 1
-    assert changes[0].startswith("VCC at (92.73, 100):")
+    assert changes[0] == "VCC at (92.73, 100): 2 track end(s) separated on the pad/via"
+    assert all("pulled back" in c for c in changes[1:])  # still overlapping at 45 deg: further apart
     sa, sb = sexpr.child(a, "start"), sexpr.child(b, "start")
     assert sa is not None
     assert sb is not None
