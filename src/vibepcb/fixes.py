@@ -1754,8 +1754,8 @@ def merge_duplicate_vias(project: KicadProject) -> list[str]:
     return changes
 
 
-VIA_MOVE_STEPS_MM = tuple(round(0.05 * k, 2) for k in range(1, 41))  # up to 2 mm
-VIA_MOVE_DIRECTIONS = 32
+VIA_MOVE_STEPS_MM = tuple(round(0.05 * k, 2) for k in range(1, 61))  # up to 3 mm
+VIA_MOVE_DIRECTIONS = 48
 
 
 def relocate_vias(project: KicadProject) -> list[str]:
@@ -1763,7 +1763,7 @@ def relocate_vias(project: KicadProject) -> list[str]:
 
     In crowded fan-outs (an ESP32 module's 0.85 mm pitch pad rows) the autorouter places
     vias against or onto neighbouring pads: shorts, hole-clearance and mask-bridge errors.
-    The via moves (nearest first, 32 directions, up to 2 mm) together with the ends of its
+    The via moves (nearest first, 48 directions, up to 3 mm) together with the ends of its
     net's tracks that meet it; the via and every moved piece must keep the board clearance
     to other nets and the edge clearance to the outline, else the via stays.
     """
