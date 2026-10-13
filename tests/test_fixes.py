@@ -589,3 +589,41 @@ def test_square_tees(project: fixes.KicadProject) -> None:
     assert "squared" in changes[0]
     assert sexpr.child(branch, "end") == ["end", Sym("63"), Sym("60")]  # foot of the perpendicular from (63, 63)
     assert fixes.square_tees(project) == []
+
+
+def test_push_tracks_clear(project: fixes.KicadProject) -> None:
+    assert fixes.push_tracks_clear(project) == []
+    # a VCC zig-zag whose middle piece passes 0.1 mm from a GND via (needs 0.2 mm + half width)
+    via = sexpr.loads("(via (at 65 60.45) (size 0.6) (drill 0.3) (layers F.Cu B.Cu) (net 2))")
+    pieces = [
+        sexpr.loads(f"(segment (start {a}) (end {b}) (width 0.2) (layer F.Cu) (net 1))")
+        for a, b in (("60 55", "62 60"), ("62 60", "68 60"), ("68 60", "70 55"))
+    ]
+    project.pcb += [via, *pieces]
+    changes = fixes.push_tracks_clear(project)
+    assert len(changes) == 1
+    middle = pieces[1]
+    start, end = sexpr.child(middle, "start"), sexpr.child(middle, "end")
+    assert start is not None
+    assert end is not None
+    assert float(str(start[2])) == float(str(end[2])) < 60  # moved away from the via, still straight
+    assert fixes.push_tracks_clear(project) == []
+
+
+def test_reroute_tracks(project: fixes.KicadProject) -> None:
+    # a VCC run between two vias straight through a GND via: rerouted round it, ends kept
+    vias = [
+        sexpr.loads(f"(via (at {x} 70) (size 0.6) (drill 0.3) (layers F.Cu B.Cu) (net {n}))")
+        for x, n in ((60, 1), (64, 2), (68, 1))
+    ]
+    run = sexpr.loads("(segment (start 60 70) (end 68 70) (width 0.2) (layer F.Cu) (net 1))")
+    project.pcb += [*vias, run]
+    changes = fixes.reroute_tracks(project)
+    assert len(changes) == 1
+    copper = fixes._copper(project.pcb)
+    vcc = [s for s in copper.segs if s.net == "VCC" and s.layer == "F.Cu" and min(s.a[1], s.b[1]) > 65]
+    ends = {p for s in vcc for p in (s.a, s.b)}
+    assert (60.0, 70.0) in ends
+    assert (68.0, 70.0) in ends
+    gnd_via = next(o for o in copper.obstacles() if o.net == "GND" and o.points == ((64.0, 70.0),))
+    assert all(gnd_via.distance(s.a, s.b) >= 0.2 + 0.1 - 1e-6 for s in vcc)

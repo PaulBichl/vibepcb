@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import itertools
 import math
 
 from vibepcb import tracks
@@ -155,3 +156,18 @@ def test_unreached_finds_islands() -> None:
     vias = [((10.0, 0.0), 0.3), ((15.0, 0.0), 0.3)]
     linked, island = seg((0, 0), (3, 0)), seg((10, 0), (15, 0))  # via - track - via, no pad
     assert tracks.unreached([p1], vias, [linked, island]) == ({0, 1}, {1})
+
+
+def test_grid_route_goes_round_with_45_degree_bends() -> None:
+    blocker = Obstacle("X", LAYERS, ((2.0, -1.0), (3.0, -1.0), (3.0, 1.0), (2.0, 1.0)), polygon=True)
+
+    def free(p: tracks.Point) -> bool:
+        return blocker.distance(p, p) >= 0.3 and -3 <= p[1] <= 3 and -1 <= p[0] <= 6
+
+    route = tracks.grid_route((0.0, 0.0), (5.0, 0.0), free, 0.1)
+    assert route is not None
+    assert route[0] == (0.0, 0.0)
+    assert route[-1] == (5.0, 0.0)
+    assert all(blocker.distance(a, b) >= 0.25 for a, b in itertools.pairwise(route))
+    bends = [tracks.interior_angle(route[i - 1], route[i], route[i + 1]) for i in range(1, len(route) - 1)]
+    assert all(b >= 134.9 for b in bends)

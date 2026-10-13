@@ -1226,11 +1226,12 @@ class _Copper:
     rect_pads: set[int]  # indices of pads whose copper is their bounding box (rect / roundrect)
     edges: list[tracks.Obstacle]
     zones: dict[tuple[str, str], list[list[tracks.Point]]]  # (net, layer) -> polygons
+    keepouts: list[tracks.Obstacle] = field(default_factory=list)  # areas tracks may not enter
 
     def obstacles(self) -> list[tracks.Obstacle]:
         out = [tracks.Obstacle(s.net, frozenset({s.layer}), (s.a, s.b), s.width / 2) for s in self.segs]
         out += [tracks.Obstacle(net, frozenset(COPPER_LAYERS), (c,), r) for _, c, r, net in self.vias]
-        return out + self.pads
+        return out + self.pads + self.keepouts
 
     @functools.cached_property
     def pads_by_net(self) -> dict[str, list[tracks.Obstacle]]:
@@ -1299,6 +1300,10 @@ def _zone_polygons(zone: list[Node], *, filled: bool) -> list[tuple[str, list[tr
     return [(layer, pts) for layer in _copper_layers(zone)] if pts else []
 
 
+KEEPOUT_NET = "<keepout>"  # pseudo net of keepout areas: other copper to every real net
+KEEPOUT_INSET_MM = 0.09  # <= any board clearance (fab minimum): copper never ends up inside the keepout
+
+
 def _copper(pcb: list[Node], *, filled_zones: bool = False) -> _Copper:
     names = _net_names(pcb)
     segs = [
@@ -1338,11 +1343,26 @@ def _copper(pcb: list[Node], *, filled_zones: bool = False) -> _Copper:
             pts = _graphic_points(g)
             edges += [tracks.Obstacle("<edge>", frozenset(COPPER_LAYERS), (a, b)) for a, b in itertools.pairwise(pts)]
     zones: dict[tuple[str, str], list[list[tracks.Point]]] = {}
+    keepouts = []
     for zone in sexpr.children(pcb, "zone"):
-        if sexpr.child(zone, "keepout") is None:
+        keepout = sexpr.child(zone, "keepout")
+        if keepout is None:
             for layer, poly in _zone_polygons(zone, filled=filled_zones):
                 zones.setdefault((_net_of(zone, names), layer), []).append(poly)
-    return _Copper(names, segs, vias, pads, rect_pads, edges, zones)
+        elif sexpr.child(keepout, "tracks") in (["tracks", Sym("not_allowed")], ["tracks", "not_allowed"]):
+            for layer, poly in _zone_polygons(zone, filled=False):
+                keepouts.append(tracks.Obstacle(KEEPOUT_NET, frozenset({layer}), _inset(poly), polygon=True))
+    return _Copper(names, segs, vias, pads, rect_pads, edges, zones, keepouts)
+
+
+def _inset(poly: list[tracks.Point], by: float = KEEPOUT_INSET_MM) -> tuple[tracks.Point, ...]:
+    """An axis-aligned rectangle shrunk by ``by``: the fixes keep the copper clearance to every
+    obstacle, but copper may run right up to a keepout's edge. Other shapes stay as they are."""
+    xs, ys = sorted({round(p[0], 6) for p in poly}), sorted({round(p[1], 6) for p in poly})
+    if len(xs) != 2 or len(ys) != 2 or xs[1] - xs[0] <= 2 * by or ys[1] - ys[0] <= 2 * by:
+        return tuple(poly)
+    (x0, x1), (y0, y1) = (xs[0] + by, xs[1] - by), (ys[0] + by, ys[1] - by)
+    return ((x0, y0), (x1, y0), (x1, y1), (x0, y1))
 
 
 def _source(seg: tracks.Seg) -> list[Node]:
@@ -1931,6 +1951,255 @@ def square_tees(project: KicadProject) -> list[str]:
     return changes
 
 
+REROUTE_STEP_MM = 0.05  # grid of the local maze router
+REROUTE_WINDOWS_MM = (2.0, 4.0, 6.0)  # it may leave the old route's bounding box by this much (tried in turn)
+REROUTE_MAX_PATH_MM = 25.0
+REROUTE_GRID_MARGIN_MM = 0.03  # grid nodes keep this extra distance: pieces between them stay clear
+
+
+def reroute_tracks(project: KicadProject) -> list[str]:
+    """Rip up and reroute the track runs that still break a rule, with a local 45-degree maze router.
+
+    A run (polyline between pads, vias, junctions and loose ends) is a problem if a piece is
+    closer than the clearance to another net's copper or the board edge, a bend is sharper
+    than 135 deg, or it meets other tracks at a junction at an acute angle. The new route
+    keeps the run's ends and width, turns at most 45 deg at a time, leaves the junctions at
+    90 deg or more and keeps every clearance; the old one stays if no such route exists.
+    """
+    clearance, edge_clearance = _design_clearances(project)
+    changes: list[str] = []
+    tried: set[tuple[str, str, tuple[int, int], tuple[int, int]]] = set()
+    for _ in range(40):  # one run per pass: the copper changes with every reroute
+        copper = _copper(project.pcb)
+        obstacles = copper.obstacles()
+        at_end: dict[tuple[str, str, tuple[int, int]], list[tuple[tracks.Seg, tracks.Point]]] = {}
+        for s in copper.segs:
+            for e, f in ((s.a, s.b), (s.b, s.a)):
+                at_end.setdefault((s.net, s.layer, tracks._key(e)), []).append((s, f))
+        runs = tracks.chains(copper.segs, copper.on_pad_or_via)
+        done = False
+        for run in runs:
+            pts = run.points
+            key = (run.net, run.layer, tracks._key(pts[0]), tracks._key(pts[-1]))
+            length = sum(math.dist(a, b) for a, b in itertools.pairwise(pts))
+            if len(pts) < 2 or key in tried or length > REROUTE_MAX_PATH_MM:
+                continue
+            width = max(
+                {s.width for s in run.segs}, key=lambda w: sum(math.dist(s.a, s.b) for s in run.segs if s.width == w)
+            )
+            half = width / 2
+            widest = REROUTE_WINDOWS_MM[-1]
+            x0, y0 = min(p[0] for p in pts) - widest, min(p[1] for p in pts) - widest
+            x1, y1 = max(p[0] for p in pts) + widest, max(p[1] for p in pts) + widest
+            far = clearance + 1.0
+            others = [
+                o
+                for o in obstacles
+                if o.net != run.net
+                and run.layer in o.layers
+                and o.box[0] < x1 + far
+                and o.box[2] > x0 - far
+                and o.box[1] < y1 + far
+                and o.box[3] > y0 - far
+            ]
+            edges = [e for e in copper.edges if run.layer in e.layers]
+            mine = {id(s) for s in run.segs}
+
+            def fits(
+                a: tracks.Point,
+                b: tracks.Point,
+                others: list[tracks.Obstacle] = others,
+                edges: list = edges,
+                half: float = half,
+            ) -> bool:
+                return all(o.distance(a, b) >= clearance + half for o in others) and all(
+                    e.distance(a, b) >= edge_clearance + half for e in edges
+                )
+
+            def branches(
+                p: tracks.Point,
+                run: tracks.Chain = run,
+                mine: set[int] = mine,
+                copper: _Copper = copper,
+                at_end: dict[tuple[str, str, tuple[int, int]], list[tuple[tracks.Seg, tracks.Point]]] = at_end,
+            ) -> list[tracks.Point]:
+                """Far ends of the other tracks meeting at p (empty on a pad or via: no junction angle there)."""
+                if copper.on_pad_or_via(p, run.net, run.layer):
+                    return []
+                return [f for s, f in at_end.get((run.net, run.layer, tracks._key(p)), []) if id(s) not in mine]
+
+            def junction_ok(
+                p: tracks.Point,
+                towards: tracks.Point,
+                branches: Callable[[tracks.Point], list[tracks.Point]] = branches,
+            ) -> bool:
+                return all(tracks.interior_angle(towards, p, f) >= tracks.MIN_JUNCTION_DEG - 0.5 for f in branches(p))
+
+            inner = [
+                tracks.interior_angle(pts[i - 1], pts[i], pts[i + 1])
+                for i in range(1, len(pts) - 1)
+                if not copper.on_pad_or_via(pts[i], run.net, run.layer)
+            ]
+            problem = (
+                not all(fits(a, b) for a, b in itertools.pairwise(pts))
+                or any(angle < tracks.MIN_CORNER_DEG - 1 for angle in inner)
+                or not junction_ok(pts[0], pts[1])
+                or not junction_ok(pts[-1], pts[-2])
+            )
+            if not problem:
+                continue
+            tried.add(key)
+            start, goal = pts[0], pts[-1]
+            heads = {
+                d
+                for d, (dx, dy) in enumerate(tracks.GRID_HEADINGS)
+                if junction_ok(start, (start[0] + dx, start[1] + dy))
+            }
+            clear_at = clearance + half + REROUTE_GRID_MARGIN_MM
+            edge_at = edge_clearance + half + REROUTE_GRID_MARGIN_MM
+
+            def free_within(
+                window: float,
+                others: list[tracks.Obstacle] = others,
+                edges: list[tracks.Obstacle] = edges,
+                box: tuple[float, float, float, float] = (x0 + widest, y0 + widest, x1 - widest, y1 - widest),
+                clear_at: float = clear_at,
+                edge_at: float = edge_at,
+            ) -> Callable[[tracks.Point], bool]:
+                """``free(q)`` for routes leaving the old route's box by at most ``window``."""
+
+                def free(q: tracks.Point) -> bool:
+                    if not (box[0] - window <= q[0] <= box[2] + window and box[1] - window <= q[1] <= box[3] + window):
+                        return False
+                    return all(o.distance(q, q) >= clear_at for o in others) and all(
+                        e.distance(q, q) >= edge_at for e in edges
+                    )
+
+                return free
+
+            def end_ok(
+                node: tracks.Point,
+                goal: tracks.Point,
+                fits: Callable[[tracks.Point, tracks.Point], bool] = fits,
+                junction_ok: Callable[[tracks.Point, tracks.Point], bool] = junction_ok,
+            ) -> bool:
+                return fits(node, goal) and junction_ok(goal, node)
+
+            route = None
+            for window in REROUTE_WINDOWS_MM:
+                route = tracks.grid_route(start, goal, free_within(window), REROUTE_STEP_MM, heads, end_ok)
+                if route is not None:
+                    break
+            if route is None or len(route) < 2:
+                continue
+            bends = [tracks.interior_angle(route[i - 1], route[i], route[i + 1]) for i in range(1, len(route) - 1)]
+            new_length = sum(math.dist(a, b) for a, b in itertools.pairwise(route))
+            if (
+                not all(fits(a, b) for a, b in itertools.pairwise(route))
+                or any(b < tracks.MIN_CORNER_DEG - 0.5 for b in bends)
+                or not junction_ok(start, route[1])
+                or not junction_ok(goal, route[-2])
+                or new_length > 3 * length + 5
+            ):
+                continue
+            template = _source(run.segs[0])
+            index = min(project.pcb.index(_source(s)) for s in run.segs)
+            for s in run.segs:
+                project.pcb.remove(_source(s))
+            for k, (a, b) in enumerate(itertools.pairwise(route)):
+                project.pcb.insert(index + k, _segment_node(template, a, b, width))
+            changes.append(
+                f"{run.net} on {run.layer}: run ({_mm(start[0])}, {_mm(start[1])}) - ({_mm(goal[0])}, {_mm(goal[1])}) rerouted"
+            )
+            done = True
+            break
+        if not done:
+            break
+    return changes
+
+
+PUSH_STEPS_MM = tuple(round(0.02 * k, 2) for k in range(1, 16))  # up to 0.3 mm
+
+
+def push_tracks_clear(project: KicadProject) -> list[str]:
+    """Slide track pieces sideways that sit closer than the clearance to another net's copper.
+
+    The router occasionally squeezes a track past a via or between two others a few
+    hundredths of a mm too close. A piece whose ends are free corners (two tracks meet
+    there, no pad or via) moves perpendicular to itself, its neighbours following, in
+    small steps up to 0.3 mm, either side; every changed piece must keep the clearance and
+    no corner may get sharper than 135 deg (or than it was).
+    """
+    clearance, edge_clearance = _design_clearances(project)
+    changes = []
+    for _ in range(3):  # a push can open room for the next one
+        copper = _copper(project.pcb)
+        obstacles = copper.obstacles()
+        pushed = False
+        for s in copper.segs:
+            others = [o for o in obstacles if o.net != s.net and s.layer in o.layers]
+            if all(o.distance(s.a, s.b) >= clearance + s.width / 2 - tracks.EPS / 10 for o in others):
+                continue
+            same = [t for t in copper.segs_by_net.get(s.net, []) if t.layer == s.layer and t is not s]
+            # per end: the neighbour track meeting there and its far end; a pad, via or junction fixes it
+            ends: list[tuple[tracks.Seg, tracks.Point]] = []
+            for e in (s.a, s.b):
+                meet = [t for t in same if min(math.dist(t.a, e), math.dist(t.b, e)) <= tracks.EPS]
+                if len(meet) == 1 and not copper.on_pad_or_via(e, s.net, s.layer):
+                    t = meet[0]
+                    ends.append((t, t.b if math.dist(t.a, e) <= tracks.EPS else t.a))
+            if len(ends) != 2:
+                continue
+            d = (s.b[0] - s.a[0], s.b[1] - s.a[1])
+            n = math.hypot(*d)
+            if n <= tracks.EPS:
+                continue
+            normal = (-d[1] / n, d[0] / n)
+
+            edges = [e for e in copper.edges if s.layer in e.layers]
+
+            def ok(
+                a: tracks.Point,
+                b: tracks.Point,
+                width: float,
+                others: list[tracks.Obstacle] = others,
+                edges: list[tracks.Obstacle] = edges,
+            ) -> bool:
+                return all(o.distance(a, b) >= clearance + width / 2 for o in others) and all(
+                    e.distance(a, b) >= edge_clearance + width / 2 for e in edges
+                )
+
+            corners = (tracks.interior_angle(ends[0][1], s.a, s.b), tracks.interior_angle(s.a, s.b, ends[1][1]))
+            for step in PUSH_STEPS_MM:
+                done = False
+                for sign in (1, -1):
+                    off = (normal[0] * step * sign, normal[1] * step * sign)
+                    na = (s.a[0] + off[0], s.a[1] + off[1])
+                    nb = (s.b[0] + off[0], s.b[1] + off[1])
+                    (ta, fa), (tb, fb) = ends
+                    if not (ok(na, nb, s.width) and ok(fa, na, ta.width) and ok(fb, nb, tb.width)):
+                        continue
+                    # no corner sharper than 135 deg, or than it already was
+                    floor = min(tracks.MIN_CORNER_DEG, *corners)
+                    if min(tracks.interior_angle(fa, na, nb), tracks.interior_angle(na, nb, fb)) < floor - 1e-6:
+                        continue
+                    for seg, old, new_point in ((s, s.a, na), (s, s.b, nb), (ta, s.a, na), (tb, s.b, nb)):
+                        key = "start" if math.dist(seg.a, old) <= tracks.EPS else "end"
+                        node = sexpr.child(_source(seg), key)
+                        assert node is not None
+                        node[1:3] = [Sym(_mm(new_point[0])), Sym(_mm(new_point[1]))]
+                    changes.append(f"{s.net} track at ({_mm(s.a[0])}, {_mm(s.a[1])}) pushed {step} mm clear")
+                    done = pushed = True
+                    break
+                if done:
+                    break
+            if pushed:
+                break  # copper changed: rebuild before the next one
+        if not pushed:
+            break
+    return changes
+
+
 SEPARATE_STEPS_MM = (0.05, 0.1, 0.15, 0.2, 0.3)
 
 
@@ -2194,6 +2463,8 @@ def apply_post_fill(
             clean_tracks(project)
             + separate_ends_on_pads(project)
             + square_tees(project)
+            + push_tracks_clear(project)
+            + reroute_tracks(project)
             + remove_antennas(project, filled_zones=True)
         )
         changes += [f"second pass: {c}" for c in second]
@@ -2213,6 +2484,8 @@ FIXES: dict[str, Fix] = {
     "clean_tracks": clean_tracks,
     "separate_ends_on_pads": separate_ends_on_pads,
     "square_tees": square_tees,
+    "push_tracks_clear": push_tracks_clear,
+    "reroute_tracks": reroute_tracks,
     "remove_antennas": remove_antennas,
     "drop_npth_edge_cuts": drop_npth_edge_cuts,
     "allow_footprints_in_keepouts": allow_footprints_in_keepouts,

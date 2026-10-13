@@ -8,6 +8,7 @@ Coordinates are KiCad board millimetres (y down).
 from __future__ import annotations
 
 import functools
+import heapq
 import itertools
 import math
 from dataclasses import dataclass, field
@@ -792,3 +793,81 @@ def dangling(segs: list[Seg], connected: Callable[[Point, Seg], bool]) -> list[i
                 alive.discard(i)
                 changed = True
     return sorted(set(range(len(segs))) - alive)
+
+
+GRID_HEADINGS = [(1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1), (0, -1), (1, -1)]
+TURN_COST = 0.15  # mm-equivalent per 45 deg turn: prefer few bends
+
+
+def grid_route(
+    start: Point,
+    goal: Point,
+    free: Callable[[Point], bool],
+    step: float,
+    start_headings: set[int] | None = None,
+    end_ok: Callable[[Point, Point], bool] | None = None,
+    max_states: int = 400_000,
+) -> list[Point] | None:
+    """A 45-degree maze route from ``start`` to ``goal`` (a polyline), or None.
+
+    The grid is aligned to ``start``; moves go to the 8 neighbours and turn by at most 45 deg
+    at a time, so no bend is sharper than 135 deg. ``free(p)``: may the track centre pass p.
+    ``start_headings``: allowed first directions (indices into ``GRID_HEADINGS``).
+    The route ends with a straight piece from a grid node within one step of ``goal`` to
+    ``goal``, if ``end_ok(node, goal)`` accepts it. Collinear nodes are merged.
+    """
+
+    def at(ix: int, iy: int) -> Point:
+        return start[0] + ix * step, start[1] + iy * step
+
+    def h(ix: int, iy: int) -> float:
+        return math.dist(at(ix, iy), goal)
+
+    heap: list[tuple[float, float, int, int, int]] = []
+    best: dict[tuple[int, int, int], float] = {}
+    parent: dict[tuple[int, int, int], tuple[int, int, int] | None] = {}
+    for d in start_headings if start_headings is not None else range(8):
+        dx, dy = GRID_HEADINGS[d]
+        cost = step * math.hypot(dx, dy)
+        if free(at(dx, dy)):
+            state = (dx, dy, d)
+            best[state] = cost
+            parent[state] = None
+            heapq.heappush(heap, (cost + h(dx, dy), cost, dx, dy, d))
+    popped = 0
+    while heap and popped < max_states:
+        _, cost, ix, iy, d = heapq.heappop(heap)
+        popped += 1
+        if cost > best.get((ix, iy, d), math.inf):
+            continue
+        node = at(ix, iy)
+        if math.dist(node, goal) <= step * 1.5 and (end_ok is None or end_ok(node, goal)):
+            states = [(ix, iy, d)]
+            while (prev := parent[states[-1]]) is not None:
+                states.append(prev)
+            points = [start, *(at(x, y) for x, y, _ in reversed(states)), goal]
+            return _merge_collinear(points)
+        for turn in (-1, 0, 1):
+            nd = (d + turn) % 8
+            dx, dy = GRID_HEADINGS[nd]
+            nx, ny = ix + dx, iy + dy
+            if not free(at(nx, ny)):
+                continue
+            ncost = cost + step * math.hypot(dx, dy) + (TURN_COST if turn else 0.0)
+            if ncost < best.get((nx, ny, nd), math.inf):
+                best[nx, ny, nd] = ncost
+                parent[nx, ny, nd] = (ix, iy, d)
+                heapq.heappush(heap, (ncost + h(nx, ny), ncost, nx, ny, nd))
+    return None
+
+
+def _merge_collinear(points: list[Point]) -> list[Point]:
+    out = [points[0]]
+    for p in points[1:]:
+        if math.dist(p, out[-1]) <= EPS / 10:
+            continue
+        if len(out) >= 2 and abs(_cross(_sub(out[-1], out[-2]), _sub(p, out[-1]))) <= 1e-9:
+            out[-1] = p
+        else:
+            out.append(p)
+    return out
