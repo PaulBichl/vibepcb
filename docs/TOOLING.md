@@ -149,34 +149,54 @@ type Fix = Callable[[KicadProject], list[str]]
 - `KicadProject` (dataclass): `directory`, `pcb`, `sch`, `pcb_path`, `sch_path`.
   `KicadProject.load(directory, stem)` parses both files; `save()` writes both.
 
-### 5.2 Registry and run order
+### 5.2 Table of all fixes
 
-`FIXES: dict[str, Fix]` is the registry. Dict order is run order. Current entries, in order:
+Run order = `FIXES` order in `fixes.py`. Stage: **build** = `cmd_build`, **fix** = `cmd_fix`
+(`fixes.apply_all`), **check** = `cmd_check` (needs KiCad's zone fill, so not in `FIXES`).
+Track geometry lives in `src/vibepcb/tracks.py`; every track change is kept only if KiCad's
+connection rules still join the net's pads (checked net by net, else polyline by polyline).
 
-1. `rename_auto_nets`: tscircuit's selector-style net names -> `Net-(R1-Pad2)`
-2. `propagate_split_pad_nets`: split pads (same number, one pad carries the net) get the net
-3. `drop_tracks_inside_pads`: stubs lying entirely inside a same-net pad
-4. `clean_tracks`: track cleanup (section 7)
-5. `remove_antennas`: dangling track stubs and vias on fewer than two layers
-6. `drop_npth_edge_cuts`: NPTH hole outlines duplicated as Edge.Cuts
-7. `allow_footprints_in_keepouts`: footprints may overlap keepouts; copper restrictions kept
-8. `standard_board_thickness`: 1.4 mm -> 1.6 mm
-9. `fix_value_equals_reference`: Value derived from the footprint when tscircuit set Value = Reference
-10. `fill_schematic_footprints`: copy the footprint lib id into empty schematic Footprint fields
-11. `schematic_net_labels`: net-name texts next to wires become real net labels
-12. `schematic_no_connects`: no-connect flags on schematic pins whose pad has no net
-13. `schematic_power_symbols`: tscircuit's GND/supply rail symbols become real power symbols plus PWR_FLAG
-14. `add_part_numbers`: MPN / LCSC from the circuit JSON onto symbols
-15. `link_footprint_library`: register the exported library under the nickname `tscircuit`
-16. `footprint_internal_clearance_rule`: custom DRC rule, hole clearance inside a footprint (0.15 mm)
-17. `zone_thermal_reliefs`: pads on zones get thermal-relief spokes instead of solid copper
-18. `thermal_spoke_rule`: one spoke per pad is accepted (KiCad otherwise reports `starved_thermal`)
-19. `strict_track_rules`: see 5.4
-20. `place_reference_designators`: 0.8 mm reference text, placed in free space next to the part
-21. `fit_schematic_sheet`: smallest landscape ISO sheet that fits, with title block
+| # | Name | What it does | Why (tscircuit / router quirk or rule) |
+|---|------|--------------|----------------------------------------|
+| - | `tscircuit.repair_trace_nets` (build) | Re-links each routed trace to the `source_trace` of the net its end ports belong to | Autorouter sometimes tags a route with another net's id; the export then has shorts and broken nets |
+| 1 | `rename_auto_nets` | Selector-style net names -> `Net-(R1-Pad2)` | tscircuit exports names KiCad does not use |
+| 2 | `propagate_split_pad_nets` | Gives every pad of a split pad (same number) the net of its siblings; marks the part `duplicate_pad_numbers_are_jumpers` | Export puts the net on one pad only; KiCad reports the rest as unconnected copper |
+| 3 | `repair_zero_width_tracks` | Zero-width segments take the width of the tracks they join | Router occasionally emits width 0 = copper-less, broken connection |
+| 4 | `drop_tracks_inside_pads` | Removes segments lying wholly inside a same-net pad | Tiny stubs in custom pads add no connection and fail min track width |
+| 5 | `merge_duplicate_vias` | Keeps one via (most layers) where several of one net sit on one spot | Router exports through + blind via at one centre; other fixes then trip over the twin |
+| 6 | `relocate_vias` | Moves vias too close to other nets to the nearest clear spot (<= 3 mm), with the track ends meeting them | Crowded fan-outs: vias on neighbouring pads (shorts, hole/mask errors) |
+| 7 | `clean_tracks` | Per net: drops duplicate routes, loops, zig-zags inside pads, spikes; cuts/chamfers bends sharper than 135 deg; splits T-junctions | Autorouter output is messy; quality bar is no sharp bends / no antennas |
+| 8 | `separate_ends_on_pads` | Pulls apart track ends meeting at an acute angle on a pad/via | KiCad `track_angle` measures them although the pad joins them anyway |
+| 9 | `square_tees` | Slides a track ending on another track's side so it meets at 90 deg | `track_angle` measures T-junctions too |
+| 10 | `push_tracks_clear` | Slides track pieces sideways (<= 0.3 mm) that are a few hundredths too close to other nets | Router squeezes tracks past vias slightly under clearance |
+| 11 | `reroute_tracks` | Rips up runs that still break a rule and reroutes them with a local 45-deg maze router | Last resort for cramped spots the geometric fixes cannot solve; old route stays if none found |
+| 12 | `remove_antennas` | Deletes tracks with a loose end and vias joining fewer than 2 layers | Quality bar: no antennas |
+| 13 | `drop_npth_edge_cuts` | Removes Edge.Cuts copies of footprint NPTH holes | Export writes holes twice; DRC then applies 0.5 mm board-edge clearance to them |
+| 14 | `allow_footprints_in_keepouts` | Footprints may overlap keepouts; copper/pour restrictions stay | Export writes `footprints not_allowed`, so an antenna keepout flags its own module |
+| 15 | `standard_board_thickness` | 1.4 mm -> 1.6 mm | Export default; fabs default to 1.6 |
+| 16 | `fix_value_equals_reference` | Derives Value from the footprint where Value == Reference | tscircuit sets Value = Reference for valueless parts |
+| 17 | `fill_schematic_footprints` | Copies each footprint lib id into the schematic's empty Footprint field | Otherwise "Update PCB from Schematic" deletes every footprint |
+| 18 | `schematic_net_labels` | Net-name texts next to wires become real net labels | Export draws label stubs as plain text; ERC sees unconnected pins |
+| 19 | `schematic_no_connects` | No-connect flag on every schematic pin whose pad has no net | Export has none; ERC fails on every unused pin |
+| 20 | `schematic_power_symbols` | GND/supply rail parts become power symbols, plus one PWR_FLAG per rail | Rails are exported as ordinary parts (own net each, in BOM, on board) |
+| 21 | `add_part_numbers` | Copies MPN / LCSC from the circuit JSON into hidden fields | Export drops them, so the BOM could not say what to buy |
+| 22 | `link_footprint_library` | Registers the footprint library under the `tscircuit` nickname | Footprints are `tscircuit:<name>`, library is `tscircuit_builtin` |
+| 23 | `footprint_internal_clearance_rule` | Custom DRC rule: hole clearance inside one footprint follows its land pattern | Manufacturer land patterns (USB-C) sit under the board-wide hole clearance |
+| 24 | `zone_thermal_reliefs` | Pad-to-pour connections via narrow thermal spokes instead of solid | Solid connect on 0402s causes tombstoning and hard rework |
+| 25 | `thermal_spoke_rule` | Accepts a single spoke per pad | Hemmed-in pads get one spoke; KiCad would report `starved_thermal` |
+| 26 | `router_clearance_tolerance` | 5 um slack on copper clearance | Router targets exactly the clearance; float error leaves gaps 1-2 um short |
+| 27 | `strict_track_rules` | DRC rule "no acute angles" (`track_angle` min 89); `track_dangling`, `via_dangling`, `track_angle` set to error | KiCad only warns about dangling items by default; 135-deg bends are checked by `sharp_corners` |
+| 28 | `place_reference_designators` | 0.8 mm reference text moved to the first free spot around the part | tscircuit's 0.4 mm text at fixed offsets lands on pads/silk/edge |
+| 29 | `fit_schematic_sheet` | Smallest landscape ISO sheet that fits, centred, with title block | Export picks A0/A1 and draws in a corner |
+| - | `schgen.write` (fix) | Generates a netlist-style schematic (boxes + global net labels) from the circuit JSON | Big boards set `schematicDisabled` (tscircuit's schematic layout does not finish); BOM/ERC/PDF need symbols |
+| - | `restore_nets` (fix, end) | Nets KiCad still finds unconnected after the track fixes go back to their routed state | Safety net: one unclean net beats a disconnected one |
+| - | `prune_pour_tracks` (check) | Removes tracks of a poured net that KiCad's fill already provides | tscircuit routes GND as tracks before pouring; redundant, take room, short thermal reliefs |
+| - | second pass (check) | After pruning: `clean_tracks`, `separate_ends_on_pads`, `square_tees`, `push_tracks_clear`, `reroute_tracks`, `remove_antennas` again | Pruned tracks free room for corners that had none |
+| - | `restore_nets` (check, last attempt) | If DRC still finds more unconnected items after 4 post-fill attempts, those nets are restored from before the post-fill | Same safety net, after the refill |
+| - | `sharp_corners`, `unpoured_copper_layers` (check) | Not fixes, hard gates: bends < 135 deg; copper layers without a pour fail `check` | Quality bar: 135-deg minimum (not expressible in KiCad); common practice = every layer poured |
 
-`apply_all(project, skip=None)` runs every entry (except `skip`), saves once, and returns
-`{name: [changes]}`. `fix` prints `fix <name>: <change>` for each change.
+`apply_all(project, skip=None)` runs every `FIXES` entry (except `skip`), saves once, and returns
+`{name: [changes]}`. `fix` prints `fix <name>: <change>` per change.
 
 ### 5.3 Adding a fix
 
@@ -420,9 +440,14 @@ Re-vendor with `hatch run update-skill`. pre-commit does not touch it.
 
 ### Build flow and timings (smu-main, 238 parts, 4 layers)
 
-Before: circuit-json export (routing ~10 min) + a second `kicad-library` export that re-routed the board
-(32 min) + `fix` 17 min. After: one routing pass; the library comes from the board. Rule: never evaluate the TSX
-more than once per build. smu-main step timings are recorded below as measured.
+| Step | Time | Notes |
+|------|------|-------|
+| `build` | ~75 s with routing cached; ~7-10 min fresh route | placement gate (`--routing-disabled`, ~1 min) + ONE routed `circuit-json` evaluation; KiCad zip, netlist, SVGs converted from the JSON |
+| `fix` | ~1.5-2.5 min | assemble from zip, `FIXES`, then KiCad-verified `restore_nets` |
+| `check` | ~1.5-5 min | ERC + DRC in parallel, refill, post-fill loop (up to 4 DRC reruns) |
+
+History: used to be circuit-json export (~10 min) + a second `kicad-library` export that re-routed
+(32 min) + `fix` 17 min. Rule: never evaluate the TSX more than once per build.
 
 ---
 

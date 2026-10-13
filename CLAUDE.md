@@ -24,9 +24,16 @@ out/<name>/reports/{erc,drc}.json
 
 `hatch run pcb all <name>` = build + fix + check. `out/` is generated and gitignored.
 
-**Never evaluate the TSX more than once per build** (each evaluation re-places and re-routes; 10+ min on
-a big board). The only extra evaluation is the placement-only gate (`--routing-disabled`, ~1 min). Exports
-run with `--disable-parts-engine`; `pcb fab` checks part availability once.
+Rules of the pipeline (details and timings: `docs/TOOLING.md`):
+
+- **Build evaluates the TSX once** (circuit JSON); KiCad zip, netlist and SVGs are converted from it.
+  Never add a second evaluation (each re-places and re-routes; 10+ min on a big board).
+- **Placement gate** before routing (`--routing-disabled`, ~1 min): placement/overlap errors stop the build early.
+- `build --fast` / `all --fast`: router effort 2x on a temp copy, for experiments only, never final runs.
+- `fix` has a KiCad-verified safety net: nets KiCad finds unconnected after the track clean-up are rolled back.
+- Exports run with `--disable-parts-engine`; `pcb fab` checks part availability once.
+- `node_modules/tscircuit` may carry local patches (see the VibePCB-smu commit notes); `npm install` can drop them.
+- **All fixes are listed in `docs/TOOLING.md` section 5.2** (name | what | why) - update it with any fix you add.
 
 ## How to work on a board
 
@@ -67,22 +74,10 @@ test in `tests/test_fixes.py` against the fixtures in `tests/data/`.
   kiutils/kicad-skip: they drop KiCad 9 data / crash on tscircuit's output.
 - In the tree, `Sym` = bare atom (`F.Cu`, `1.6`), plain `str` = quoted string.
   Keep that distinction when writing values (`Sym("1.6")` vs `"VCC"`).
-- Known tscircuit export quirks already handled: selector-style net names,
-  1.4 mm board thickness, Value == Reference, empty schematic Footprint fields,
-  footprint library nickname mismatch (`tscircuit:` vs `tscircuit_builtin`),
-  split pads (same number) with the net on one pad only, track stubs inside pads,
-  footprint NPTH holes duplicated as Edge.Cuts, keepouts forbidding footprints,
-  net-label stubs exported as plain text, no no-connect flags, GND/supply rails
-  as ordinary parts (not power symbols), MPN/LCSC numbers dropped, solid pad-to-pour
-  connections (-> thermal reliefs), 0.4 mm reference text at fixed offsets (-> 0.8 mm,
-  auto-placed in free space), oversized sheet + empty title block, net labels on the
-  pin end of their stub, router gaps 1-2 um short of the clearance (-> 5 um DRC
-  slack), and messy routing (`clean_tracks`, geometry in `src/vibepcb/tracks.py`):
-  overlapping duplicate routes, loops/lattices of one net,
-  T-junctions without a vertex, zig-zags inside pads/vias, spikes, 90 deg / acute
-  bends. Every track change there is verified against KiCad's connection rules
-  (pad: track end inside it or pad centre on the track; via: via centre on the track;
-  track-track: end to end) net by net, else polyline by polyline.
+- Which export/router quirks are already handled, and why: table in
+  [docs/TOOLING.md](docs/TOOLING.md#52-table-of-all-fixes). Every track change is verified against
+  KiCad's connection rules (pad: track end inside it or pad centre on the track; via: via centre on the track;
+  track-track: end to end), net by net, else polyline by polyline.
 - `check` refills zones with KiCad and saves the board (tscircuit's pour is a
   mosaic with floating islands). The KiCad 10 save writes `(net "NAME")` without
   ids, so registered fixes must only run on fresh tscircuit output (`fix` always
@@ -96,9 +91,8 @@ test in `tests/test_fixes.py` against the fixtures in `tests/data/`.
 
 ## Board design lessons (tscircuit autorouter / parts)
 
-- Follow common PCB practice by default (every copper layer poured with GND or a supply, clearances at
+- Default to common PCB practice (every copper layer poured with GND or a supply, clearances at
   what the fab allows); any deviation needs a reason written in the board source.
-
 - The router's results jump with tiny placement changes; if `tsci check` shows a
   few clearance/via-in-pad errors, nudge the nearby passive 0.5 mm and rebuild.
 - Router clearance targets also become the KiCad rules: board props

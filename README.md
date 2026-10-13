@@ -10,6 +10,22 @@ boards/<name>/index.circuit.tsx ──build──▶ out/<name>/raw ──fix─
        (LLM writes this)            tsci check + export      scripted fixes        kicad-cli ERC/DRC
 ```
 
+## How it works
+
+```
+index.circuit.tsx ─▶ tscircuit (evaluated ONCE) ─▶ circuit JSON ─▶ KiCad files ─▶ fix ─▶ check ─▶ fab
+```
+
+| Stage | Why it exists |
+|-------|---------------|
+| `build` | Placement gate first (about 1 min, fails before the slow routing); then one place + route pass whose circuit JSON feeds everything else (KiCad files, netlist, previews), so a board is never re-routed |
+| `fix` | tscircuit's KiCad export has systematic quirks and a messy autorouter; scripted fixes make it open cleanly, with a KiCad-verified safety net (nets KiCad finds broken are rolled back). All fixes: [table in docs/TOOLING.md](docs/TOOLING.md#52-table-of-all-fixes) |
+| `check` | KiCad's own ERC/DRC plus house rules (poured layers, no sharp bends, no antennas) decide when a board is done, not the eye |
+| `fab` | Gerbers, BOM, pick-and-place, PDF, renders, JLCPCB set; only for boards whose `check` passes |
+
+Timings on a 238-part, 4-layer board: build ~75 s (routing cached) to ~10 min, fix ~2 min, check ~2-5 min
+(`build --fast` trades routing effort for speed while experimenting).
+
 ## Setup
 
 Requirements: [hatch](https://hatch.pypa.io), git, and for `check`/`fab` KiCad >= 9.
@@ -40,7 +56,7 @@ agent reads [CLAUDE.md](CLAUDE.md) for the loop and the vendored
 [tscircuit skill](.claude/skills/tscircuit/SKILL.md) for the syntax. It edits the
 TSX, builds, looks at the PNG previews and netlist, and iterates on the
 `tsci check` / KiCad ERC/DRC findings. Anything tscircuit consistently gets wrong
-in the KiCad export becomes a fix in `src/vibepcb/fixes.py`.
+in the KiCad export becomes a fix in `src/vibepcb/fixes.py` (see the table of fixes).
 
 ## Layout
 
@@ -48,14 +64,15 @@ in the KiCad export becomes a fix in `src/vibepcb/fixes.py`.
 |------|------|
 | `boards/` | tscircuit sources, one folder per board |
 | `src/vibepcb/cli.py` | `vibepcb` command (`hatch run pcb ...`) |
-| `src/vibepcb/tscircuit.py` | wrapper around `tsci` |
+| `src/vibepcb/tscircuit.py` | wrapper around `tsci` (+ trace-net repair) |
+| `src/vibepcb/schgen.py` | netlist-style schematic for boards without tscircuit symbols |
 | `src/vibepcb/kicad.py` | project assembly + `kicad-cli` ERC/DRC/fab |
 | `src/vibepcb/fixes.py` | post-processing fixes on the KiCad files |
 | `src/vibepcb/tracks.py` | track-cleaning geometry (bends, junctions, clearances) |
 | `src/vibepcb/sexpr.py` | lossless KiCad S-expression reader/writer |
 | `src/vibepcb/paths.py` | project root and `boards/` / `out/` layout |
 | `tests/` | pytest suite, fixture board in `tests/data/` |
-| `docs/TOOLING.md` | full tooling reference (commands, fixes, checks, gotchas) |
+| `docs/TOOLING.md` | full tooling reference (commands, [table of all fixes](docs/TOOLING.md#52-table-of-all-fixes), checks, gotchas) |
 | `.claude/skills/tscircuit/` | official tscircuit agent skill (`hatch run update-skill`) |
 | `out/` | generated, gitignored |
 
