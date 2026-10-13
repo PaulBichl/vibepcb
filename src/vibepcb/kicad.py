@@ -6,19 +6,20 @@ import copy
 import csv
 import json
 import os
+import re
 import shutil
 import subprocess
+import tempfile
 import zipfile
 from collections import Counter
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from vibepcb import sexpr
 from vibepcb.sexpr import Sym
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from vibepcb.sexpr import Node
 
 
@@ -156,6 +157,16 @@ class CheckResult:
             if "pos" in item
         ]
 
+    def unconnected_nets(self) -> set[str]:
+        """Nets of the items in unconnected-item reports."""
+        return {
+            m[1]
+            for v in self.violations
+            if v.get("type") == "unconnected_items"
+            for item in v.get("items", [])
+            if (m := re.search(r"\[([^\]]+)\]", str(item.get("description", ""))))
+        }
+
     def spots_of(self, kind: str) -> list[tuple[float, float]]:
         """Positions of the items in reports of one violation type (mm)."""
         return [
@@ -196,6 +207,16 @@ def run_drc(pcb: Path, report: Path) -> CheckResult:
     for key in ("violations", "unconnected_items", "schematic_parity"):
         violations += data.get(key, [])
     return CheckResult("DRC", report, violations)
+
+
+def unconnected_nets(pcb: Path, report: Path) -> set[str]:
+    """Nets KiCad reports unconnected items of, checked on a copy (DRC refills and saves the board)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        for f in pcb.parent.glob(f"{pcb.stem}.kicad_*"):
+            if f.suffix in (".kicad_pcb", ".kicad_pro", ".kicad_dru"):
+                shutil.copy(f, tmp)
+        result = run_drc(Path(tmp) / pcb.name, report)
+    return result.unconnected_nets()
 
 
 def run_erc(sch: Path, report: Path) -> CheckResult:

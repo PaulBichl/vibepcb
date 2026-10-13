@@ -19,7 +19,7 @@ import sys
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
-from vibepcb import fixes, kicad, paths, schgen, tscircuit
+from vibepcb import fixes, kicad, paths, schgen, sexpr, tscircuit
 
 TSCIRCUIT_LLM_DOCS = "https://docs.tscircuit.com/llms.txt"
 
@@ -99,10 +99,16 @@ def cmd_fix(board: str) -> int:
     if not schgen.has_symbols(sch) and circuit.exists():  # schematicDisabled: netlist-style schematic
         schgen.write(circuit, sch, board)
         print(f"  schematic generated from {circuit.relative_to(paths.ROOT)} (boxes + net labels)")
-    report = fixes.apply_all(fixes.KicadProject.load(target, board))
+    project = fixes.KicadProject.load(target, board)
+    report = fixes.apply_all(project)
     for name, changes in report.items():
         for change in changes:
             print(f"  fix {name}: {change}")
+    # safety net: nets KiCad finds broken after the track fixes go back to their routed state
+    lost = kicad.unconnected_nets(project.pcb_path, paths.OUT_DIR / board / "reports" / "fix-drc.json")
+    for change in fixes.restore_nets(project, lost):
+        print(f"  fix restore_nets: {change}")
+    project.save()
     print(f"KiCad project: {(target / f'{board}.kicad_pro').relative_to(paths.ROOT)}")
     return 0
 
@@ -129,6 +135,12 @@ def cmd_check(board: str) -> int:
         if not changes:
             break
         drc = kicad.run_drc(pcb, reports / "drc.json")
+        if drc.unconnected > before:  # nets the post-fill broke go back to their state before it
+            loaded = fixes.KicadProject.load(project, board)
+            loaded.before_track_fixes = sexpr.loads(backup.decode("utf-8"))
+            changes += fixes.restore_nets(loaded, drc.unconnected_nets())
+            loaded.save()
+            drc = kicad.run_drc(pcb, reports / "drc.json")
         if drc.unconnected <= before:
             for change in changes:
                 print(f"  post-fill: {change}")

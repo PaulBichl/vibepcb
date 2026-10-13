@@ -40,6 +40,7 @@ class KicadProject:
     sch: list[Node]
     pcb_path: Path
     sch_path: Path
+    before_track_fixes: list[Node] | None = None  # board copy taken by apply_all (see restore_nets)
 
     @classmethod
     def load(cls, directory: Path, stem: str) -> KicadProject:
@@ -2092,11 +2093,47 @@ FIXES: dict[str, Fix] = {
 }
 
 
+TRACK_FIXES_START = "clean_tracks"  # restore_nets rolls nets back to the board as it was before this
+
+
 def apply_all(project: KicadProject, skip: set[str] | None = None) -> dict[str, list[str]]:
     """Run every registered fix (except ``skip``), save, and return the changes per fix."""
-    report = {name: fix(project) for name, fix in FIXES.items() if name not in (skip or set())}
+    report = {}
+    for name, fix in FIXES.items():
+        if name == TRACK_FIXES_START:
+            project.before_track_fixes = copy.deepcopy(project.pcb)
+        if name not in (skip or set()):
+            report[name] = fix(project)
     project.save()
     return report
+
+
+TRACK_NODES = ("segment", "arc", "via")
+
+
+def restore_nets(project: KicadProject, nets: set[str]) -> list[str]:
+    """Put the tracks and vias of ``nets`` back as they were before the track clean-up.
+
+    The safety net for the geometry fixes: their connection model follows KiCad's rules
+    as measured, but where KiCad still finds a net broken afterwards (``fix`` asks it), that
+    net goes back to its routed state - one unclean net beats a disconnected one.
+    """
+    snapshot = project.before_track_fixes
+    if snapshot is None or not nets:
+        return []
+    names_now, names_then = _net_names(project.pcb), _net_names(snapshot)
+    project.pcb[:] = [
+        n
+        for n in project.pcb
+        if not (sexpr.head(n) in TRACK_NODES and isinstance(n, list) and _net_of(n, names_now) in nets)
+    ]
+    restored = [
+        n for n in snapshot if sexpr.head(n) in TRACK_NODES and isinstance(n, list) and _net_of(n, names_then) in nets
+    ]
+    project.pcb.extend(copy.deepcopy(restored))
+    return [
+        f"{net}: tracks/vias restored as routed (KiCad found it unconnected after the clean-up)" for net in sorted(nets)
+    ]
 
 
 def unpoured_copper_layers(project: KicadProject) -> list[str]:

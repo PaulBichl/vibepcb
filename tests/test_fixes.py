@@ -552,3 +552,17 @@ def test_separate_ends_on_pads(project: fixes.KicadProject) -> None:
     assert sb is not None
     assert sa[1:] != sb[1:]  # no shared vertex any more
     assert fixes.separate_ends_on_pads(project) == []
+
+
+def test_restore_nets(project: fixes.KicadProject) -> None:
+    assert fixes.restore_nets(project, {"VCC"}) == []  # no snapshot yet
+    project.before_track_fixes = copy.deepcopy(project.pcb)
+    routed = sum(1 for n in sexpr.children(project.pcb, "segment") if sexpr.child(n, "net") == ["net", Sym("1")])
+    for seg in [n for n in sexpr.children(project.pcb, "segment") if sexpr.child(n, "net") == ["net", Sym("1")]]:
+        project.pcb.remove(seg)  # a clean-up that went wrong
+    assert fixes.restore_nets(project, {"VCC"}) == [
+        "VCC: tracks/vias restored as routed (KiCad found it unconnected after the clean-up)"
+    ]
+    assert (
+        sum(1 for n in sexpr.children(project.pcb, "segment") if sexpr.child(n, "net") == ["net", Sym("1")]) == routed
+    )
