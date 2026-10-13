@@ -1890,6 +1890,65 @@ def relocate_vias(project: KicadProject) -> list[str]:
     return changes
 
 
+def snap_near_ends(project: KicadProject) -> list[str]:
+    """Join track ends that overlap another track of their net without meeting it exactly.
+
+    KiCad connects tracks whose copper overlaps and measures the angle between them; the
+    router leaves ends a few microns apart (two "ends" of one corner) or an end beside another
+    track inside its copper. The end moves onto the other track's nearest end (if that is
+    within reach) or onto its centreline, so the corner/junction fixes see a real vertex or T.
+    Moves that would break the clearance are skipped.
+    """
+    clearance, edge_clearance = _design_clearances(project)
+    changes: list[str] = []
+    for _ in range(SNAP_MAX_ROUNDS):  # one end per round: every snap changes what the next one sees
+        change = _snap_one_end(project, clearance, edge_clearance)
+        if change is None:
+            break
+        changes.append(change)
+    return changes
+
+
+SNAP_MAX_ROUNDS = 500
+
+
+def _snap_one_end(project: KicadProject, clearance: float, edge_clearance: float) -> str | None:
+    copper = _copper(project.pcb)
+    obstacles = copper.obstacles()
+    for s in copper.segs:
+        for k, (end, far) in enumerate(((s.a, s.b), (s.b, s.a))):
+            if copper.on_pad_or_via(end, s.net, s.layer):
+                continue
+            same = [t for t in copper.segs_by_net.get(s.net, []) if t is not s and t.layer == s.layer]
+            if any(min(math.dist(end, t.a), math.dist(end, t.b)) <= 1e-6 for t in same):
+                continue  # already meets a track end exactly
+            ends_near = [q for t in same for q in (t.a, t.b) if 1e-6 < math.dist(q, end) <= (s.width + t.width) / 2]
+            if ends_near:  # two ends of one corner, a little apart
+                target = min(ends_near, key=lambda q: math.dist(q, end))
+            else:
+                if any(tracks.point_seg_distance(end, t.a, t.b) <= t.width / 2 for t in same):
+                    continue  # already on a track (a T)
+                reach = [t for t in same if tracks.point_seg_distance(end, t.a, t.b) <= (s.width + t.width) / 2]
+                if not reach:
+                    continue
+                t = min(reach, key=lambda t: tracks.point_seg_distance(end, t.a, t.b))
+                ab = (t.b[0] - t.a[0], t.b[1] - t.a[1])
+                u = ((end[0] - t.a[0]) * ab[0] + (end[1] - t.a[1]) * ab[1]) / (ab[0] ** 2 + ab[1] ** 2)
+                target = (t.a[0] + u * ab[0], t.a[1] + u * ab[1])
+            half = s.width / 2
+            if any(
+                o.distance(target, far) < clearance + half for o in obstacles if o.net != s.net and s.layer in o.layers
+            ):
+                continue
+            if any(e.distance(target, far) < edge_clearance + half for e in copper.edges if s.layer in e.layers):
+                continue
+            node = sexpr.child(_source(s), ("start", "end")[k])
+            assert node is not None
+            node[1:3] = [Sym(_mm(target[0])), Sym(_mm(target[1]))]
+            return f"{s.net} at ({_mm(end[0])}, {_mm(end[1])}): track end joined to the track it overlapped"
+    return None
+
+
 def square_tees(project: KicadProject) -> list[str]:
     """Make a track that ends on the side of another track of its net meet it at 90 deg.
 
@@ -2512,7 +2571,8 @@ def apply_post_fill(
     changes = prune_pour_tracks(project, keep_near, only_near)
     if changes:  # the pruned GND tracks leave room for corners that had none before
         second = (
-            clean_tracks(project)
+            snap_near_ends(project)
+            + clean_tracks(project)
             + separate_ends_on_pads(project)
             + square_tees(project)
             + push_tracks_clear(project)
@@ -2533,6 +2593,7 @@ FIXES: dict[str, Fix] = {
     "drop_tracks_inside_pads": drop_tracks_inside_pads,
     "merge_duplicate_vias": merge_duplicate_vias,
     "relocate_vias": relocate_vias,
+    "snap_near_ends": snap_near_ends,
     "clean_tracks": clean_tracks,
     "separate_ends_on_pads": separate_ends_on_pads,
     "square_tees": square_tees,

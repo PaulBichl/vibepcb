@@ -640,3 +640,16 @@ def test_square_tees_at_a_junction(project: fixes.KicadProject) -> None:
     assert len(changes) == 1
     assert sexpr.child(tracks_[2], "start") == ["start", Sym("63"), Sym("60")]  # now a T at 90 deg onto (60,60)-(70,60)
     assert fixes.square_tees(project) == []
+
+
+def test_snap_near_ends(project: fixes.KicadProject) -> None:
+    assert fixes.snap_near_ends(project) == []
+    a = sexpr.loads("(segment (start 50 70) (end 55 70.004) (width 0.15) (layer F.Cu) (net 2))")  # 4 um short
+    b = sexpr.loads("(segment (start 55 70) (end 58 73) (width 0.15) (layer F.Cu) (net 2))")
+    c = sexpr.loads("(segment (start 60 80) (end 60 76.1) (width 0.15) (layer F.Cu) (net 2))")  # 0.1 mm beside d
+    d = sexpr.loads("(segment (start 58 76) (end 62 76) (width 0.15) (layer F.Cu) (net 2))")
+    project.pcb += [a, b, c, d]
+    assert len(fixes.snap_near_ends(project)) == 2
+    assert sexpr.child(a, "end") == ["end", Sym("55"), Sym("70")]
+    assert sexpr.child(c, "end") == ["end", Sym("60"), Sym("76")]
+    assert fixes.snap_near_ends(project) == []
