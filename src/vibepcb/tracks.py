@@ -508,6 +508,26 @@ def pad_groups(pads: list[Obstacle], vias: list[tuple[Point, float]], segs: list
     (of a layer it is on); a track over a via's centre or ending on the via's copper
     (:func:`via_takes`); a track end on another track of the same layer; a via inside a pad.
     """
+    find = _connect(pads, vias, segs)
+    groups: dict[int, set[int]] = {}
+    for i in range(len(pads)):
+        groups.setdefault(find(i), set()).add(i)
+    return list(groups.values())
+
+
+def unreached(pads: list[Obstacle], vias: list[tuple[Point, float]], segs: list[Seg]) -> tuple[set[int], set[int]]:
+    """Indices of one net's vias and tracks joined to none of its pads (islands; pours not counted)."""
+    find = _connect(pads, vias, segs)
+    rooted = {find(i) for i in range(len(pads))}
+    n_pads, n_vias = len(pads), len(vias)
+    return (
+        {v for v in range(n_vias) if find(n_pads + v) not in rooted},
+        {k for k in range(len(segs)) if find(n_pads + n_vias + k) not in rooted},
+    )
+
+
+def _connect(pads: list[Obstacle], vias: list[tuple[Point, float]], segs: list[Seg]) -> Callable[[int], int]:
+    """Union-find over pads, then vias, then tracks (see :func:`pad_groups`); returns ``find``."""
     n_pads, n_vias = len(pads), len(vias)
     parent = list(range(n_pads + n_vias + len(segs)))
     boxes = _boxes(segs)
@@ -547,10 +567,7 @@ def pad_groups(pads: list[Obstacle], vias: list[tuple[Point, float]], segs: list
                 t = segs[m]
                 if t.layer == s.layer and point_seg_distance(e, t.a, t.b) <= t.width / 2:
                     union(node, n_pads + n_vias + m)
-    groups: dict[int, set[int]] = {}
-    for i in range(n_pads):
-        groups.setdefault(find(i), set()).add(i)
-    return list(groups.values())
+    return find
 
 
 def still_connected(before: list[set[int]], after: list[set[int]]) -> bool:

@@ -148,3 +148,10 @@ def test_pad_groups_track_end_on_pad_edge() -> None:
     p2 = Obstacle("N", LAYERS, ((4.5, -0.5), (5.5, -0.5), (5.5, 0.5), (4.5, 0.5)), polygon=True)
     # ends exactly on the pad edges (as tscircuit / trimming leave them, up to float noise)
     assert tracks.pad_groups([p1, p2], [], [seg((0.5000004, 0.2), (4.4999996, 0.2))]) == [{0, 1}]
+
+
+def test_unreached_finds_islands() -> None:
+    p1 = Obstacle("N", LAYERS, ((-0.5, -0.5), (0.5, -0.5), (0.5, 0.5), (-0.5, 0.5)), polygon=True)
+    vias = [((10.0, 0.0), 0.3), ((15.0, 0.0), 0.3)]
+    linked, island = seg((0, 0), (3, 0)), seg((10, 0), (15, 0))  # via - track - via, no pad
+    assert tracks.unreached([p1], vias, [linked, island]) == ({0, 1}, {1})

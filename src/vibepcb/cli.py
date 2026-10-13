@@ -135,7 +135,7 @@ def cmd_check(board: str) -> int:
         if not changes:
             break
         drc = kicad.run_drc(pcb, reports / "drc.json")
-        if drc.unconnected > before:  # nets the post-fill broke go back to their state before it
+        if drc.unconnected > before and attempt == POST_FILL_ATTEMPTS - 1:  # last resort: broken nets go back
             loaded = fixes.KicadProject.load(project, board)
             loaded.before_track_fixes = sexpr.loads(backup.decode("utf-8"))
             changes += fixes.restore_nets(loaded, drc.unconnected_nets())

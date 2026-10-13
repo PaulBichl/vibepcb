@@ -1866,12 +1866,25 @@ def remove_antennas(project: KicadProject, *, filled_zones: bool = False) -> lis
         return copper.attached(p, s) or copper.in_zone(p, s.net, s.layer)
 
     removed_segs = [copper.segs[i] for i in tracks.dangling(copper.segs, connected)]
+    # islands: tracks/vias joined to no pad of their net (and, on a poured net, not to its pour)
+    island_vias: set[int] = set()
+    for net, segs in copper.segs_by_net.items():
+        net_vias = [v for v in copper.vias if v[3] == net]
+        vias_i, segs_i = tracks.unreached(copper.pads_by_net.get(net, []), [(c, r) for _, c, r, _ in net_vias], segs)
+        if any(copper.zones.get((net, layer)) for layer in COPPER_LAYERS):
+            continue  # a poured net's islands may hang on the pour: dangling() and KiCad judge those
+        removed_segs += [s for k, s in enumerate(segs) if k in segs_i and all(s is not r for r in removed_segs)]
+        island_vias |= {id(net_vias[v][0]) for v in vias_i}
     for s in removed_segs:
         project.pcb.remove(_source(s))
     alive = [s for s in copper.segs if all(s is not r for r in removed_segs)]
 
     removed_vias = 0
     for node, centre, radius, net in copper.vias:
+        if id(node) in island_vias:
+            project.pcb.remove(node)
+            removed_vias += 1
+            continue
         layers = {
             layer
             for layer in COPPER_LAYERS
