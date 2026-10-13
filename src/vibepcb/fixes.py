@@ -1469,6 +1469,9 @@ def _snap_via_ends(project: KicadProject, clearance: float, edge_clearance: floa
     return moved
 
 
+COLLAPSE_BRANCH_MM = 1.0  # a junction may move to the far end of a branch this short
+
+
 def _open_junctions(project: KicadProject, clearance: float, edge_clearance: float) -> int:
     """Move junctions (3+ tracks meeting, not on a pad/via) whose branches meet at an acute angle.
 
@@ -1478,6 +1481,7 @@ def _open_junctions(project: KicadProject, clearance: float, edge_clearance: flo
     copper = _copper(project.pcb)
     obstacles = copper.obstacles()
     moved = 0
+    touched: set[int] = set()
     for (net, layer, _), users in tracks.junctions(copper.segs).items():
         j = copper.segs[users[0][0]].b if users[0][1] else copper.segs[users[0][0]].a
         others = [copper.segs[i].a if end else copper.segs[i].b for i, end in users]
@@ -1502,10 +1506,26 @@ def _open_junctions(project: KicadProject, clearance: float, edge_clearance: flo
                 e.distance(a, b) >= edge_clearance + width / 2 for e in edges
             )
 
+        if any(i in touched for i, _ in users):
+            continue  # a track an earlier junction of this pass changed: next round
         q = tracks.move_junction(j, others, fits)
+        collapsed: int | None = None
+        if q is None or tracks.min_branch_angle(q, others) < tracks.MIN_JUNCTION_DEG:
+            # a short branch can disappear: the junction moves to its far end, the rest follow
+            for (i, _), far in sorted(zip(users, others, strict=True), key=lambda u: math.dist(j, u[1])):
+                if math.dist(j, far) > COLLAPSE_BRANCH_MM:
+                    break
+                rest = [o for o in others if o is not far]
+                if tracks.min_branch_angle(far, rest) >= tracks.MIN_JUNCTION_DEG and all(fits(far, o) for o in rest):
+                    q, collapsed = far, i
+                    break
         if q is None:
             continue
+        touched.update(i for i, _ in users)
         for i, end in users:
+            if i == collapsed:
+                project.pcb.remove(_source(copper.segs[i]))
+                continue
             node = sexpr.child(_source(copper.segs[i]), ("start", "end")[end])
             if node is not None:
                 node[1:] = [Sym(_mm(q[0])), Sym(_mm(q[1]))]
