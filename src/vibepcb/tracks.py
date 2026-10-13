@@ -97,12 +97,9 @@ def point_seg_distance(p: Point, a: Point, b: Point) -> float:
 
 
 def via_takes(centre: Point, radius: float, s: Seg) -> bool:
-    """Whether KiCad connects track ``s`` to a via: its copper over the via centre, or an end
-    whose copper overlaps the via (measured: connected up to radius + half width; EPS margin)."""
-    half = s.width / 2
-    return point_seg_distance(centre, s.a, s.b) <= half or min(math.dist(centre, s.a), math.dist(centre, s.b)) <= (
-        radius + half - EPS
-    )
+    """Whether KiCad connects track ``s`` to a via: their copper overlaps (measured for a
+    track end: connected up to radius + half width; EPS margin), body or end alike."""
+    return point_seg_distance(centre, s.a, s.b) <= radius + s.width / 2 - EPS
 
 
 def on_track_body(p: Point, a: Point, b: Point, half: float) -> bool:
