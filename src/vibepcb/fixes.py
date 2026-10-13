@@ -1437,19 +1437,29 @@ def _split_tees(project: KicadProject) -> int:
     return len(found)
 
 
-def _snap_via_ends(project: KicadProject) -> int:
+def _snap_via_ends(project: KicadProject, clearance: float, edge_clearance: float) -> int:
     """Move track ends lying inside a via of their net onto the via's centre.
 
     KiCad connects a track to a via through the via centre anyway; with every end on the
     centre, two tracks meeting at a via form one polyline whose bend the corner clean-up
-    can work on, instead of two overlapping ends at some angle.
+    can work on, instead of two overlapping ends at some angle. The moved track pivots
+    about its other end: it must keep its clearance (seen: a 1.7 mm track swung into a pad).
     """
     copper = _copper(project.pcb)
+    obstacles = copper.obstacles()
+
+    def fits(s: tracks.Seg, a: tracks.Point, b: tracks.Point) -> bool:
+        half = s.width / 2
+        return all(
+            o.distance(a, b) >= clearance + half for o in obstacles if o.net != s.net and s.layer in o.layers
+        ) and all(e.distance(a, b) >= edge_clearance + half for e in copper.edges if s.layer in e.layers)
+
     moved = 0
     for s in copper.segs:
         for key, p in (("start", s.a), ("end", s.b)):
+            other = s.b if key == "start" else s.a
             for _, centre, radius, net in copper.vias:
-                if net == s.net and 0 < math.dist(p, centre) <= min(radius, s.width / 2):
+                if net == s.net and 0 < math.dist(p, centre) <= min(radius, s.width / 2) and fits(s, centre, other):
                     node = sexpr.child(_source(s), key)
                     if node is not None:
                         node[1:] = [Sym(_mm(centre[0])), Sym(_mm(centre[1]))]
@@ -1507,7 +1517,12 @@ def _clean_round(
 ) -> tuple[bool, dict[str, int]]:
     """One pass of :func:`clean_tracks` over all nets; returns (anything changed, stats)."""
     totals = {"duplicates": 0, "dropped": 0, "fixed": 0, "left": 0, "kept": 0}
-    changed = _split_tees(project) + _snap_via_ends(project) + _open_junctions(project, clearance, edge_clearance) > 0
+    changed = (
+        _split_tees(project)
+        + _snap_via_ends(project, clearance, edge_clearance)
+        + _open_junctions(project, clearance, edge_clearance)
+        > 0
+    )
     stale = False
     copper = _copper(project.pcb)
     for net in sorted({s.net for s in copper.segs}):
