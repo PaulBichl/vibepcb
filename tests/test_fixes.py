@@ -627,3 +627,16 @@ def test_reroute_tracks(project: fixes.KicadProject) -> None:
     assert (68.0, 70.0) in ends
     gnd_via = next(o for o in copper.obstacles() if o.net == "GND" and o.points == ((64.0, 70.0),))
     assert all(gnd_via.distance(s.a, s.b) >= 0.2 + 0.1 - 1e-6 for s in vcc)
+
+
+def test_square_tees_at_a_junction(project: fixes.KicadProject) -> None:
+    # three GND tracks meet at (60, 60); two of them leave 45 deg apart
+    tracks_ = [
+        sexpr.loads(f"(segment (start 60 60) (end {x} {y}) (width 0.2) (layer F.Cu) (net 2))")
+        for x, y in ((55, 60), (70, 60), (63, 57))
+    ]
+    project.pcb += tracks_
+    changes = fixes.square_tees(project)
+    assert len(changes) == 1
+    assert sexpr.child(tracks_[2], "start") == ["start", Sym("63"), Sym("60")]  # now a T at 90 deg onto (60,60)-(70,60)
+    assert fixes.square_tees(project) == []

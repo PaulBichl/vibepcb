@@ -12,6 +12,7 @@ import datetime
 import functools
 import itertools
 import json
+import logging
 import math
 import re
 import uuid
@@ -29,6 +30,9 @@ if TYPE_CHECKING:
 
 STANDARD_BOARD_THICKNESS_MM = 1.6
 FOOTPRINT_LIB_NICKNAME = "tscircuit"  # what tscircuit writes into (footprint "tscircuit:<name>")
+
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -1891,7 +1895,8 @@ def square_tees(project: KicadProject) -> list[str]:
 
     KiCad's ``track_angle`` rule measures such T-junctions too; where the branch arrives at
     an acute angle, its end slides along the other track to the foot of the perpendicular
-    from the branch's far end. Done only if the new piece keeps its clearance, the foot lies
+    from the branch's far end. A branch meeting another at an acute angle in a junction of
+    3+ tracks leaves the junction the same way (the others stay joined there). Done only if the new piece keeps its clearance, the foot lies
     within the other track and no bend sharper than 135 deg appears at the far end.
     """
     clearance, edge_clearance = _design_clearances(project)
@@ -1900,23 +1905,28 @@ def square_tees(project: KicadProject) -> list[str]:
     changes = []
     for s in copper.segs:
         for k, (end, far) in enumerate(((s.a, s.b), (s.b, s.a))):
-            body = next(
-                (
-                    t
-                    for t in copper.segs_by_net.get(s.net, [])
-                    if t is not s
-                    and t.layer == s.layer
-                    and min(math.dist(end, t.a), math.dist(end, t.b)) > tracks.EPS
-                    and tracks.point_seg_distance(end, t.a, t.b) <= t.width / 2
-                ),
-                None,
-            )
-            if body is None or copper.on_pad_or_via(end, s.net, s.layer):
+            if copper.on_pad_or_via(end, s.net, s.layer):
                 continue
-            if any(  # the end is shared with another track: moving it would cut that one off
-                o is not s and o.layer == s.layer and min(math.dist(o.a, end), math.dist(o.b, end)) <= tracks.EPS
-                for o in copper.segs_by_net.get(s.net, [])
-            ):
+            same = [t for t in copper.segs_by_net.get(s.net, []) if t is not s and t.layer == s.layer]
+            sharing = [t for t in same if min(math.dist(end, t.a), math.dist(end, t.b)) <= tracks.EPS]
+            if not sharing:  # a T: the end lies on another track's side
+                body = next(
+                    (t for t in same if tracks.point_seg_distance(end, t.a, t.b) <= t.width / 2),
+                    None,
+                )
+            elif len(sharing) >= 2:  # a junction: leave it and join an acute neighbour's side instead
+                body = next(
+                    (
+                        t
+                        for t in sharing
+                        if tracks.interior_angle(far, end, t.b if math.dist(end, t.a) <= tracks.EPS else t.a)
+                        < tracks.MIN_JUNCTION_DEG - 1
+                    ),
+                    None,
+                )
+            else:  # a plain bend: moving the end would cut the other track off
+                continue
+            if body is None:
                 continue
             angle = min(tracks.interior_angle(far, end, body.a), tracks.interior_angle(far, end, body.b))
             if angle >= tracks.MIN_JUNCTION_DEG - 1:
@@ -1954,7 +1964,8 @@ def square_tees(project: KicadProject) -> list[str]:
 REROUTE_STEP_MM = 0.05  # grid of the local maze router
 REROUTE_WINDOWS_MM = (2.0, 4.0, 6.0)  # it may leave the old route's bounding box by this much (tried in turn)
 REROUTE_MAX_PATH_MM = 25.0
-REROUTE_GRID_MARGIN_MM = 0.03  # grid nodes keep this extra distance: pieces between them stay clear
+REROUTE_GROW_PIECES = (1, 3, 6, 1000)  # pieces kept around the bad stretch, then the whole run
+REROUTE_GRID_MARGIN_MM = 0.01  # grid nodes keep this extra distance: pieces between them stay clear
 
 
 def reroute_tracks(project: KicadProject) -> list[str]:
@@ -2035,26 +2046,6 @@ def reroute_tracks(project: KicadProject) -> list[str]:
             ) -> bool:
                 return all(tracks.interior_angle(towards, p, f) >= tracks.MIN_JUNCTION_DEG - 0.5 for f in branches(p))
 
-            inner = [
-                tracks.interior_angle(pts[i - 1], pts[i], pts[i + 1])
-                for i in range(1, len(pts) - 1)
-                if not copper.on_pad_or_via(pts[i], run.net, run.layer)
-            ]
-            problem = (
-                not all(fits(a, b) for a, b in itertools.pairwise(pts))
-                or any(angle < tracks.MIN_CORNER_DEG - 1 for angle in inner)
-                or not junction_ok(pts[0], pts[1])
-                or not junction_ok(pts[-1], pts[-2])
-            )
-            if not problem:
-                continue
-            tried.add(key)
-            start, goal = pts[0], pts[-1]
-            heads = {
-                d
-                for d, (dx, dy) in enumerate(tracks.GRID_HEADINGS)
-                if junction_ok(start, (start[0] + dx, start[1] + dy))
-            }
             clear_at = clearance + half + REROUTE_GRID_MARGIN_MM
             edge_at = edge_clearance + half + REROUTE_GRID_MARGIN_MM
 
@@ -2066,50 +2057,111 @@ def reroute_tracks(project: KicadProject) -> list[str]:
                 clear_at: float = clear_at,
                 edge_at: float = edge_at,
             ) -> Callable[[tracks.Point], bool]:
-                """``free(q)`` for routes leaving the old route's box by at most ``window``."""
+                """``free(pt)`` for routes leaving the old route's box by at most ``window``."""
 
-                def free(q: tracks.Point) -> bool:
-                    if not (box[0] - window <= q[0] <= box[2] + window and box[1] - window <= q[1] <= box[3] + window):
+                index = tracks.BoxIndex([o.box for o in others])
+                memo: dict[tuple[int, int], bool] = {}
+                reach = clear_at + tracks.EPS
+
+                def free(pt: tracks.Point) -> bool:
+                    x, y = pt
+                    if not (box[0] - window <= x <= box[2] + window and box[1] - window <= y <= box[3] + window):
                         return False
-                    return all(o.distance(q, q) >= clear_at for o in others) and all(
-                        e.distance(q, q) >= edge_at for e in edges
-                    )
+                    key = (round(x * 1000), round(y * 1000))
+                    if key not in memo:  # every grid node is asked once per heading: remember
+                        near = index.overlapping(x - reach, y - reach, x + reach, y + reach)
+                        memo[key] = all(others[i].distance(pt, pt) >= clear_at for i in near) and all(
+                            e.distance(pt, pt) >= edge_at for e in edges
+                        )
+                    return memo[key]
 
                 return free
 
-            def end_ok(
-                node: tracks.Point,
-                goal: tracks.Point,
-                fits: Callable[[tracks.Point, tracks.Point], bool] = fits,
-                junction_ok: Callable[[tracks.Point, tracks.Point], bool] = junction_ok,
-            ) -> bool:
-                return fits(node, goal) and junction_ok(goal, node)
-
-            route = None
-            for window in REROUTE_WINDOWS_MM:
-                route = tracks.grid_route(start, goal, free_within(window), REROUTE_STEP_MM, heads, end_ok)
-                if route is not None:
-                    break
-            if route is None or len(route) < 2:
+            n = len(pts)
+            bad = {i for i in range(n - 1) if not fits(pts[i], pts[i + 1])}
+            for k in range(1, n - 1):
+                if (
+                    not copper.on_pad_or_via(pts[k], run.net, run.layer)
+                    and tracks.interior_angle(pts[k - 1], pts[k], pts[k + 1]) < tracks.MIN_CORNER_DEG - 1
+                ):
+                    bad |= {k - 1, k}
+            if not junction_ok(pts[0], pts[1]):
+                bad.add(0)
+            if not junction_ok(pts[-1], pts[-2]):
+                bad.add(n - 2)
+            if not bad:
                 continue
-            bends = [tracks.interior_angle(route[i - 1], route[i], route[i + 1]) for i in range(1, len(route) - 1)]
-            new_length = sum(math.dist(a, b) for a, b in itertools.pairwise(route))
-            if (
-                not all(fits(a, b) for a, b in itertools.pairwise(route))
-                or any(b < tracks.MIN_CORNER_DEG - 0.5 for b in bends)
-                or not junction_ok(start, route[1])
-                or not junction_ok(goal, route[-2])
-                or new_length > 3 * length + 5
-            ):
+            tried.add(key)
+            new_points = None
+            # reroute the bad stretch only - its legal surroundings stay; widen it while nothing fits
+            for grow in REROUTE_GROW_PIECES:
+                lo, hi = max(0, min(bad) - grow), min(n - 2, max(bad) + grow)
+                start, goal = pts[lo], pts[hi + 1]
+                before = pts[lo - 1] if lo > 0 else None
+                after = pts[hi + 2] if hi + 2 < n else None
+
+                def leaves_ok(
+                    p: tracks.Point,
+                    towards: tracks.Point,
+                    neighbour: tracks.Point | None,
+                    junction_ok: Callable[[tracks.Point, tracks.Point], bool] = junction_ok,
+                ) -> bool:
+                    """At a kept neighbour: a bend of 135 deg or more; at the run's end: the junction rule."""
+                    if neighbour is None:
+                        return junction_ok(p, towards)
+                    return tracks.interior_angle(neighbour, p, towards) >= tracks.MIN_CORNER_DEG - 0.5
+
+                heads = {
+                    d
+                    for d, (dx, dy) in enumerate(tracks.GRID_HEADINGS)
+                    if leaves_ok(start, (start[0] + dx, start[1] + dy), before)
+                }
+
+                def end_ok(
+                    node: tracks.Point,
+                    goal: tracks.Point,
+                    after: tracks.Point | None = after,
+                    fits: Callable[[tracks.Point, tracks.Point], bool] = fits,
+                    leaves_ok: Callable[..., bool] = leaves_ok,
+                ) -> bool:
+                    return fits(node, goal) and leaves_ok(goal, node, after)
+
+                route = None
+                for window in REROUTE_WINDOWS_MM:
+                    route = tracks.grid_route(start, goal, free_within(window), REROUTE_STEP_MM, heads, end_ok)
+                    if route is not None:
+                        break
+                if route is None or len(route) < 2:
+                    log.debug("reroute %s %s %s-%s: no route", run.net, run.layer, start, goal)
+                    continue
+                candidate = [*pts[:lo], *route, *pts[hi + 2 :]]
+                bends = [
+                    tracks.interior_angle(candidate[i - 1], candidate[i], candidate[i + 1])
+                    for i in range(1, len(candidate) - 1)
+                    if not copper.on_pad_or_via(candidate[i], run.net, run.layer)
+                ]
+                new_length = sum(math.dist(p, q) for p, q in itertools.pairwise(candidate))
+                if (
+                    all(fits(p, q) for p, q in itertools.pairwise(candidate))
+                    and all(angle >= tracks.MIN_CORNER_DEG - 0.5 for angle in bends)
+                    and junction_ok(candidate[0], candidate[1])
+                    and junction_ok(candidate[-1], candidate[-2])
+                    and new_length <= 3 * length + 5
+                ):
+                    new_points = candidate
+                    break
+                log.debug("reroute %s %s %s-%s: route rejected", run.net, run.layer, start, goal)
+            if new_points is None:
                 continue
             template = _source(run.segs[0])
             index = min(project.pcb.index(_source(s)) for s in run.segs)
             for s in run.segs:
                 project.pcb.remove(_source(s))
-            for k, (a, b) in enumerate(itertools.pairwise(route)):
-                project.pcb.insert(index + k, _segment_node(template, a, b, width))
+            for k, (p, q) in enumerate(itertools.pairwise(new_points)):
+                project.pcb.insert(index + k, _segment_node(template, p, q, width))
             changes.append(
-                f"{run.net} on {run.layer}: run ({_mm(start[0])}, {_mm(start[1])}) - ({_mm(goal[0])}, {_mm(goal[1])}) rerouted"
+                f"{run.net} on {run.layer}: run ({_mm(pts[0][0])}, {_mm(pts[0][1])}) - "
+                f"({_mm(pts[-1][0])}, {_mm(pts[-1][1])}) rerouted"
             )
             done = True
             break
