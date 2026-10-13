@@ -1271,8 +1271,12 @@ class _Copper:
         if index is None:
             return False
         pads = self.pads_by_net[s.net]
-        # a point outside a pad's bounding box is never inside the pad
-        return any(s.layer in pads[i].layers and pads[i].distance(p, p) <= 0 for i in index.overlapping(*p, *p))
+        # a point outside a pad's bounding box (plus the edge tolerance) is never on the pad
+        e = tracks.ON_EDGE_MM
+        return any(
+            s.layer in pads[i].layers and pads[i].distance(p, p) <= e
+            for i in index.overlapping(p[0] - e, p[1] - e, p[0] + e, p[1] + e)
+        )
 
     def in_zone(self, p: tracks.Point, net: str, layer: str) -> bool:
         return any(tracks.point_in_polygon(p, poly) for poly in self.zones.get((net, layer), []))
@@ -1856,27 +1860,74 @@ POUR_SAMPLE_MM = 0.05
 
 
 KEEP_RADIUS_MM = 1.5
+ONLY_RADIUS_MM = 0.1  # targeted pruning: tracks at a reported spot only
+PIECE_MATCH_MM = 0.25  # the refill after pruning moves a fill piece's corners a little
 
 
-def prune_pour_tracks(project: KicadProject, keep_near: list[tracks.Point] | None = None) -> list[str]:
+SPOKE_REACH_MM = 0.05  # fill outline within this of a pad: a spoke reaches it
+
+
+def prune_pour_tracks(
+    project: KicadProject, keep_near: list[tracks.Point] | None = None, only_near: list[tracks.Point] | None = None
+) -> list[str]:
     """Remove tracks of a poured net that the (KiCad-filled) pour already provides.
 
     tscircuit routes every GND connection as a track before it pours; on a board with GND
     pours those tracks are redundant, take routing room and short-circuit the thermal
     reliefs. A track goes when every point along it lies in its net's fill on that layer,
     in one of its net's pads or within the thermal gap around such a pad (so the pad then
-    joins the pour through its spokes). Tracks through gaps the pour cannot reach stay.
-    Tracks within ``KEEP_RADIUS_MM`` of a ``keep_near`` point stay (``check`` passes the
+    joins the pour through its spokes), all in one piece of the fill. Tracks through gaps the
+    pour cannot reach, or bridging two separate fill pieces, stay.
+    With ``only_near``, only tracks at those points are candidates (``check``'s fallback: the
+    poured-net tracks at acute angles). Tracks within ``KEEP_RADIUS_MM`` of a ``keep_near`` point stay (``check`` passes the
     spots KiCad reported unconnected after an earlier attempt, e.g. where a pour island only
     held on through the track). Needs zone fills, i.e. runs after KiCad's refill (``check``).
     """
     copper = _copper(project.pcb, filled_zones=True)
     gap = THERMAL_GAP_MM + 0.05
 
-    def covered(p: tracks.Point, s: tracks.Seg) -> bool:
-        if copper.in_zone(p, s.net, s.layer):
-            return True
-        return any(o.net == s.net and s.layer in o.layers and o.distance(p, p) <= gap for o in copper.pads)
+    contacts: dict[tuple[int, str], list[tuple[int, tracks.Point]]] = {}  # (pad, layer) -> (piece, outline point)
+
+    def pieces_at_pad(k: int, s: tracks.Seg) -> set[int]:
+        """Fill pieces reaching pad k other than along track s: where a track enters a pad the fill
+        hugs it up to the pad - that contact goes with the track, it is no thermal spoke."""
+        if (k, s.layer) not in contacts:
+            pad = copper.pads[k]
+            x0, y0, x1, y1 = pad.box
+            r = SPOKE_REACH_MM
+            contacts[k, s.layer] = [
+                (i, v)
+                for i, poly in enumerate(copper.zones.get((pad.net, s.layer), []))
+                for v in poly
+                if x0 - r <= v[0] <= x1 + r and y0 - r <= v[1] <= y1 + r and pad.distance(v, v) <= r
+            ]
+        clear = s.width / 2 + SPOKE_REACH_MM
+        return {i for i, v in contacts[k, s.layer] if tracks.point_seg_distance(v, s.a, s.b) > clear}
+
+    def piece(p: tracks.Point, s: tracks.Seg) -> int | tuple[int, ...] | None:
+        """Fill piece (index) of the track's net and layer that p lies in; at a pad the pad (as a
+        1-tuple) - it must reach the same piece through its spokes; None: neither."""
+        for i, poly in enumerate(copper.zones.get((s.net, s.layer), [])):
+            if tracks.point_in_polygon(p, poly):
+                return i
+        for k, o in enumerate(copper.pads):
+            if o.net == s.net and s.layer in o.layers and o.distance(p, p) <= gap:
+                return (k,)
+        return None
+
+    # KiCad reports a pour fragment that lost its link by a corner of that fill piece: keep
+    # every track touching such a piece
+    kept_pieces: dict[tuple[str, str], set[int]] = {}
+    for key, polys in copper.zones.items():
+        main = max(range(len(polys)), key=lambda i: len(polys[i]), default=-1)  # reported by its corner: no clue
+        for i, poly in enumerate(polys):
+            if i != main and any(math.dist(k, v) <= PIECE_MATCH_MM for k in keep_near or [] for v in poly):
+                kept_pieces.setdefault(key, set()).add(i)
+
+    def fill_pieces_touched(s: tracks.Seg) -> set[int]:
+        polys = copper.zones.get((s.net, s.layer), [])
+        ends = (s.a, s.b, ((s.a[0] + s.b[0]) / 2, (s.a[1] + s.b[1]) / 2))
+        return {i for i, poly in enumerate(polys) if any(tracks.point_in_polygon(p, poly) for p in ends)}
 
     pruned = 0
     for s in copper.segs:
@@ -1884,11 +1935,26 @@ def prune_pour_tracks(project: KicadProject, keep_near: list[tracks.Point] | Non
             continue
         if any(tracks.point_seg_distance(k, s.a, s.b) <= KEEP_RADIUS_MM for k in keep_near or []):
             continue
+        if only_near is not None and not any(
+            tracks.point_seg_distance(k, s.a, s.b) <= ONLY_RADIUS_MM for k in only_near
+        ):
+            continue
+        if any(i in kept_pieces.get((s.net, s.layer), set()) for i in fill_pieces_touched(s)):
+            continue
         n = max(2, math.ceil(math.dist(s.a, s.b) / POUR_SAMPLE_MM) + 1)
         samples = [
             (s.a[0] + (s.b[0] - s.a[0]) * k / (n - 1), s.a[1] + (s.b[1] - s.a[1]) * k / (n - 1)) for k in range(n)
         ]
-        if all(covered(p, s) for p in samples):
+        hits = [piece(p, s) for p in samples]
+        fills = {h for h in hits if isinstance(h, int)}
+        pads = {h[0] for h in hits if isinstance(h, tuple)}
+        # one fill piece must hold the whole track and reach every pad it touches; a track over two
+        # pieces, or to a pad whose spokes reach another piece, may be all that joins them: it stays
+        if None in hits or len(fills) > 1:
+            continue
+        if not fills and pads:  # the track lies in pad gaps only: the pads must share a piece
+            fills = set.intersection(*(pieces_at_pad(k, s) for k in pads))
+        if fills and all(fills & pieces_at_pad(k, s) for k in pads):
             project.pcb.remove(_source(s))
             pruned += 1
     changes = [f"pours: removed {pruned} track segment(s) the pour already connects"] if pruned else []
@@ -1917,9 +1983,11 @@ def sharp_corners(project: KicadProject) -> list[tuple[str, tracks.Point, float]
     return sorted(out)
 
 
-def apply_post_fill(project: KicadProject, keep_near: list[tracks.Point] | None = None) -> list[str]:
+def apply_post_fill(
+    project: KicadProject, keep_near: list[tracks.Point] | None = None, only_near: list[tracks.Point] | None = None
+) -> list[str]:
     """Fixes that need KiCad's zone fill (run by ``check`` after the refill); saves when anything changed."""
-    changes = prune_pour_tracks(project, keep_near)
+    changes = prune_pour_tracks(project, keep_near, only_near)
     if changes:  # the pruned GND tracks leave room for corners that had none before
         changes += [f"second pass: {c}" for c in clean_tracks(project) + remove_antennas(project, filled_zones=True)]
         sexpr.dump(project.pcb, project.pcb_path)

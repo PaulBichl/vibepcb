@@ -19,6 +19,7 @@ if TYPE_CHECKING:
 type Point = tuple[float, float]
 
 EPS = 0.01  # mm: points closer than this are the same point (tracks are >= 0.1 mm wide)
+ON_EDGE_MM = 0.001  # a track end this close outside a pad is on its edge: KiCad connects it
 SPIKE_DEG = 10.0  # a polyline that turns back by more than 170 deg is a spike
 MIN_CORNER_DEG = 135.0  # interior angle: 180 = straight, 135 = a 45 deg bend
 CORNER_TOLERANCE_DEG = 0.5
@@ -535,7 +536,7 @@ def pad_groups(pads: list[Obstacle], vias: list[tuple[Point, float]], segs: list
         for i in pad_index.overlapping(sx0, sy0, sx1, sy1):
             pad = pads[i]
             if s.layer in pad.layers and (
-                any(pad.distance(e, e) <= 0 for e in (s.a, s.b)) or on_track_body(centres[i], s.a, s.b, half)
+                any(pad.distance(e, e) <= ON_EDGE_MM for e in (s.a, s.b)) or on_track_body(centres[i], s.a, s.b, half)
             ):
                 union(node, i)
         for v, (centre, radius) in enumerate(vias):

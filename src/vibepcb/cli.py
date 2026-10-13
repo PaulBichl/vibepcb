@@ -118,11 +118,14 @@ def cmd_check(board: str) -> int:
         drc_job = pool.submit(kicad.run_drc, pcb, reports / "drc.json")
         erc, drc = erc_job.result(), drc_job.result()
     # fixes that need KiCad's zone fill; refill + DRC again. Where that loses a connection,
-    # retry keeping the tracks around the reported spots; give up (restore) after a few tries
+    # retry keeping the tracks around the reported spots, then prune only the tracks at acute
+    # angles; give up (restore) after a few tries
     backup, before = pcb.read_bytes(), drc.unconnected
     keep: list[tuple[float, float]] = []
-    for _ in range(POST_FILL_ATTEMPTS):
-        changes = fixes.apply_post_fill(fixes.KicadProject.load(project, board), keep)
+    acute = drc.spots_of("track_angle")  # the fallback prunes only the tracks at acute angles
+    for attempt in range(POST_FILL_ATTEMPTS):
+        only = acute if attempt >= POST_FILL_ATTEMPTS // 2 else None
+        changes = fixes.apply_post_fill(fixes.KicadProject.load(project, board), keep, only)
         if not changes:
             break
         drc = kicad.run_drc(pcb, reports / "drc.json")

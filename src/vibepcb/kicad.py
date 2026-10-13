@@ -156,6 +156,16 @@ class CheckResult:
             if "pos" in item
         ]
 
+    def spots_of(self, kind: str) -> list[tuple[float, float]]:
+        """Positions of the items in reports of one violation type (mm)."""
+        return [
+            (float(item["pos"]["x"]), float(item["pos"]["y"]))
+            for v in self.violations
+            if v.get("type") == kind
+            for item in v.get("items", [])
+            if "pos" in item
+        ]
+
     def __str__(self) -> str:
         counts = Counter(v.get("severity", "?") for v in self.violations)
         lines = [f"{self.name}: {sum(counts.values())} issue(s) {dict(counts)} - full report: {self.report_path}"]

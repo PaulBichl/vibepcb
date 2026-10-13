@@ -141,3 +141,10 @@ def test_on_track_body_ignores_end_caps() -> None:
     assert tracks.on_track_body((0.0, 0.3), (0.0, 0.2125), (0.0, 0.65), 0.4)
     assert tracks.on_track_body((0.3, 0.3), (0.0, 0.2125), (0.0, 0.65), 0.4)
     assert not tracks.on_track_body((0.5, 0.3), (0.0, 0.2125), (0.0, 0.65), 0.4)
+
+
+def test_pad_groups_track_end_on_pad_edge() -> None:
+    p1 = Obstacle("N", LAYERS, ((-0.5, -0.5), (0.5, -0.5), (0.5, 0.5), (-0.5, 0.5)), polygon=True)
+    p2 = Obstacle("N", LAYERS, ((4.5, -0.5), (5.5, -0.5), (5.5, 0.5), (4.5, 0.5)), polygon=True)
+    # ends exactly on the pad edges (as tscircuit / trimming leave them, up to float noise)
+    assert tracks.pad_groups([p1, p2], [], [seg((0.5000004, 0.2), (4.4999996, 0.2))]) == [{0, 1}]
