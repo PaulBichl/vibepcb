@@ -129,10 +129,11 @@ def test_allow_footprints_in_keepouts(project: fixes.KicadProject) -> None:
         " (polygon (pts (xy 0 0) (xy 1 0) (xy 1 1))))"
     )
     project.pcb.append(zone)
-    assert fixes.allow_footprints_in_keepouts(project) == ["keepout zone: footprints allowed"]
+    assert fixes.allow_footprints_in_keepouts(project) == ["keepout zone: footprints and pads allowed"]
     keepout = sexpr.child(zone, "keepout")
     assert keepout is not None
     assert sexpr.child(keepout, "footprints") == ["footprints", "allowed"]
+    assert sexpr.child(keepout, "pads") == ["pads", "allowed"]
     assert sexpr.child(keepout, "tracks") == ["tracks", "not_allowed"]
     assert fixes.allow_footprints_in_keepouts(project) == []
 
@@ -535,3 +536,19 @@ def test_unpoured_copper_layers(project: fixes.KicadProject) -> None:
     assert fixes.unpoured_copper_layers(project) == ["F.Cu"]
     project.pcb.append(sexpr.loads(zone.format("F.Cu")))
     assert fixes.unpoured_copper_layers(project) == []
+
+
+def test_separate_ends_on_pads(project: fixes.KicadProject) -> None:
+    assert fixes.separate_ends_on_pads(project) == []
+    # two VCC tracks ending on the same point inside J1 pad 1 (1.5 mm square at (92.73, 100)), 45 deg apart
+    a = sexpr.loads("(segment (start 92.73 100) (end 90 100) (width 0.2) (layer F.Cu) (net 1))")
+    b = sexpr.loads("(segment (start 92.73 100) (end 90 97.27) (width 0.2) (layer F.Cu) (net 1))")
+    project.pcb += [a, b]
+    changes = fixes.separate_ends_on_pads(project)  # the fixture's own VCC track ends there too
+    assert len(changes) == 1
+    assert changes[0].startswith("VCC at (92.73, 100):")
+    sa, sb = sexpr.child(a, "start"), sexpr.child(b, "start")
+    assert sa is not None
+    assert sb is not None
+    assert sa[1:] != sb[1:]  # no shared vertex any more
+    assert fixes.separate_ends_on_pads(project) == []

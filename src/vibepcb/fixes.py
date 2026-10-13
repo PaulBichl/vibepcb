@@ -340,7 +340,7 @@ def drop_npth_edge_cuts(project: KicadProject) -> list[str]:
 
 
 def allow_footprints_in_keepouts(project: KicadProject) -> list[str]:
-    """Let footprints overlap keepout zones; keep the copper restrictions.
+    """Let footprints (and their pads) overlap keepout zones; keep the track/via/pour restrictions.
 
     A tscircuit ``<keepout>`` blocks copper; placement against it is already checked by
     tscircuit (honouring ``excludeRefs``). The export still writes ``footprints not_allowed``,
@@ -349,12 +349,15 @@ def allow_footprints_in_keepouts(project: KicadProject) -> list[str]:
     changes = []
     for zone in sexpr.children(project.pcb, "zone"):
         keepout = sexpr.child(zone, "keepout")
-        rule = None if keepout is None else sexpr.child(keepout, "footprints")
-        if rule is None or str(rule[1]) == "allowed":
+        rules = [] if keepout is None else [sexpr.child(keepout, k) for k in ("footprints", "pads")]
+        changed = [r for r in rules if r is not None and str(r[1]) != "allowed"]
+        if not changed:
             continue
-        rule[1] = Sym("allowed")
+        for rule in changed:
+            rule[1] = Sym("allowed")
         net = sexpr.child(zone, "net_name")
-        changes.append(f"keepout zone{f' ({net[1]})' if net is not None and net[1] else ''}: footprints allowed")
+        kinds = " and ".join(str(r[0]) for r in changed)
+        changes.append(f"keepout zone{f' ({net[1]})' if net is not None and net[1] else ''}: {kinds} allowed")
     return changes
 
 
@@ -1471,15 +1474,19 @@ def _open_junctions(project: KicadProject, clearance: float, edge_clearance: flo
             continue
         relevant = [o for o in obstacles if o.net != net and layer in o.layers]
         edges = [e for e in copper.edges if layer in e.layers]
-        width = max(copper.segs[i].width for i, _ in users)
+        # each moved piece keeps clearance at its own width (a 0.15 mm branch off a 0.4 mm track)
+        width_to = {other: copper.segs[i].width for other, (i, _) in zip(others, users, strict=True)}
+        widest = max(width_to.values())
 
         def fits(
             a: tracks.Point,
             b: tracks.Point,
             relevant: list[tracks.Obstacle] = relevant,
             edges: list[tracks.Obstacle] = edges,
-            width: float = width,
+            width_to: dict[tracks.Point, float] = width_to,
+            widest: float = widest,
         ) -> bool:
+            width = width_to.get(b, widest)
             return all(o.distance(a, b) >= clearance + width / 2 for o in relevant) and all(
                 e.distance(a, b) >= edge_clearance + width / 2 for e in edges
             )
@@ -1787,6 +1794,50 @@ def relocate_vias(project: KicadProject) -> list[str]:
     return changes
 
 
+SEPARATE_STEPS_MM = (0.05, 0.1, 0.15, 0.2, 0.3)
+
+
+def separate_ends_on_pads(project: KicadProject) -> list[str]:
+    """Pull apart track ends that meet at an acute angle on a pad or via of their net.
+
+    Two routes entering one pad often end on the same point; KiCad's ``track_angle`` rule then
+    measures the angle between them although the pad copper joins them anyway. Each end but
+    the first moves back along its own track (no new bend) while it stays inside the pad, or
+    on the via's copper, so it keeps its connection.
+    """
+    copper = _copper(project.pcb)
+    groups: dict[tuple[str, str, tuple[int, int]], list[tuple[tracks.Seg, int]]] = {}
+    for s in copper.segs:
+        for k, e in enumerate((s.a, s.b)):
+            groups.setdefault((s.net, s.layer, tracks._key(e)), []).append((s, k))
+    changes = []
+    for (net, layer, _), ends in groups.items():
+        if len(ends) < 2:
+            continue
+        j = ends[0][0].a if ends[0][1] == 0 else ends[0][0].b
+        if not copper.on_pad_or_via(j, net, layer):
+            continue
+        far = [s.b if k == 0 else s.a for s, k in ends]
+        if tracks.min_branch_angle(j, far) >= tracks.MIN_JUNCTION_DEG:
+            continue
+        moved = 0
+        for (s, k), other in list(zip(ends, far, strict=True))[1:]:
+            length = math.dist(j, other)
+            for step in SEPARATE_STEPS_MM:
+                if step >= length - tracks.EPS:
+                    break
+                q = (j[0] + (other[0] - j[0]) * step / length, j[1] + (other[1] - j[1]) * step / length)
+                if copper.attached(q, s):
+                    node = sexpr.child(_source(s), "start" if k == 0 else "end")
+                    assert node is not None
+                    node[1:3] = [Sym(_mm(q[0])), Sym(_mm(q[1]))]
+                    moved += 1
+                    break
+        if moved:
+            changes.append(f"{net} at ({_mm(j[0])}, {_mm(j[1])}): {moved} track end(s) separated on the pad/via")
+    return changes
+
+
 def remove_antennas(project: KicadProject, *, filled_zones: bool = False) -> list[str]:
     """Delete track stubs with a loose end and vias that connect fewer than two layers.
 
@@ -1989,7 +2040,8 @@ def apply_post_fill(
     """Fixes that need KiCad's zone fill (run by ``check`` after the refill); saves when anything changed."""
     changes = prune_pour_tracks(project, keep_near, only_near)
     if changes:  # the pruned GND tracks leave room for corners that had none before
-        changes += [f"second pass: {c}" for c in clean_tracks(project) + remove_antennas(project, filled_zones=True)]
+        second = clean_tracks(project) + separate_ends_on_pads(project) + remove_antennas(project, filled_zones=True)
+        changes += [f"second pass: {c}" for c in second]
         sexpr.dump(project.pcb, project.pcb_path)
     return changes
 
@@ -2003,6 +2055,7 @@ FIXES: dict[str, Fix] = {
     "drop_tracks_inside_pads": drop_tracks_inside_pads,
     "relocate_vias": relocate_vias,
     "clean_tracks": clean_tracks,
+    "separate_ends_on_pads": separate_ends_on_pads,
     "remove_antennas": remove_antennas,
     "drop_npth_edge_cuts": drop_npth_edge_cuts,
     "allow_footprints_in_keepouts": allow_footprints_in_keepouts,

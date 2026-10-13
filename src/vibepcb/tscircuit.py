@@ -109,7 +109,11 @@ def build(source: Path, out_dir: Path, stem: str, formats: dict[str, str]) -> li
 
 # tscircuit's DRC giving up (e.g. on a zero-width route point) is no finding of its own:
 # KiCad's DRC in `check` covers the board, and fixes.repair_zero_width_tracks the cause
-NON_BLOCKING_ERRORS = ("DRC could not complete",)
+NON_BLOCKING_ERRORS = (
+    "DRC could not complete",
+    # router vias crowding a pad: fixes.relocate_vias moves them, KiCad's DRC (check) catches the rest
+    "overlaps SMD pad",
+)
 REPORT_LINES = 40
 
 
