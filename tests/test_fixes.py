@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import itertools
 import json
+import math
 import shutil
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -510,6 +511,22 @@ def test_drop_tracks_inside_pads_keeps_run_to_pad_edge(project: fixes.KicadProje
     assert run in project.pcb
 
 
+def test_drop_tracks_inside_pads_straightens_a_wiggle_from_the_edge(project: fixes.KicadProject) -> None:
+    # J1 pad 1 (VCC = net 1): 1.5 mm square centred on (92.73, 100), right edge at x = 93.48 (93.47: just inside)
+    out = sexpr.loads("(segment (start 96 100) (end 93.47 100) (width 0.2) (layer F.Cu) (net 1))")
+    wiggle = [
+        sexpr.loads(f"(segment (start {a}) (end {b}) (width 0.2) (layer F.Cu) (net 1))")
+        for a, b in (("93.47 100", "93.3 100.2"), ("93.3 100.2", "93.1 99.9"))
+    ]
+    project.pcb += [out, *wiggle]
+    changes = fixes.drop_tracks_inside_pads(project)
+    assert changes == ["J1: 2 in-pad track piece(s) replaced by a straight entry to the pad centre"]
+    assert all(w not in project.pcb for w in wiggle)
+    copper = fixes._copper(project.pcb)
+    assert any({s.a, s.b} == {(93.47, 100.0), (92.73, 100.0)} for s in copper.segs)
+    assert fixes.drop_tracks_inside_pads(project) == []
+
+
 def test_relocate_vias(project: fixes.KicadProject) -> None:
     assert fixes.relocate_vias(project) == []
     # a GND via (net 2) overlapping J1 pad 1 (VCC, 1.5 mm square at (92.73, 100), edge x = 93.48)
@@ -610,6 +627,57 @@ def test_push_tracks_clear(project: fixes.KicadProject) -> None:
     assert fixes.push_tracks_clear(project) == []
 
 
+def test_reroute_tracks_keeps_a_t_junction(project: fixes.KicadProject) -> None:
+    # as above, but a VCC branch from (62, 73) ends on the run's side at (62, 70): rerouting the run
+    # would leave that branch ending on nothing, so the run stays
+    vias = [
+        sexpr.loads(f"(via (at {x} 70) (size 0.6) (drill 0.3) (layers F.Cu B.Cu) (net {n}))")
+        for x, n in ((60, 1), (64, 2), (68, 1))
+    ]
+    run = sexpr.loads("(segment (start 60 70) (end 68 70) (width 0.2) (layer F.Cu) (net 1))")
+    branch = sexpr.loads("(segment (start 62 73) (end 62 70) (width 0.2) (layer F.Cu) (net 1))")
+    project.pcb += [*vias, run, branch]
+    fixes.reroute_tracks(project)
+    assert run in project.pcb
+    assert sexpr.child(run, "start") == ["start", Sym("60"), Sym("70")]
+    assert sexpr.child(run, "end") == ["end", Sym("68"), Sym("70")]
+
+
+def test_reroute_tracks_leaves_a_via_off_a_passing_track(project: fixes.KicadProject) -> None:
+    # VCC via at (60, 70); a VCC track passes through it along y = 70 and a VCC run leaves from a point
+    # on that track inside the via at 45 deg to it (KiCad: acute track_angle) -> rerouted to leave at >= 90 deg
+    via = sexpr.loads("(via (at 60 70) (size 0.6) (drill 0.3) (layers F.Cu B.Cu) (net 1))")
+    passing = sexpr.loads("(segment (start 60.2 70) (end 56 70) (width 0.2) (layer F.Cu) (net 1))")
+    run = sexpr.loads("(segment (start 59.9 70) (end 56.9 73) (width 0.2) (layer F.Cu) (net 1))")
+    end_via = sexpr.loads("(via (at 56.9 73) (size 0.6) (drill 0.3) (layers F.Cu B.Cu) (net 1))")
+    project.pcb += [via, passing, run, end_via]
+    assert len(fixes.reroute_tracks(project)) == 1
+    copper = fixes._copper(project.pcb)
+    start = (59.9, 70.0)
+    first = next(s for s in copper.segs if s.net == "VCC" and start in (s.a, s.b) and s.source is not passing)
+    nxt = first.b if first.a == start else first.a
+    assert tracks.interior_angle(nxt, start, (56.0, 70.0)) >= tracks.MIN_JUNCTION_DEG - 0.5
+
+
+def test_route_with_stub_leaves_a_tilted_junction() -> None:
+    # a junction at (60, 60) on a track tilted 1 deg: every grid heading meets one side at 89 deg or less
+    branches = [(56.0, 60.07), (64.0, 59.93)]
+
+    def leaves_ok(p: tracks.Point, towards: tracks.Point, neighbour: tracks.Point | None) -> bool:
+        return all(tracks.interior_angle(towards, p, f) >= tracks.MIN_JUNCTION_DEG - 0.5 for f in branches)
+
+    start, goal = (60.0, 60.0), (61.0, 62.0)
+    route = fixes._route_with_stub(start, goal, None, None, lambda p: True, lambda a, b: True, leaves_ok)
+    assert route is not None
+    assert route[0] == start
+    assert route[-1] == goal
+    assert leaves_ok(start, route[1], None)
+    assert all(
+        tracks.interior_angle(route[i - 1], route[i], route[i + 1]) >= tracks.MIN_CORNER_DEG - 0.5
+        for i in range(1, len(route) - 1)
+    )
+
+
 def test_reroute_tracks(project: fixes.KicadProject) -> None:
     # a VCC run between two vias straight through a GND via: rerouted round it, ends kept
     vias = [
@@ -639,6 +707,32 @@ def test_square_tees_at_a_junction(project: fixes.KicadProject) -> None:
     changes = fixes.square_tees(project)
     assert len(changes) == 1
     assert sexpr.child(tracks_[2], "start") == ["start", Sym("63"), Sym("60")]  # now a T at 90 deg onto (60,60)-(70,60)
+    assert fixes.square_tees(project) == []
+
+
+def test_square_tees_two_acute_branches_of_one_junction(project: fixes.KicadProject) -> None:
+    # junction at (60, 60): branches to (63, 57) and (64, 59) are 31 deg apart, each acute to the other;
+    # only one may leave per pass, else both land on the other's old position and the junction falls apart
+    tracks_ = [
+        sexpr.loads(f"(segment (start 60 60) (end {x} {y}) (width 0.2) (layer F.Cu) (net 2))")
+        for x, y in ((55, 60), (63, 57), (64, 59))
+    ]
+    project.pcb += tracks_
+    assert fixes.square_tees(project)
+    copper = fixes._copper(project.pcb)
+    gnd = [s for s in copper.segs if s.net == "GND" and s.layer == "F.Cu" and max(s.a[0], s.b[0]) < 70]
+    for s in gnd:
+        for end in (s.a, s.b):
+            if end in ((55.0, 60.0), (63.0, 57.0), (64.0, 59.0)):
+                continue
+            assert any(
+                t is not s
+                and (
+                    min(math.dist(end, t.a), math.dist(end, t.b)) <= tracks.EPS
+                    or tracks.point_seg_distance(end, t.a, t.b) <= tracks.EPS
+                )
+                for t in gnd
+            ), f"loose end {end}"
     assert fixes.square_tees(project) == []
 
 

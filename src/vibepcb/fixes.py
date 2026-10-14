@@ -290,7 +290,67 @@ def drop_tracks_inside_pads(project: KicadProject) -> list[str]:
             project.pcb.remove(seg)
             ref = inside[id(seg)][0]
             dropped[ref] = dropped.get(ref, 0) + 1
-    return [f"{ref}: dropped {n} track stub(s) inside its own pads" for ref, n in sorted(dropped.items())]
+    changes = [f"{ref}: dropped {n} track stub(s) inside its own pads" for ref, n in sorted(dropped.items())]
+    return changes + _straighten_pad_entries(project, segs, inside, find, at_end, anchored, near_edge)
+
+
+def _straighten_pad_entries(
+    project: KicadProject,
+    segs: list[list[Node]],
+    inside: dict[int, tuple[str, int, list[Node], list[Node]]],
+    find: Callable[[int], int],
+    at_end: dict[tuple[str, str, float, float], list[list[Node]]],
+    anchored: set[int],
+    near_edge: Callable[[tuple[str, str, float, float], list[Node], list[Node]], bool],
+) -> list[str]:
+    """Replace an in-pad run that one outside track enters at the pad edge by one straight piece
+    from that edge point to the pad centre.
+
+    The router's in-pad wiggles (seen: 0.05 mm zig-zags) make acute angles with the entering
+    track that KiCad's ``track_angle`` rule reports; the straight piece keeps the connection
+    (KiCad connects a track through a pad's centre) without them. Skipped where it would bend
+    sharper than 135 deg against the entering track.
+    """
+    runs: dict[int, list[list[Node]]] = {}
+    for seg in segs:
+        if id(seg) in inside and find(id(seg)) in anchored:
+            runs.setdefault(find(id(seg)), []).append(seg)
+    changes = []
+    for root, run in runs.items():
+        members = {id(r) for r in run}
+        ref, _, fp, pad = inside[id(run[0])]
+        entries = [
+            (point, o)
+            for point, group in at_end.items()
+            if any(id(r) in members for r in group) and near_edge(point, fp, pad)
+            for o in group
+            if id(o) not in members
+        ]
+        if len(entries) != 1 or root not in anchored:
+            continue
+        point, outer = entries[0]
+        edge = (point[2], point[3])
+        o_start, o_end = sexpr.child(outer, "start"), sexpr.child(outer, "end")
+        a, b = (_num(o_start, 1), _num(o_start, 2)), (_num(o_end, 1), _num(o_end, 2))
+        far = b if math.dist(a, edge) <= math.dist(b, edge) else a
+        pad_at = sexpr.child(pad, "at")
+        centre = _fp_to_board(fp)(_num(pad_at, 1), _num(pad_at, 2))
+        if math.dist(edge, centre) <= tracks.EPS or tracks.interior_angle(far, edge, centre) < tracks.MIN_CORNER_DEG:
+            continue
+        if len(run) == 1:
+            r_start, r_end = sexpr.child(run[0], "start"), sexpr.child(run[0], "end")
+            ends_ = {
+                (round(_num(r_start, 1), 4), round(_num(r_start, 2), 4)),
+                (round(_num(r_end, 1), 4), round(_num(r_end, 2), 4)),
+            }
+            if ends_ == {(round(edge[0], 4), round(edge[1], 4)), (round(centre[0], 4), round(centre[1], 4))}:
+                continue  # already straight
+        index = min(project.pcb.index(r) for r in run)
+        for r in run:
+            project.pcb.remove(r)
+        project.pcb.insert(index, _segment_node(outer, edge, centre, _num(sexpr.child(outer, "width"), 1)))
+        changes.append(f"{ref}: {len(run)} in-pad track piece(s) replaced by a straight entry to the pad centre")
+    return changes
 
 
 def _npth_holes(pcb: list[Node]) -> list[tuple[str, float, float, float]]:
@@ -2144,15 +2204,39 @@ def square_tees(project: KicadProject) -> list[str]:
     within the other track and no bend sharper than 135 deg appears at the far end.
     """
     clearance, edge_clearance = _design_clearances(project)
+    changes: list[str] = []
+    for _ in range(SQUARE_TEES_MAX_PASSES):
+        done = _square_tees_pass(project, clearance, edge_clearance)
+        changes += done
+        if not done:
+            break
+    return changes
+
+
+SQUARE_TEES_MAX_PASSES = 20
+
+
+def _square_tees_pass(project: KicadProject, clearance: float, edge_clearance: float) -> list[str]:
+    """One pass of :func:`square_tees` on the copper as it is now.
+
+    A track moved in this pass, or its new body, is stale geometry for the rest of the pass:
+    tracks touching either wait for the next pass (two branches of one junction, each acute
+    to the other, would otherwise both move onto the other's old position and meet nothing).
+    """
     copper = _copper(project.pcb)
     obstacles = copper.obstacles()
     changes = []
+    touched: set[int] = set()
     for s in copper.segs:
+        if id(s) in touched:
+            continue
         for k, (end, far) in enumerate(((s.a, s.b), (s.b, s.a))):
             if copper.on_pad_or_via(end, s.net, s.layer):
                 continue
             same = [t for t in copper.segs_by_net.get(s.net, []) if t is not s and t.layer == s.layer]
             sharing = [t for t in same if min(math.dist(end, t.a), math.dist(end, t.b)) <= tracks.EPS]
+            if any(id(t) in touched for t in sharing):
+                continue
             if not sharing:  # a T: the end lies on another track's side
                 body = next(
                     (t for t in same if tracks.point_seg_distance(end, t.a, t.b) <= t.width / 2),
@@ -2170,7 +2254,7 @@ def square_tees(project: KicadProject) -> list[str]:
                 )
             else:  # a plain bend: moving the end would cut the other track off
                 continue
-            if body is None:
+            if body is None or id(body) in touched:
                 continue
             angle = min(tracks.interior_angle(far, end, body.a), tracks.interior_angle(far, end, body.b))
             if angle >= tracks.MIN_JUNCTION_DEG - 1:
@@ -2201,8 +2285,96 @@ def square_tees(project: KicadProject) -> list[str]:
             assert node is not None
             node[1:3] = [Sym(_mm(foot[0])), Sym(_mm(foot[1]))]
             changes.append(f"{s.net} at ({_mm(end[0])}, {_mm(end[1])}): T-junction squared ({angle:.0f} -> 90 deg)")
+            touched |= {id(s), id(body)}
             break
     return changes
+
+
+def _anchored_pieces(copper: _Copper, run: tracks.Chain, mine: set[int]) -> set[int]:
+    """Indices of the run's pieces (``points[i]``-``points[i + 1]``) that something else joins mid-run.
+
+    KiCad connects a track end lying on another track's copper (a T), a via whose centre is on a
+    track and a pad whose centre is on one; :func:`tracks.chains` only splits runs at shared end
+    points, so rerouting such a piece would cut the T-branch, via or pad off.
+    """
+    pts = run.points
+    spots = [
+        e for t in copper.segs_by_net.get(run.net, []) if t.layer == run.layer and id(t) not in mine for e in (t.a, t.b)
+    ]
+    spots = [q for q in spots if min(math.dist(q, pts[0]), math.dist(q, pts[-1])) > tracks.EPS]
+    ends = (pts[0], pts[-1])
+    # vias and pads the run ends on are kept by the reroute anyway (it keeps the run's ends)
+    spots += [c for c, r in copper.vias_by_net.get(run.net, []) if all(math.dist(e, c) > r + tracks.EPS for e in ends)]
+    spots += [
+        o.centre
+        for o in copper.pads_by_net.get(run.net, [])
+        if run.layer in o.layers and all(o.distance(e, e) > tracks.ON_EDGE_MM for e in ends)
+    ]
+    return {
+        i
+        for i, (a, b) in enumerate(itertools.pairwise(pts))
+        if any(tracks.point_seg_distance(q, a, b) <= run.width_at(a, b) / 2 for q in spots)
+    }
+
+
+def _route_with_stub(
+    start: tracks.Point,
+    goal: tracks.Point,
+    before: tracks.Point | None,
+    after: tracks.Point | None,
+    free: Callable[[tracks.Point], bool],
+    fits: Callable[[tracks.Point, tracks.Point], bool],
+    leaves_ok: Callable[[tracks.Point, tracks.Point, tracks.Point | None], bool],
+) -> list[tracks.Point] | None:
+    """A grid route start -> goal for :func:`reroute_tracks`; where no grid heading may leave
+    ``start`` (a junction on a track that is not quite axis-aligned: every heading meets it at
+    89 deg or less), one short off-grid stub leaves it first and the grid route continues from
+    the stub's end, turning at most 45 deg there."""
+
+    def end_ok(node: tracks.Point, goal: tracks.Point) -> bool:
+        return fits(node, goal) and leaves_ok(goal, node, after)
+
+    heads = {
+        d for d, (dx, dy) in enumerate(tracks.GRID_HEADINGS) if leaves_ok(start, (start[0] + dx, start[1] + dy), before)
+    }
+    if heads:
+        return tracks.grid_route(start, goal, free, REROUTE_STEP_MM, heads, end_ok)
+    # the directions the junction rule allows can be a sliver (1 deg): sample finely, then try the
+    # middle of each allowed range first, the rest nearest the goal first
+    towards = math.atan2(goal[1] - start[1], goal[0] - start[0])
+    sampled = [math.radians(k * REROUTE_STUB_SAMPLE_DEG) for k in range(round(360 / REROUTE_STUB_SAMPLE_DEG))]
+    allowed = [a for a in sampled if leaves_ok(start, (start[0] + math.cos(a), start[1] + math.sin(a)), before)]
+    ranges: list[list[float]] = []
+    for a in allowed:
+        if ranges and a - ranges[-1][-1] <= math.radians(1.5 * REROUTE_STUB_SAMPLE_DEG):
+            ranges[-1].append(a)
+        else:
+            ranges.append([a])
+    angles = [(r[0] + r[-1]) / 2 for r in ranges] + sorted(
+        allowed[:: round(REROUTE_STUB_ANGLE_STEP_DEG / REROUTE_STUB_SAMPLE_DEG)],
+        key=lambda a: abs(math.remainder(a - towards, 2 * math.pi)),
+    )
+    for a in angles[:REROUTE_STUB_TRIES]:  # each try is a full maze search
+        direction = (math.cos(a), math.sin(a))
+        for length in REROUTE_STUB_MM:
+            stub = (start[0] + length * direction[0], start[1] + length * direction[1])
+            if not (free(stub) and fits(start, stub)):
+                continue
+            turns = {
+                d
+                for d, (dx, dy) in enumerate(tracks.GRID_HEADINGS)
+                if tracks.interior_angle(start, stub, (stub[0] + dx, stub[1] + dy)) >= tracks.MIN_CORNER_DEG - 0.5
+            }
+            route = tracks.grid_route(stub, goal, free, REROUTE_STEP_MM, turns, end_ok)
+            if route is not None:
+                return [start, *route]
+    return None
+
+
+REROUTE_STUB_MM = (0.15, 0.3)  # off-grid first piece of a reroute where no grid heading may leave its start
+REROUTE_STUB_ANGLE_STEP_DEG = 5
+REROUTE_STUB_SAMPLE_DEG = 0.1
+REROUTE_STUB_TRIES = 12
 
 
 REROUTE_STEP_MM = 0.05  # grid of the local maze router
@@ -2239,6 +2411,8 @@ def reroute_tracks(project: KicadProject) -> list[str]:
             length = sum(math.dist(a, b) for a, b in itertools.pairwise(pts))
             if len(pts) < 2 or key in tried or length > REROUTE_MAX_PATH_MM:
                 continue
+            if copper.same_anchor(pts[0], pts[-1], run.net, run.layer):
+                continue  # inside one via or pad: no copper of its own to reroute
             width = max(
                 {s.width for s in run.segs}, key=lambda w: sum(math.dist(s.a, s.b) for s in run.segs if s.width == w)
             )
@@ -2278,9 +2452,21 @@ def reroute_tracks(project: KicadProject) -> list[str]:
                 copper: _Copper = copper,
                 at_end: dict[tuple[str, str, tuple[int, int]], list[tuple[tracks.Seg, tracks.Point]]] = at_end,
             ) -> list[tracks.Point]:
-                """Far ends of the other tracks meeting at p (empty on a pad or via: no junction angle there)."""
+                """Far ends of the other tracks meeting at p.
+
+                On a pad or via, tracks merely ending there make no junction angle; a track whose
+                side p lies on (it passes through, its copper overlapping the run's end) does.
+                """
                 if copper.on_pad_or_via(p, run.net, run.layer):
-                    return []
+                    return [
+                        e
+                        for t in copper.segs_by_net.get(run.net, [])
+                        if t.layer == run.layer
+                        and id(t) not in mine
+                        and min(math.dist(p, t.a), math.dist(p, t.b)) > tracks.EPS
+                        and tracks.point_seg_distance(p, t.a, t.b) <= t.width / 2
+                        for e in (t.a, t.b)
+                    ]
                 return [f for s, f in at_end.get((run.net, run.layer, tracks._key(p)), []) if id(s) not in mine]
 
             def junction_ok(
@@ -2336,10 +2522,14 @@ def reroute_tracks(project: KicadProject) -> list[str]:
             if not bad:
                 continue
             tried.add(key)
+            anchored = _anchored_pieces(copper, run, mine)
             new_points = None
             # reroute the bad stretch only - its legal surroundings stay; widen it while nothing fits
             for grow in REROUTE_GROW_PIECES:
                 lo, hi = max(0, min(bad) - grow), min(n - 2, max(bad) + grow)
+                if any(lo <= i <= hi for i in anchored):  # something joins the run there: it must stay
+                    log.debug("reroute %s %s: stretch carries a T-junction, via or pad", run.net, run.layer)
+                    break
                 start, goal = pts[lo], pts[hi + 1]
                 before = pts[lo - 1] if lo > 0 else None
                 after = pts[hi + 2] if hi + 2 < n else None
@@ -2355,24 +2545,13 @@ def reroute_tracks(project: KicadProject) -> list[str]:
                         return junction_ok(p, towards)
                     return tracks.interior_angle(neighbour, p, towards) >= tracks.MIN_CORNER_DEG - 0.5
 
-                heads = {
-                    d
-                    for d, (dx, dy) in enumerate(tracks.GRID_HEADINGS)
-                    if leaves_ok(start, (start[0] + dx, start[1] + dy), before)
-                }
-
-                def end_ok(
-                    node: tracks.Point,
-                    goal: tracks.Point,
-                    after: tracks.Point | None = after,
-                    fits: Callable[[tracks.Point, tracks.Point], bool] = fits,
-                    leaves_ok: Callable[..., bool] = leaves_ok,
-                ) -> bool:
-                    return fits(node, goal) and leaves_ok(goal, node, after)
-
                 route = None
                 for window in REROUTE_WINDOWS_MM:
-                    route = tracks.grid_route(start, goal, free_within(window), REROUTE_STEP_MM, heads, end_ok)
+                    free_here = free_within(window)
+                    route = _route_with_stub(start, goal, before, after, free_here, fits, leaves_ok)
+                    if route is None:  # the far end may be the one no grid heading can leave
+                        back = _route_with_stub(goal, start, after, before, free_here, fits, leaves_ok)
+                        route = None if back is None else back[::-1]
                     if route is not None:
                         break
                 if route is None or len(route) < 2:
