@@ -21,6 +21,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from vibepcb import fixes, kicad, paths, schgen, sexpr, tscircuit
 
+SCHEMATIC_PNG_WIDTH = 4000  # px: an A0 sheet stays readable when zoomed into a crop
 TSCIRCUIT_LLM_DOCS = "https://docs.tscircuit.com/llms.txt"
 
 TEMPLATE = """\
@@ -38,7 +39,6 @@ JSON_FORMATS = {
     "kicad_zip": ".kicad.zip",
     "readable-netlist": ".netlist.txt",
     "pcb-svg": ".pcb.svg",
-    "schematic-svg": ".sch.svg",
 }
 
 
@@ -58,9 +58,13 @@ def cmd_build(board: str, *, fast: bool = False) -> int:
     if not source.exists():
         print(f"no such board: {source} (boards: {', '.join(paths.list_boards())})", file=sys.stderr)
         return 1
-    if fast:  # quick experiments: router effort 2x on a temp copy; final runs go without --fast
+    if fast:  # quick experiments: router effort 2x; final runs go without --fast
         print(f"--fast: autorouterEffortLevel forced to {tscircuit.FAST_EFFORT} (not for final runs)")
-        source = tscircuit.fast_source(source, paths.OUT_DIR / board / "fast")
+    # evaluated as a copy without tscircuit's schematic (`fix` generates it from the circuit JSON)
+    board_tsx = source
+    source = tscircuit.prepared_source(
+        source, paths.OUT_DIR / board / "src", effort=tscircuit.FAST_EFFORT if fast else None
+    )
     raw = paths.raw_dir(board)
     circuit = raw / f"{board}.circuit.json"
     # placement gate: a placement-only evaluation takes about a minute and fails before the routing pass
@@ -70,7 +74,7 @@ def cmd_build(board: str, *, fast: bool = False) -> int:
     )
     if errors:
         print(report)
-        print(f"placement errors - fix {source.relative_to(paths.ROOT)} first", file=sys.stderr)
+        print(f"placement errors - fix {board_tsx.relative_to(paths.ROOT)} first", file=sys.stderr)
         return 1
     # tscircuit evaluates (places + routes) the board on every call: do it once, export the rest from the JSON
     print(f"building {board} with tscircuit (placement + routing) ...")
@@ -80,13 +84,13 @@ def cmd_build(board: str, *, fast: bool = False) -> int:
     errors, report = tscircuit.routed_errors(circuit)
     print(report)
     if errors:
-        print(f"tscircuit found {errors} error(s) - fix {source.relative_to(paths.ROOT)} first", file=sys.stderr)
+        print(f"tscircuit found {errors} error(s) - fix {board_tsx.relative_to(paths.ROOT)} first", file=sys.stderr)
         return 1
     written = [circuit, *tscircuit.build(circuit, raw, board, JSON_FORMATS)]
     if shutil.which("rsvg-convert"):  # PNGs so an LLM can look at the board / schematic
-        for svg in (raw / f"{board}.pcb.svg", raw / f"{board}.sch.svg"):
-            subprocess.run(["rsvg-convert", "-w", "1200", "-o", str(svg.with_suffix(".png")), str(svg)], check=True)
-            written.append(svg.with_suffix(".png"))
+        svg = raw / f"{board}.pcb.svg"
+        subprocess.run(["rsvg-convert", "-w", "1200", "-o", str(svg.with_suffix(".png")), str(svg)], check=True)
+        written.append(svg.with_suffix(".png"))
     for f in written:
         print(f"  {f.relative_to(paths.ROOT)}")
     return 0
@@ -96,9 +100,10 @@ def cmd_fix(board: str) -> int:
     raw, target = paths.raw_dir(board), paths.kicad_dir(board)
     kicad.assemble_project(raw / f"{board}.kicad.zip", target, board)
     sch, circuit = target / f"{board}.kicad_sch", raw / f"{board}.circuit.json"
-    if not schgen.has_symbols(sch) and circuit.exists():  # schematicDisabled: netlist-style schematic
-        schgen.write(circuit, sch, board)
-        print(f"  schematic generated from {circuit.relative_to(paths.ROOT)} (boxes + net labels)")
+    if circuit.exists():  # builds skip tscircuit's schematic (does not scale); generate it from the JSON
+        for note in schgen.write(circuit, sch, board, paths.board_source(board)):
+            print(f"  schematic: {note}")
+        print(f"  schematic generated from {circuit.relative_to(paths.ROOT)}")
     project = fixes.KicadProject.load(target, board)
     report = fixes.apply_all(project)
     for name, changes in report.items():
@@ -109,6 +114,12 @@ def cmd_fix(board: str) -> int:
     for change in fixes.restore_nets(project, lost):
         print(f"  fix restore_nets: {change}")
     project.save()
+    if kicad.find_kicad_cli() and shutil.which("rsvg-convert"):  # preview to look at (LLM / human)
+        svg = kicad.export_schematic_svg(sch, paths.OUT_DIR / board / "reports")
+        svg = svg.replace(svg.with_name("schematic.svg"))
+        png = svg.with_suffix(".png")
+        subprocess.run(["rsvg-convert", "-w", str(SCHEMATIC_PNG_WIDTH), "-o", str(png), str(svg)], check=True)
+        print(f"  schematic preview: {png.relative_to(paths.ROOT)} (+ .svg)")
     print(f"KiCad project: {(target / f'{board}.kicad_pro').relative_to(paths.ROOT)}")
     return 0
 
@@ -169,7 +180,7 @@ def cmd_fab(board: str) -> int:
     source = paths.board_source(board)
     if source.exists():
         print("checking part availability (tscircuit parts engine) ...")
-        warnings = tscircuit.availability_warnings(source)
+        warnings = tscircuit.availability_warnings(tscircuit.prepared_source(source, paths.OUT_DIR / board / "src"))
         print("\n".join(f"  {w}" for w in warnings) if warnings else "  all parts available")
     for f in kicad.export_fab(paths.kicad_dir(board) / f"{board}.kicad_pcb", paths.OUT_DIR / board / "fab"):
         print(f"  {f.relative_to(paths.ROOT)}")

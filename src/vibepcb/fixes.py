@@ -19,7 +19,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from vibepcb import sexpr, tracks
+from vibepcb import schgen, sexpr, tracks
 from vibepcb.sexpr import Sym
 
 if TYPE_CHECKING:
@@ -72,21 +72,30 @@ _AUTO_NET = re.compile(r"^\.|\s>\s|\sto\s")  # e.g. ".R1 > .pin2 to .D1 > .anode
 
 
 def rename_auto_nets(project: KicadProject) -> list[str]:
-    """Replace tscircuit's selector-style net names with KiCad-style ``Net-(R1-Pad2)``."""
+    """Replace tscircuit's selector-style net names with the schematic's names for them.
+
+    ``schgen`` names an unnamed net after its chip pin (``U1_VREG_1V2``), else KiCad-style
+    ``Net-(R1-Pad2)``; read from ``../raw/<stem>.circuit.json``, without it KiCad-style always.
+    """
     pcb = project.pcb
-    first_pad: dict[str, str] = {}  # net name -> "R1-Pad2" of its first pad
+    circuit = project.directory.parent / "raw" / f"{project.pcb_path.stem}.circuit.json"
+    pin_names = schgen.pin_net_names(json.loads(circuit.read_text(encoding="utf-8"))) if circuit.exists() else {}
+    first_pad: dict[str, str] = {}  # net name -> "Net-(R1-Pad2)" after its first pad
+    schematic: dict[str, str] = {}  # net name -> the schematic's name for it
     for fp in sexpr.children(pcb, "footprint"):
         ref = sexpr.property_value(fp, "Reference") or "?"
         for pad in sexpr.children(fp, "pad"):
             net = sexpr.child(pad, "net")
             if net is not None and len(net) > 2:
-                first_pad.setdefault(str(net[2]), f"{ref}-Pad{pad[1]}")
+                first_pad.setdefault(str(net[2]), f"Net-({ref}-Pad{pad[1]})")
+                if (ref, str(pad[1])) in pin_names:
+                    schematic.setdefault(str(net[2]), pin_names[ref, str(pad[1])])
 
     renames = {}
     taken = {str(n[2]) for n in sexpr.children(pcb, "net") if len(n) > 2}
     for name in sorted(taken):
         if _AUTO_NET.search(name) and name in first_pad:
-            new = f"Net-({first_pad[name]})"
+            new = schematic.get(name, first_pad[name])
             if new not in taken:
                 renames[name] = new
     if not renames:
@@ -613,25 +622,36 @@ def drop_loose_power_symbols(project: KicadProject) -> list[str]:
     return changes
 
 
+def _symbol_unit(name: str) -> int:
+    """Unit of a library sub-symbol ``<name>_<unit>_<style>`` (0: drawn in every unit)."""
+    m = re.search(r"_(\d+)_(\d+)$", name)
+    return int(m[1]) if m else 0
+
+
 def _pin_positions(sch: list[Node]) -> dict[tuple[str, str], tuple[float, float]]:
     """``(reference, pin number) -> (x, y)`` connection point of every placed symbol pin."""
     lib = sexpr.child(sch, "lib_symbols")
-    lib_pins: dict[str, list[tuple[str, float, float]]] = {}
+    lib_pins: dict[str, list[tuple[str, float, float, int]]] = {}  # unit 0: common to all units
     for sym in [] if lib is None else sexpr.children(lib, "symbol"):
-        lib_pins[str(sym[1])] = [
-            (str(num[1]), _num(pin_at, 1), _num(pin_at, 2))
-            for pin in sexpr.walk(sym)
-            if sexpr.head(pin) == "pin"
-            and (pin_at := sexpr.child(pin, "at")) is not None
-            and (num := sexpr.child(pin, "number")) is not None
-        ]
+        pins = lib_pins.setdefault(str(sym[1]), [])
+        for sub in [sym, *sexpr.children(sym, "symbol")]:
+            unit = _symbol_unit(str(sub[1])) if sub is not sym else 0
+            pins += [
+                (str(num[1]), _num(pin_at, 1), _num(pin_at, 2), unit)
+                for pin in sexpr.children(sub, "pin")
+                if (pin_at := sexpr.child(pin, "at")) is not None and (num := sexpr.child(pin, "number")) is not None
+            ]
     positions: dict[tuple[str, str], tuple[float, float]] = {}
     for sym in sexpr.children(sch, "symbol"):
         ref, lib_id, at = sexpr.property_value(sym, "Reference"), sexpr.child(sym, "lib_id"), sexpr.child(sym, "at")
         if not ref or lib_id is None or at is None or sexpr.child(sym, "mirror") is not None:
             continue
         angle = math.radians(_num(at, 3))
-        for number, px, py in lib_pins.get(str(lib_id[1]), []):
+        unit_node = sexpr.child(sym, "unit")
+        unit = int(_num(unit_node, 1, 1)) if unit_node is not None else 1
+        for number, px, py, pin_unit in lib_pins.get(str(lib_id[1]), []):
+            if pin_unit not in {0, unit}:
+                continue
             # library coordinates are y-up, the sheet is y-down
             x = _num(at, 1) + px * math.cos(angle) - py * math.sin(angle)
             y = _num(at, 2) - (px * math.sin(angle) + py * math.cos(angle))

@@ -18,9 +18,10 @@ boards/<name>/index.circuit.tsx        source of truth (tscircuit / React TSX)
     │  vibepcb build <name>   placement gate (tsci build --routing-disabled), one routed evaluation, exports from the JSON
     ▼
 out/<name>/raw/                        untouched tscircuit output, regenerated each build
-    <name>.kicad.zip, <name>.netlist.txt, .pcb.png, .pcb.svg, .sch.svg (+ .sch.png),
-    <name>.circuit.json
-    │  vibepcb fix <name>     unpack zip, rename to <name>.kicad_*, run registered fixes
+    <name>.kicad.zip, <name>.netlist.txt, .pcb.png, .pcb.svg, <name>.circuit.json
+    (no schematic: builds evaluate a copy with schematicDisabled)
+    │  vibepcb fix <name>     unpack zip, rename to <name>.kicad_*, generate the schematic (schgen),
+    │                         run registered fixes, preview reports/schematic.{svg,png}
     ▼
 out/<name>/kicad/<name>.kicad_pro      KiCad project; open this one in KiCad
     │  vibepcb check <name>   kicad-cli ERC + DRC, refill zones, post-fill fixes, sharp-corner check
@@ -50,7 +51,7 @@ corrections for systematic export quirks, plus track cleanup and a few hard rule
 | tscircuit, bun | npm packages from `package.json` (`tscircuit`, `bun`, `@types/react`) |
 | KiCad >= 9 (`kicad-cli`) | system install (`sudo pacman -S kicad`), or set `$KICAD_CLI`. Needed for `check` and `fab` only |
 | ngspice | optional, only for `boards/<name>/sim/*.cir` decks (`ngspice -b <deck>`) |
-| rsvg-convert | optional, makes `out/<name>/raw/<name>.sch.png` from the SVG |
+| rsvg-convert | optional, makes `out/<name>/raw/<name>.pcb.png` and `out/<name>/reports/schematic.png` from the SVGs |
 
 Setup sequence:
 
@@ -82,8 +83,8 @@ docstring of `cli.py` doubles as `--help` text.
 | Command | Does | Writes | Exit code |
 |---------|------|--------|-----------|
 | `new <board>` | writes a starter board (a 30x20 mm board with R1, C1 and a trace) to `boards/<board>/index.circuit.tsx`; refuses if the file exists | `boards/<board>/` | 1 if it exists |
-| `build <board> [--fast]` | placement gate: `tsci build --routing-disabled`, stops on placement/outside-board/overlap/clearance errors (about 1 min on a 238-part board); then ONE routed `tsci export -f circuit-json` (stops on `*_error` elements), and `kicad_zip`, netlist, SVGs are converted from that JSON; PNGs via `rsvg-convert`. `--fast` evaluates a temp copy in `out/<board>/fast/` with `autorouterEffortLevel="2x"` | `out/<board>/raw/` | 1 on errors or unknown board |
-| `fix <board>` | removes and re-creates `out/<board>/kicad/` from the raw zip (the footprint library `lib/footprints/tscircuit_builtin.pretty` is written from the footprints embedded in the board, `kicad.write_footprint_library`), renames the files to the board name, then runs `fixes.apply_all` and prints one line per change | `out/<board>/kicad/` | 0 (exceptions reported as `error:`, exit 1) |
+| `build <board> [--fast]` | placement gate: `tsci build --routing-disabled`, stops on placement/outside-board/overlap/clearance errors (about 1 min on a 238-part board); then ONE routed `tsci export -f circuit-json` (stops on `*_error` elements), and `kicad_zip`, netlist, PCB SVG are converted from that JSON; PNG via `rsvg-convert`. tscircuit always evaluates a copy in `out/<board>/src/` with `schematicDisabled` (`tscircuit.prepared_source`: its schematic layout does not scale, `fix` generates the schematic); `--fast` also sets `autorouterEffortLevel="2x"` in that copy | `out/<board>/raw/` | 1 on errors or unknown board |
+| `fix <board>` | removes and re-creates `out/<board>/kicad/` from the raw zip (the footprint library `lib/footprints/tscircuit_builtin.pretty` is written from the footprints embedded in the board, `kicad.write_footprint_library`), renames the files to the board name, replaces the schematic with `schgen.write` (from the circuit JSON + the TSX sections), then runs `fixes.apply_all` and prints one line per change; exports `reports/schematic.svg` + `.png` (4000 px) as a preview | `out/<board>/kicad/` | 0 (exceptions reported as `error:`, exit 1) |
 | `check <board>` | `kicad-cli sch erc`, `kicad-cli pcb drc` (refills zones, saves the board), post-fill loop, sharp-corner check, prints both reports | `out/<board>/reports/{erc,drc}.json`, modifies the KiCad PCB | 1 if ERC errors, DRC errors or sharp corners |
 | `all <board>` | `build`, then `fix`, then `check`, short-circuiting on a non-zero result | all of the above | first non-zero, else `check`'s result |
 | `fab <board>` | part availability check once (parts engine, placement-only evaluation), then `kicad.export_fab` on `out/<board>/kicad/<board>.kicad_pcb` | `out/<board>/fab/` | 0 |
@@ -160,7 +161,7 @@ connection rules still join the net's pads (checked net by net, else polyline by
 |---|------|--------------|----------------------------------------|
 | - | `tscircuit.routed_errors` (build) | Build stops only on source/netlist errors and an aborted router; tscircuit's copper DRC is reported | `fix` repairs copper issues and KiCad's DRC in `check` is the authority |
 | - | `tscircuit.repair_trace_nets` (build) | Re-links each routed trace to the `source_trace` of the net its end ports belong to | Autorouter sometimes tags a route with another net's id; the export then has shorts and broken nets |
-| 1 | `rename_auto_nets` | Selector-style net names -> `Net-(R1-Pad2)` | tscircuit exports names KiCad does not use |
+| 1 | `rename_auto_nets` | Selector-style net names -> the schematic's names (`schgen.pin_net_names`: `U1_VREG_1V2` after the chip pin, else `Net-(R1-Pad2)`) | tscircuit exports names KiCad does not use; schematic and board must agree (parity, "Update PCB from Schematic") |
 | 2 | `propagate_split_pad_nets` | Gives every pad of a split pad (same number) the net of its siblings; marks the part `duplicate_pad_numbers_are_jumpers` | Export puts the net on one pad only; KiCad reports the rest as unconnected copper |
 | 3 | `repair_zero_width_tracks` | Zero-width segments take the width of the tracks they join | Router occasionally emits width 0 = copper-less, broken connection |
 | 4 | `drop_tracks_inside_pads` | Removes segments lying wholly inside a same-net pad; an in-pad wiggle that a track enters at the pad edge becomes one straight piece to the pad centre | Tiny stubs in custom pads add no connection and fail min track width; the wiggles make acute angles with the entering track |
@@ -191,7 +192,7 @@ connection rules still join the net's pads (checked net by net, else polyline by
 | 29 | `strict_track_rules` | DRC rule "no acute angles" (`track_angle` min 89); `track_dangling`, `via_dangling`, `track_angle` set to error | KiCad only warns about dangling items by default; 135-deg bends are checked by `sharp_corners` |
 | 30 | `place_reference_designators` | 0.8 mm reference text moved to the first free spot around the part | tscircuit's 0.4 mm text at fixed offsets lands on pads/silk/edge |
 | 31 | `fit_schematic_sheet` | Smallest landscape ISO sheet that fits, centred, with title block | Export picks A0/A1 and draws in a corner |
-| - | `schgen.write` (fix) | Generates a netlist-style schematic (boxes + global net labels) from the circuit JSON | Big boards set `schematicDisabled` (tscircuit's schematic layout does not finish); BOM/ERC/PDF need symbols |
+| - | `schgen.write` (fix) | Generates the schematic from the circuit JSON: one framed block per TSX section (`{/* ===== title ===== */}`), R/C/L/D/crystal/button symbols, two-terminal parts wired as trees off the chip pins they serve (straight chains, the net label below), boxes with supply pins on top / grounds at the bottom and same-net pins joined into one symbol, rail symbols for GND / positive / negative supplies (a supply must feed a chip power pin), global labels on every wired net (double arrow when it leaves the block), decoupling (rail-to-rail) caps hung on the supply pin of the chip they serve, block arrangement chosen for the smallest paper. Chips get real symbols (section 6.1): pins keep the library pitch, a pin's passives jog to a free row or, on long pin rows / when they would push neighbours, move next to the chip behind a net label; top supply pins carry a bus with the caps hanging down to GND; each unit of a multi-unit part (dual op-amp) is its own cell. Each passive belongs to the chip it sits next to on the PCB (`pcb_component` centres, among the chips it connects to): trees only grow through a chip's own passives, and a chip is placed as one piece with everything it keeps. MOSFETs with only G/S/D pins (SO-8) get KiCad's generic `Q_[NP]MOS_GSD`, repeated pins stacked, P-channel when the source is on a positive supply. Cells are skyline-packed. The drawing is checked against the netlist (`schgen.connectivity_errors`) and redrawn with boxes if a symbol ever broke a net | tscircuit's schematic layout does not finish on a few hundred parts, so builds always disable it; BOM/ERC/PDF need symbols. Runs in about a second on a 239-part board (first run: LCSC downloads, cached) |
 | - | `restore_nets` (fix, end) | Nets KiCad still finds unconnected after the track fixes go back to their routed state, then `merge_duplicate_vias` again | Safety net: one unclean net beats a disconnected one; the routed state has the stacked vias back (`holes_co_located`) |
 | - | `prune_pour_tracks` (check) | Removes tracks of a poured net that KiCad's fill already provides | tscircuit routes GND as tracks before pouring; redundant, take room, short thermal reliefs |
 | - | second pass (check) | After pruning: `clean_tracks`, `separate_ends_on_pads`, `square_tees`, `push_tracks_clear`, `reroute_tracks`, `remove_antennas` again | Pruned tracks free room for corners that had none |
@@ -229,7 +230,25 @@ The 135 degree bend minimum is not a KiCad rule here; it is `fixes.sharp_corners
 
 ---
 
-## 6. S-expression module (`src/vibepcb/sexpr.py`)
+## 6. Schematic symbols (`symlib.py`, `easyeda.py`)
+
+`schgen` draws a chip with a real symbol when one fits its netlist, else with a generated box:
+
+1. **KiCad's library** (`symlib.Library`): the installed `*.kicad_sym` directory (`$KICAD*_SYMBOL_DIR`,
+   `/usr/share/kicad/symbols`, the flatpak runtime). Names are indexed once (`~/.cache/vibepcb/kicad-symbols.json`,
+   keyed by path + mtime); a name matches the MPN's start, a lowercase `x` being a wildcard
+   (`STM32G431RBTx` matches `STM32G431RBT6`). `extends` is resolved, resolved symbols are cached.
+2. **LCSC / EasyEDA** (`easyeda.fetch_all`, `easyeda.to_symbol`) by the part's LCSC number: the EasyEDA
+   component JSON (`https://easyeda.com/api/products/<C...>/components`) is downloaded once into
+   `~/.cache/vibepcb/easyeda/` and converted (pins, rect, polyline, polygon, ellipse, arc, text; sub-parts
+   become units). Offline, an uncached part keeps the box. Own converter: `easyeda2kicad` is AGPL.
+
+`symlib.fits` decides: identical pin numbers, no stacked pins on different nets, and (KiCad library only)
+at least half the pin names agree; LCSC symbols come from the same data as tscircuit's imports, so their
+numbers are authoritative. `symlib.for_schematic` makes every pin passive (tscircuit has no pin types)
+and shows hidden pins that are not stacked under a visible one. `fixes._pin_positions` is unit-aware.
+
+## 6a. S-expression module (`src/vibepcb/sexpr.py`)
 
 A lossless reader and writer for KiCad files. A node is a `list`; its items are:
 
@@ -430,10 +449,10 @@ fails" (CLAUDE.md).
 | node / npm | tscircuit, bun | `nodeenv` (hatch env) or system | `shutil.which("node")` is checked |
 | bun | tsci's shebang is `env bun` | npm devDependency | comes from `node_modules/.bin` |
 | `kicad-cli` (KiCad >= 9) | `kicad.py` | `$KICAD_CLI`, else PATH | ERC, DRC, refill, fab exports, renders |
-| `rsvg-convert` | `cli.cmd_build` | PATH, optional | makes `<board>.sch.png`; skipped silently if absent |
+| `rsvg-convert` | `cli.cmd_build`, `cli.cmd_fix` | PATH, optional | makes `<board>.pcb.png` and `reports/schematic.png`; skipped silently if absent |
 | ngspice | `boards/<name>/sim/*.cir` | PATH | run manually: `ngspice -b <deck>` |
 | git | `update-skill`, `clean` | PATH | `git clean -ffX` deletes ignored files in `.tmp` and `out` |
-| network | `docs` (llms.txt), `update-skill` (GitHub clone) | - | |
+| network | `docs` (llms.txt), `update-skill` (GitHub clone), `fix` (LCSC symbols, first time per part) | - | `fix` works offline: uncached parts get boxes |
 
 The tscircuit skill is vendored in `.claude/skills/tscircuit/` (`SKILL.md`, `elements/*.md`,
 `CLI.md`, `SYNTAX.md`, ...). `SKILL.md` frontmatter: `name`, `description`, `allowed-tools`.
@@ -477,7 +496,7 @@ History: used to be circuit-json export (~10 min) + a second `kicad-library` exp
    set exit 1. Read the printed warnings anyway.
 9. **`schematic_net_labels` and `place_reference_designators` depend on geometry thresholds**
    (`LABEL_SNAP_MM = 3.0`, text box estimates with `CHAR_ADVANCE = 0.8`). Check the
-   result on `sch.png` / `pcb.png` after changes.
+   result on `reports/schematic.png` / `pcb.png` after changes.
 10. **Board thickness, reference size and clearances are constants** in `fixes.py`
     (`STANDARD_BOARD_THICKNESS_MM = 1.6`, `REF_TEXT_SIZE_MM = 0.8`, `THERMAL_GAP_MM = 0.3`,
     `FOOTPRINT_INTERNAL_HOLE_CLEARANCE_MM = 0.15`). Change them there, not per board.

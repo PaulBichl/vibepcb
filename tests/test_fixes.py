@@ -41,6 +41,25 @@ def test_rename_auto_nets(project: fixes.KicadProject) -> None:
     assert fixes.rename_auto_nets(project) == []  # idempotent
 
 
+def test_rename_auto_nets_uses_schematic_names(project: fixes.KicadProject) -> None:
+    # with the circuit JSON next to it, the PCB gets the generated schematic's net names
+    raw = project.directory.parent / "raw"
+    raw.mkdir()
+    circuit = [
+        {"type": "source_component", "source_component_id": "c1", "name": "R1", "ftype": "simple_resistor"},
+        {"type": "source_port", "source_port_id": "p1", "source_component_id": "c1", "name": "pin2", "pin_number": 2,
+         "subcircuit_connectivity_map_key": "k"},
+        {"type": "source_component", "source_component_id": "c2", "name": "U9", "ftype": "simple_chip"},
+        *({"type": "source_port", "source_port_id": f"u{i}", "source_component_id": "c2", "name": name,
+           "pin_number": i} for i, name in enumerate(("A", "B"), start=1)),
+        {"type": "source_port", "source_port_id": "u3", "source_component_id": "c2", "name": "SENSE", "pin_number": 3,
+         "subcircuit_connectivity_map_key": "k"},
+        {"type": "source_trace", "connected_source_port_ids": ["p1", "u3"]},
+    ]  # fmt: skip
+    (raw / "board.circuit.json").write_text(json.dumps(circuit), encoding="utf-8")
+    assert fixes.rename_auto_nets(project) == ["net '.R1 > .pin2 to .D1 > .anode' -> 'U9_SENSE'"]
+
+
 def test_propagate_split_pad_nets(project: fixes.KicadProject) -> None:
     assert fixes.propagate_split_pad_nets(project) == []  # no split pads in the fixture
     fp = next(f for f in sexpr.children(project.pcb, "footprint") if sexpr.property_value(f, "Reference") == "R1")
@@ -489,17 +508,19 @@ def test_write_footprint_library_round_trip(project: fixes.KicadProject, tmp_pat
     assert sexpr.property_value(lib, "Reference") == "REF**"
 
 
-def test_fast_source(tmp_path: Path) -> None:
+def test_prepared_source(tmp_path: Path) -> None:
     board = tmp_path / "boards" / "b"
     board.mkdir(parents=True)
     source = board / "index.circuit.tsx"
     source.write_text('import { X } from "./imports"\nexport default () => (\n  <board width="1mm">\n  </board>\n)\n')
-    fast = tscircuit.fast_source(source, tmp_path / "fast")
-    text = fast.read_text()
-    assert '<board autorouterEffortLevel="2x" width="1mm">' in text
+    text = tscircuit.prepared_source(source, tmp_path / "src").read_text()
+    assert '<board schematicDisabled width="1mm">' in text  # tscircuit's schematic layout never runs
     assert f'from "{board / "imports"}"' in text
-    source.write_text('<board autorouterEffortLevel="10x" width="1mm">')
-    assert 'autorouterEffortLevel="2x"' in tscircuit.fast_source(source, tmp_path / "fast").read_text()
+    fast = tscircuit.prepared_source(source, tmp_path / "fast", effort="2x").read_text()
+    assert '<board schematicDisabled autorouterEffortLevel="2x" width="1mm">' in fast
+    source.write_text('<board autorouterEffortLevel="10x" schematicDisabled width="1mm">')
+    fast = tscircuit.prepared_source(source, tmp_path / "fast", effort="2x").read_text()
+    assert fast == '<board autorouterEffortLevel="2x" schematicDisabled width="1mm">'
 
 
 def test_drop_tracks_inside_pads_keeps_run_to_pad_edge(project: fixes.KicadProject) -> None:
