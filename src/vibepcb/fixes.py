@@ -2098,8 +2098,9 @@ def _relocate_via_rerouting(
     """Move a crowded via to the nearest spot where it fits and reroute its tracks from there.
 
     The tracks leaving the via (runs up to their next pad, via or junction) get new 45-degree
-    routes from the new spot on their own layers (see :func:`reroute_tracks`); the move happens
-    only if every one of them routes. Returns the new centre, or None.
+    routes from the new spot on their own layers (see :func:`reroute_tracks`) over their first
+    ``VIA_SPLICE_MM``, joining the rest of the run there (a run to a far via stays a small
+    search); the move happens only if every one of them routes. Returns the new centre, or None.
     """
     obstacles = copper.obstacles()
     others_all = [o for o in obstacles if o.net != net]
@@ -2125,7 +2126,13 @@ def _relocate_via_rerouting(
     for q in spots:
         new_runs = []
         for r in runs:
-            far = r.points[-1] if math.dist(r.points[0], centre) <= radius else r.points[0]
+            pts = r.points if math.dist(r.points[0], centre) <= radius else r.points[::-1]
+            # reroute only the first stretch (up to VIA_SPLICE_MM along the run), keep the rest
+            k, walked = 1, math.dist(pts[0], pts[1])
+            while k < len(pts) - 1 and walked < VIA_SPLICE_MM:
+                walked += math.dist(pts[k], pts[k + 1])
+                k += 1
+            far, rest = pts[k], pts[k + 1 :]
             width = max(s.width for s in r.segs)
             half = width / 2
             near = [o for o in others_all if r.layer in o.layers]
@@ -2164,11 +2171,14 @@ def _relocate_via_rerouting(
 
             route = tracks.grid_route(q, far, free, REROUTE_STEP_MM, None, fits)
             if route is None or not all(fits(a, b) for a, b in itertools.pairwise(route)):
+                log.debug("via %s -> %s: no route on %s to %s", net, q, r.layer, far)
                 break
-            bends = [tracks.interior_angle(route[i - 1], route[i], route[i + 1]) for i in range(1, len(route) - 1)]
+            line = [*route, *rest]
+            bends = [tracks.interior_angle(line[i - 1], line[i], line[i + 1]) for i in range(1, len(line) - 1)]
             if any(b < tracks.MIN_CORNER_DEG - 0.5 for b in bends):
+                log.debug("via %s -> %s: route on %s bends sharper than 135 deg", net, q, r.layer)
                 break
-            new_runs.append((r, route, width))
+            new_runs.append((r, route, width, pts[: k + 1]))
         else:
             at = sexpr.child(node, "at")
             assert at is not None
@@ -2176,10 +2186,17 @@ def _relocate_via_rerouting(
             for r in stubs:
                 for seg in r.segs:
                     project.pcb.remove(_source(seg))
-            for r, route, width in new_runs:
+            for r, route, width, replaced in new_runs:
                 template = _source(r.segs[0])
-                index_ = min(project.pcb.index(_source(s)) for s in r.segs)
-                for s in r.segs:
+
+                def on_replaced(p: tracks.Point, replaced: list[tracks.Point] = replaced) -> bool:
+                    return any(
+                        tracks.point_seg_distance(p, a, b) <= tracks.EPS for a, b in itertools.pairwise(replaced)
+                    )
+
+                old_segs = [s for s in r.segs if on_replaced(s.a) and on_replaced(s.b)]
+                index_ = min(project.pcb.index(_source(s)) for s in old_segs)
+                for s in old_segs:
                     project.pcb.remove(_source(s))
                 for k, (a, b) in enumerate(itertools.pairwise(route)):
                     project.pcb.insert(index_ + k, _segment_node(template, a, b, width))
@@ -2188,6 +2205,7 @@ def _relocate_via_rerouting(
 
 
 VIA_REROUTE_SPOTS = 12  # spots tried by _relocate_via_rerouting, nearest first
+VIA_SPLICE_MM = 2.0  # it reroutes this much of each run, the rest stays
 
 
 def snap_near_ends(project: KicadProject) -> list[str]:
@@ -2345,6 +2363,10 @@ def _square_tees_pass(project: KicadProject, clearance: float, edge_clearance: f
     return changes
 
 
+def _piece_key(a: tracks.Point, b: tracks.Point) -> frozenset[tuple[int, int]]:
+    return frozenset((tracks._key(a), tracks._key(b)))
+
+
 def _anchored_pieces(copper: _Copper, run: tracks.Chain, mine: set[int]) -> set[int]:
     """Indices of the run's pieces (``points[i]``-``points[i + 1]``) that something else joins mid-run.
 
@@ -2434,7 +2456,7 @@ REROUTE_STUB_TRIES = 12
 
 REROUTE_STEP_MM = 0.05  # grid of the local maze router
 REROUTE_WINDOWS_MM = (2.0, 4.0, 6.0)  # it may leave the old route's bounding box by this much (tried in turn)
-REROUTE_MAX_PATH_MM = 25.0
+REROUTE_MAX_PATH_MM = 25.0  # longest stretch one reroute replaces
 REROUTE_GROW_PIECES = (1, 3, 6, 1000)  # pieces kept around the bad stretch, then the whole run
 REROUTE_GRID_MARGIN_MM = 0.01  # grid nodes keep this extra distance: pieces between them stay clear
 
@@ -2451,6 +2473,7 @@ def reroute_tracks(project: KicadProject) -> list[str]:
     clearance, edge_clearance = _design_clearances(project)
     changes: list[str] = []
     tried: set[tuple[str, str, tuple[int, int], tuple[int, int]]] = set()
+    made: set[frozenset[tuple[int, int]]] = set()  # pieces this call routed
     for _ in range(40):  # one run per pass: the copper changes with every reroute
         copper = _copper(project.pcb)
         obstacles = copper.obstacles()
@@ -2464,8 +2487,10 @@ def reroute_tracks(project: KicadProject) -> list[str]:
             pts = run.points
             key = (run.net, run.layer, tracks._key(pts[0]), tracks._key(pts[-1]))
             length = sum(math.dist(a, b) for a, b in itertools.pairwise(pts))
-            if len(pts) < 2 or key in tried or length > REROUTE_MAX_PATH_MM:
+            if len(pts) < 2 or key in tried:
                 continue
+            if all(_piece_key(a, b) in made for a, b in itertools.pairwise(pts)):
+                continue  # this call's own route: rerouting it again only creeps
             if copper.same_anchor(pts[0], pts[-1], run.net, run.layer):
                 continue  # inside one via or pad: no copper of its own to reroute
             width = max(
@@ -2582,7 +2607,15 @@ def reroute_tracks(project: KicadProject) -> list[str]:
             # reroute the bad stretch only - its legal surroundings stay; widen it while nothing fits
             for grow in REROUTE_GROW_PIECES:
                 lo, hi = max(0, min(bad) - grow), min(n - 2, max(bad) + grow)
-                if any(lo <= i <= hi for i in anchored):  # something joins the run there: it must stay
+                stretch = sum(math.dist(pts[i], pts[i + 1]) for i in range(lo, hi + 1))
+                if stretch > REROUTE_MAX_PATH_MM:  # a long run: only its bad part is rerouted
+                    break
+                # something joins the run on an anchored piece: it must stay - start / end the
+                # stretch next to it, give up if it lies inside
+                inside = [i for i in anchored if lo <= i <= hi]
+                lo = max([i + 1 for i in inside if i <= min(bad)], default=lo)
+                hi = min([i - 1 for i in inside if i >= max(bad)], default=hi)
+                if lo > hi or any(lo <= i <= hi for i in anchored):
                     log.debug("reroute %s %s: stretch carries a T-junction, via or pad", run.net, run.layer)
                     break
                 start, goal = pts[lo], pts[hi + 1]
@@ -2637,6 +2670,7 @@ def reroute_tracks(project: KicadProject) -> list[str]:
                 project.pcb.remove(_source(s))
             for k, (p, q) in enumerate(itertools.pairwise(new_points)):
                 project.pcb.insert(index + k, _segment_node(template, p, q, width))
+                made.add(_piece_key(p, q))
             changes.append(
                 f"{run.net} on {run.layer}: run ({_mm(pts[0][0])}, {_mm(pts[0][1])}) - "
                 f"({_mm(pts[-1][0])}, {_mm(pts[-1][1])}) rerouted"
@@ -2656,9 +2690,10 @@ def push_tracks_clear(project: KicadProject) -> list[str]:
 
     The router occasionally squeezes a track past a via or between two others a few
     hundredths of a mm too close. A piece whose ends are free corners (two tracks meet
-    there, no pad or via) moves perpendicular to itself, its neighbours following, in
-    small steps up to 0.3 mm, either side; every changed piece must keep the clearance and
-    no corner may get sharper than 135 deg (or than it was).
+    there, no pad or via) or lie on a pad of its net moves perpendicular to itself, its
+    neighbours following, in small steps up to 0.3 mm, either side; an end on a pad must stay
+    inside it (KiCad still connects it), every changed piece must keep the clearance and no
+    corner may get sharper than 135 deg (or than it was).
     """
     clearance, edge_clearance = _design_clearances(project)
     changes = []
@@ -2671,11 +2706,19 @@ def push_tracks_clear(project: KicadProject) -> list[str]:
             if all(o.distance(s.a, s.b) >= clearance + s.width / 2 - tracks.EPS / 10 for o in others):
                 continue
             same = [t for t in copper.segs_by_net.get(s.net, []) if t.layer == s.layer and t is not s]
-            # per end: the neighbour track meeting there and its far end; a pad, via or junction fixes it
-            ends: list[tuple[tracks.Seg, tracks.Point]] = []
+            # per end: the neighbour track meeting there and its far end (it follows), or the pad
+            # the end lies on (the end may slide inside it); a via or junction fixes it
+            ends: list[tuple[tracks.Seg, tracks.Point] | tracks.Obstacle] = []
             for e in (s.a, s.b):
                 meet = [t for t in same if min(math.dist(t.a, e), math.dist(t.b, e)) <= tracks.EPS]
-                if len(meet) == 1 and not copper.on_pad_or_via(e, s.net, s.layer):
+                on_via = any(math.dist(e, c) <= r + tracks.EPS for c, r in copper.vias_by_net.get(s.net, []))
+                pad = next(
+                    (o for o in copper.pads_by_net.get(s.net, []) if s.layer in o.layers and o.distance(e, e) <= 0),
+                    None,
+                )
+                if pad is not None and not on_via:
+                    ends.append(pad)
+                elif len(meet) == 1 and not copper.on_pad_or_via(e, s.net, s.layer):
                     t = meet[0]
                     ends.append((t, t.b if math.dist(t.a, e) <= tracks.EPS else t.a))
             if len(ends) != 2:
@@ -2699,21 +2742,44 @@ def push_tracks_clear(project: KicadProject) -> list[str]:
                     e.distance(a, b) >= edge_clearance + width / 2 for e in edges
                 )
 
-            corners = (tracks.interior_angle(ends[0][1], s.a, s.b), tracks.interior_angle(s.a, s.b, ends[1][1]))
+            corners = [
+                tracks.interior_angle(end[1], p, q)
+                for end, p, q in ((ends[0], s.a, s.b), (ends[1], s.b, s.a))
+                if not isinstance(end, tracks.Obstacle)
+            ]
             for step in PUSH_STEPS_MM:
                 done = False
                 for sign in (1, -1):
                     off = (normal[0] * step * sign, normal[1] * step * sign)
                     na = (s.a[0] + off[0], s.a[1] + off[1])
                     nb = (s.b[0] + off[0], s.b[1] + off[1])
-                    (ta, fa), (tb, fb) = ends
-                    if not (ok(na, nb, s.width) and ok(fa, na, ta.width) and ok(fb, nb, tb.width)):
+                    if not ok(na, nb, s.width):
                         continue
+                    fits_ends, new_corners, moves = True, [], [(s, s.a, na), (s, s.b, nb)]
+                    for end, old_p, new_p, other in ((ends[0], s.a, na, nb), (ends[1], s.b, nb, na)):
+                        if isinstance(end, tracks.Obstacle):  # stays inside its pad, clear of the edge
+                            m = PAD_EDGE_MARGIN_MM
+                            if any(
+                                end.distance(q, q) > 0
+                                for q in (
+                                    (new_p[0] + m, new_p[1]),
+                                    (new_p[0] - m, new_p[1]),
+                                    (new_p[0], new_p[1] + m),
+                                    (new_p[0], new_p[1] - m),
+                                )
+                            ):
+                                fits_ends = False
+                            continue
+                        t, far = end
+                        if not ok(far, new_p, t.width):
+                            fits_ends = False
+                        new_corners.append(tracks.interior_angle(far, new_p, other))
+                        moves.append((t, old_p, new_p))
                     # no corner sharper than 135 deg, or than it already was
                     floor = min(tracks.MIN_CORNER_DEG, *corners)
-                    if min(tracks.interior_angle(fa, na, nb), tracks.interior_angle(na, nb, fb)) < floor - 1e-6:
+                    if not fits_ends or (new_corners and min(new_corners) < floor - 1e-6):
                         continue
-                    for seg, old, new_point in ((s, s.a, na), (s, s.b, nb), (ta, s.a, na), (tb, s.b, nb)):
+                    for seg, old, new_point in moves:
                         key = "start" if math.dist(seg.a, old) <= tracks.EPS else "end"
                         node = sexpr.child(_source(seg), key)
                         assert node is not None

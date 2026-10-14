@@ -617,6 +617,27 @@ def test_merge_duplicate_vias_too_close(project: fixes.KicadProject) -> None:
     assert fixes.merge_duplicate_vias(project) == []
 
 
+def test_relocate_via_rerouting_splices_long_runs(project: fixes.KicadProject) -> None:
+    # a GND via overlapping J1 pad 1 (VCC, edge x = 93.48) with a 20 mm B.Cu run: the via moves, only
+    # the first ~2 mm of the run are rerouted, the rest (here its far piece) stays as it was
+    via = sexpr.loads("(via (at 93.6 100) (size 0.6) (drill 0.3) (layers F.Cu B.Cu) (net 2))")
+    near = sexpr.loads("(segment (start 93.6 100) (end 93.6 101) (width 0.2) (layer B.Cu) (net 2))")
+    mid = sexpr.loads("(segment (start 93.6 101) (end 93.6 103) (width 0.2) (layer B.Cu) (net 2))")
+    far = sexpr.loads("(segment (start 93.6 103) (end 93.6 120) (width 0.2) (layer B.Cu) (net 2))")
+    end_via = sexpr.loads("(via (at 93.6 120) (size 0.6) (drill 0.3) (layers F.Cu B.Cu) (net 2))")
+    project.pcb += [via, near, mid, far, end_via]
+    copper = fixes._copper(project.pcb)
+    clearance, edge = fixes._design_clearances(project)
+    node, centre, radius, net = next(v for v in copper.vias if v[0] is via)
+    moved = fixes._relocate_via_rerouting(project, copper, node, centre, radius, net, clearance, edge)
+    assert moved is not None
+    assert far in project.pcb  # beyond the splice: untouched
+    assert near not in project.pcb
+    copper = fixes._copper(project.pcb)
+    pad = next(o for o in copper.pads_by_net["VCC"] if o.distance((93.0, 100.0), (93.0, 100.0)) == 0)
+    assert pad.distance(moved, moved) >= radius + clearance - 1e-6
+
+
 def test_square_tees(project: fixes.KicadProject) -> None:
     assert fixes.square_tees(project) == []
     body = sexpr.loads("(segment (start 60 60) (end 70 60) (width 0.2) (layer F.Cu) (net 2))")
@@ -646,6 +667,44 @@ def test_push_tracks_clear(project: fixes.KicadProject) -> None:
     assert end is not None
     assert float(str(start[2])) == float(str(end[2])) < 60  # moved away from the via, still straight
     assert fixes.push_tracks_clear(project) == []
+
+
+def test_push_tracks_clear_slides_a_pad_end(project: fixes.KicadProject) -> None:
+    # a VCC track leaving J1 pad 1 (1.5 mm square at (92.73, 100)) passes 0.4 mm from a GND via
+    # centre (needs 0.3 + 0.2 + 0.1): it moves sideways, its pad end sliding inside the pad
+    via = sexpr.loads("(via (at 93.13 102) (size 0.6) (drill 0.3) (layers F.Cu B.Cu) (net 2))")
+    piece = sexpr.loads("(segment (start 92.73 100.5) (end 92.73 104) (width 0.2) (layer F.Cu) (net 1))")
+    nxt = sexpr.loads("(segment (start 92.73 104) (end 92.73 104.6) (width 0.2) (layer F.Cu) (net 1))")
+    project.pcb += [via, piece, nxt]
+    assert len(fixes.push_tracks_clear(project)) == 1
+    start = sexpr.child(piece, "start")
+    assert start is not None
+    x = float(str(start[1]))
+    assert 91.98 + fixes.PAD_EDGE_MARGIN_MM <= x < 92.73  # moved away from the via, still in the pad
+    end, nxt_start = sexpr.child(piece, "end"), sexpr.child(nxt, "start")
+    assert end == ["end", *nxt_start[1:]] if nxt_start is not None else False  # neighbour followed
+    assert fixes.push_tracks_clear(project) == []
+
+
+def test_reroute_tracks_long_run(project: fixes.KicadProject) -> None:
+    # a 48 mm VCC run between two vias passes through a GND via near its end: only the bad stretch
+    # (a few mm) is rerouted, the run's length does not rule it out
+    vias = [
+        sexpr.loads(f"(via (at {x} 70) (size 0.6) (drill 0.3) (layers F.Cu B.Cu) (net {n}))")
+        for x, n in ((20, 1), (64, 2), (68, 1))
+    ]
+    xs = (20, 62, 63, 65, 66, 68)
+    pieces = [
+        sexpr.loads(f"(segment (start {a} 70) (end {b} 70) (width 0.2) (layer F.Cu) (net 1))")
+        for a, b in itertools.pairwise(xs)
+    ]
+    project.pcb += [*vias, *pieces]
+    assert len(fixes.reroute_tracks(project)) == 1
+    assert pieces[0] in project.pcb  # the long first piece stays
+    copper = fixes._copper(project.pcb)
+    gnd_via = (64.0, 70.0)
+    vcc = [s for s in copper.segs if s.net == "VCC" and min(s.a[1], s.b[1]) > 65]
+    assert all(tracks.point_seg_distance(gnd_via, s.a, s.b) >= 0.3 + 0.2 + 0.1 - 1e-6 for s in vcc)
 
 
 def test_reroute_tracks_keeps_a_t_junction(project: fixes.KicadProject) -> None:
