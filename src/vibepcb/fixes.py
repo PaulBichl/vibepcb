@@ -1900,35 +1900,90 @@ def _clean_net(
 
 
 def merge_duplicate_vias(project: KicadProject) -> list[str]:
-    """Keep one via where tscircuit exported several of one net on one spot.
+    """Keep one via where tscircuit exported several of one net on one spot or holes too close.
 
     Seen: a through via plus a blind F.Cu-In2 via at the same centre; moving or judging one
     of them alone (relocate_vias, remove_antennas) leaves the other in the way. The via
     spanning the most layers stays (a through via covers every layer the others joined).
+    Same-net vias whose holes are closer than the board's hole-to-hole minimum (seen: 0.44 mm
+    apart, overlapping copper; a drill hazard) merge too: the tracks ending in the dropped
+    via are pulled to its centre and bridged to the kept one.
     """
+    changes = []
     copper = _copper(project.pcb)
     spots: dict[tuple[str, tuple[int, int]], list[list[Node]]] = {}
     for node, centre, _, net in copper.vias:
         spots.setdefault((net, tracks._key(centre)), []).append(node)
-    changes = []
     for (net, _), nodes in spots.items():
         if len(nodes) < 2:
             continue
-
-        def span(node: list[Node]) -> int:
-            layers = sexpr.child(node, "layers")
-            names = [] if layers is None else [str(x) for x in layers[1:]]
-            order = list(COPPER_LAYERS)
-            idx = [order.index(n) for n in names if n in order]
-            return max(idx) - min(idx) if idx else 0
-
-        keep = max(nodes, key=span)
+        keep = max(nodes, key=_via_span)
         for node in nodes:
             if node is not keep:
                 project.pcb.remove(node)
         at = sexpr.child(keep, "at")
         changes.append(f"via {net} at ({_num(at, 1)}, {_num(at, 2)}): {len(nodes) - 1} duplicate(s) merged")
+    gap = _min_hole_to_hole(project)
+    while True:  # one merge at a time: the copper changes with each
+        copper = _copper(project.pcb)
+        pair = next(
+            (
+                (v, w)
+                for i, v in enumerate(copper.vias)
+                for w in copper.vias[i + 1 :]
+                if v[3] == w[3] and math.dist(v[1], w[1]) < (_via_drill(v[0]) + _via_drill(w[0])) / 2 + gap - tracks.EPS
+            ),
+            None,
+        )
+        if pair is None:
+            break
+        kept, dropped = sorted(pair, key=lambda v: -_via_span(v[0]))
+        kept_at, via_net = kept[1], kept[3]
+        dropped_node, dropped_at, radius = dropped[0], dropped[1], dropped[2]
+        bridges: dict[str, tuple[float, list[Node]]] = {}  # layer -> (width, template) of the bridge
+        for seg in copper.segs_by_net.get(via_net, []):
+            for k, end in enumerate((seg.a, seg.b)):
+                if math.dist(end, dropped_at) <= radius and math.dist(end, kept_at) > tracks.EPS:
+                    point = sexpr.child(_source(seg), ("start", "end")[k])
+                    assert point is not None
+                    point[1:3] = [Sym(_mm(dropped_at[0])), Sym(_mm(dropped_at[1]))]
+                    if seg.layer not in bridges or seg.width < bridges[seg.layer][0]:
+                        bridges[seg.layer] = (seg.width, _source(seg))
+        index = project.pcb.index(dropped_node)
+        project.pcb.remove(dropped_node)
+        for _, (width, template) in sorted(bridges.items()):
+            project.pcb.insert(index, _segment_node(template, dropped_at, kept_at, width))
+        changes.append(
+            f"via {via_net} at ({_mm(dropped_at[0])}, {_mm(dropped_at[1])}): merged into the one at"
+            f" ({_mm(kept_at[0])}, {_mm(kept_at[1])}) (holes closer than {gap} mm)"
+        )
     return changes
+
+
+def _via_span(node: list[Node]) -> int:
+    layers = sexpr.child(node, "layers")
+    names = [] if layers is None else [str(x) for x in layers[1:]]
+    order = list(COPPER_LAYERS)
+    idx = [order.index(n) for n in names if n in order]
+    return max(idx) - min(idx) if idx else 0
+
+
+def _via_drill(node: list[Node]) -> float:
+    drill = sexpr.child(node, "drill")
+    return 0.0 if drill is None else _num(drill, 1)
+
+
+DEFAULT_HOLE_TO_HOLE_MM = 0.25  # KiCad's default minimum hole-to-hole gap
+
+
+def _min_hole_to_hole(project: KicadProject) -> float:
+    pro = project.pcb_path.with_suffix(".kicad_pro")
+    try:
+        data = json.loads(pro.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return DEFAULT_HOLE_TO_HOLE_MM
+    rules = data.get("board", {}).get("design_settings", {}).get("rules", {})
+    return float(rules.get("min_hole_to_hole", DEFAULT_HOLE_TO_HOLE_MM))
 
 
 VIA_MOVE_STEPS_MM = tuple(round(0.05 * k, 2) for k in range(1, 61))  # up to 3 mm
@@ -3080,6 +3135,7 @@ def restore_nets(project: KicadProject, nets: set[str]) -> list[str]:
         n for n in snapshot if sexpr.head(n) in TRACK_NODES and isinstance(n, list) and _net_of(n, names_then) in nets
     ]
     project.pcb.extend(copy.deepcopy(restored))
+    merge_duplicate_vias(project)  # the routed state has tscircuit's stacked / crowded vias back
     return [
         f"{net}: tracks/vias restored as routed (KiCad found it unconnected after the clean-up)" for net in sorted(nets)
     ]

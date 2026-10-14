@@ -596,6 +596,27 @@ def test_merge_duplicate_vias(project: fixes.KicadProject) -> None:
     assert fixes.merge_duplicate_vias(project) == []
 
 
+def test_merge_duplicate_vias_too_close(project: fixes.KicadProject) -> None:
+    # two GND vias 0.44 mm apart (0.3 mm holes: 0.14 mm between them, under the 0.25 mm minimum);
+    # the track ending in the dropped one is pulled to its centre and bridged to the kept one
+    first = sexpr.loads("(via (at 50 50) (size 0.5) (drill 0.3) (layers F.Cu B.Cu) (net 2))")
+    second = sexpr.loads("(via (at 50.44 50) (size 0.5) (drill 0.3) (layers F.Cu B.Cu) (net 2))")
+    track = sexpr.loads("(segment (start 50.5 50.1) (end 53 50.1) (width 0.2) (layer B.Cu) (net 2))")
+    project.pcb += [first, second, track]
+    changes = fixes.merge_duplicate_vias(project)
+    assert len(changes) == 1
+    assert "merged into" in changes[0]
+    assert (first in project.pcb) != (second in project.pcb)
+    kept = first if first in project.pcb else second
+    at = sexpr.child(kept, "at")
+    assert at is not None
+    copper = fixes._copper(project.pcb)
+    gnd_b = [s for s in copper.segs if s.net == "GND" and s.layer == "B.Cu" and min(s.a[1], s.b[1]) > 49]
+    ends = {p for s in gnd_b for p in (s.a, s.b)}
+    assert (float(str(at[1])), float(str(at[2]))) in ends  # bridged to the kept via
+    assert fixes.merge_duplicate_vias(project) == []
+
+
 def test_square_tees(project: fixes.KicadProject) -> None:
     assert fixes.square_tees(project) == []
     body = sexpr.loads("(segment (start 60 60) (end 70 60) (width 0.2) (layer F.Cu) (net 2))")
