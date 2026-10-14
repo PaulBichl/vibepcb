@@ -6,6 +6,7 @@ vibepcb fix <board>     raw -> out/<board>/kicad, apply post-processing fixes
 vibepcb check <board>   KiCad DRC + ERC -> out/<board>/reports (after refill: drop tracks the GND pour provides)
 vibepcb all <board>     [--fast] build + fix + check
 vibepcb fab <board>     part availability check, gerbers/drill zip, BOM, pick-and-place, schematic PDF, 3D renders
+vibepcb publish <board> boards/<board>/hardware/: schematic + layout PDF/PNG, renders, BOM, KiCad project (no fab files)
 vibepcb list            list the boards under boards/
 vibepcb docs            download tscircuit's LLM docs to docs/tscircuit-llms.txt
 """
@@ -13,13 +14,19 @@ vibepcb docs            download tscircuit's LLM docs to docs/tscircuit-llms.txt
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import shutil
 import subprocess
 import sys
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
+from typing import TYPE_CHECKING
 
 from vibepcb import fixes, kicad, paths, schgen, sexpr, tscircuit
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 SCHEMATIC_PNG_WIDTH = 4000  # px: an A0 sheet stays readable when zoomed into a crop
 TSCIRCUIT_LLM_DOCS = "https://docs.tscircuit.com/llms.txt"
@@ -172,7 +179,29 @@ def cmd_check(board: str) -> int:
     print(f"Pours: {len(unpoured)} copper layer(s) without a plane")
     for layer in unpoured:
         print(f"  [error] no_pour: {layer} - add a <copperpour> (GND or a supply net) on it")
-    return 1 if erc.errors or drc.errors or corners or unpoured else 0
+    passed = not (erc.errors or drc.errors or corners or unpoured)
+    _write_check_status(board, pcb, passed)
+    return 0 if passed else 1
+
+
+def _board_hash(pcb: Path) -> str:
+    return hashlib.sha256(pcb.read_bytes()).hexdigest()
+
+
+def _write_check_status(board: str, pcb: Path, passed: bool) -> None:
+    """``reports/check.json``: the verdict of the last ``check`` and the board it was for."""
+    status = {"passed": passed, "board_sha256": _board_hash(pcb)}
+    (paths.OUT_DIR / board / "reports" / "check.json").write_text(json.dumps(status, indent=2), encoding="utf-8")
+
+
+def _check_passed(board: str, pcb: Path) -> bool:
+    """Whether the last ``check`` passed on the board as it is now."""
+    path = paths.OUT_DIR / board / "reports" / "check.json"
+    try:
+        status = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return bool(status.get("passed")) and status.get("board_sha256") == _board_hash(pcb)
 
 
 def cmd_fab(board: str) -> int:
@@ -183,6 +212,24 @@ def cmd_fab(board: str) -> int:
         warnings = tscircuit.availability_warnings(tscircuit.prepared_source(source, paths.OUT_DIR / board / "src"))
         print("\n".join(f"  {w}" for w in warnings) if warnings else "  all parts available")
     for f in kicad.export_fab(paths.kicad_dir(board) / f"{board}.kicad_pcb", paths.OUT_DIR / board / "fab"):
+        print(f"  {f.relative_to(paths.ROOT)}")
+    return 0
+
+
+def cmd_publish(board: str) -> int:
+    """Copy what a visitor needs for a first look into ``boards/<board>/hardware/`` (committed):
+    schematic PDF, layout PDF + PNGs, 3D renders, BOM and the KiCad project - no fab files."""
+    project = paths.kicad_dir(board)
+    pcb = project / f"{board}.kicad_pcb"
+    if not _check_passed(board, pcb):
+        print(f"error: `pcb check {board}` has not passed on this board - run it (and fix the board) first",
+              file=sys.stderr)  # fmt: skip
+        return 1
+    target = paths.board_source(board).parent / "hardware"
+    written = kicad.publish_project(project, board, target / "kicad")
+    written += kicad.export_docs(pcb, target)
+    written += kicad.export_layout(pcb, target)
+    for f in written:
         print(f"  {f.relative_to(paths.ROOT)}")
     return 0
 
@@ -199,7 +246,7 @@ def cmd_docs() -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="vibepcb", description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("new", "build", "fix", "check", "all", "fab"):
+    for name in ("new", "build", "fix", "check", "all", "fab", "publish"):
         command_parser = sub.add_parser(name)
         command_parser.add_argument("board")
         if name in ("build", "all"):
@@ -220,7 +267,7 @@ def main(argv: list[str] | None = None) -> int:
             case command:
                 if command == "build":
                     return cmd_build(args.board, fast=args.fast)
-                handler = {"new": cmd_new, "fix": cmd_fix, "check": cmd_check, "fab": cmd_fab}
+                handler = {"new": cmd_new, "fix": cmd_fix, "check": cmd_check, "fab": cmd_fab, "publish": cmd_publish}
                 return handler[command](args.board)
     except (tscircuit.TscircuitError, kicad.KicadCliError, FileNotFoundError) as exc:
         print(f"error: {exc}", file=sys.stderr)

@@ -143,6 +143,7 @@ test in `tests/test_fixes.py` against the fixtures in `tests/data/`.
 |---------|---------|
 | `hatch run pcb new <name>` | Scaffold `boards/<name>/index.circuit.tsx` |
 | `hatch run pcb all <name>` | build + fix + check |
+| `hatch run pcb publish <name>` | review set for GitHub in `boards/<name>/hardware/` (needs a passing `check`; no fab files) |
 | `hatch run pcb list` | List boards |
 | `hatch run tsci <args>` | tscircuit CLI |
 | `hatch run test` / `style` / `type` | pytest / ruff / mypy |

@@ -88,6 +88,7 @@ docstring of `cli.py` doubles as `--help` text.
 | `check <board>` | `kicad-cli sch erc`, `kicad-cli pcb drc` (refills zones, saves the board), post-fill loop, sharp-corner check, prints both reports | `out/<board>/reports/{erc,drc}.json`, modifies the KiCad PCB | 1 if ERC errors, DRC errors or sharp corners |
 | `all <board>` | `build`, then `fix`, then `check`, short-circuiting on a non-zero result | all of the above | first non-zero, else `check`'s result |
 | `fab <board>` | part availability check once (parts engine, placement-only evaluation), then `kicad.export_fab` on `out/<board>/kicad/<board>.kicad_pcb` | `out/<board>/fab/` | 0 |
+| `publish <board>` | only if the last `check` passed on the current board (`reports/check.json`, board hash): KiCad project without 3D models, BOM, schematic PDF, renders (`kicad.export_docs`), layout PDF (a page per copper layer) + front/back PNGs (`kicad.export_layout`) | `boards/<board>/hardware/` (committed) | 0 |
 | `list` | prints board names (folders with `index.circuit.tsx` under `boards/`) | none | 0 |
 | `docs` | downloads `https://docs.tscircuit.com/llms.txt` to `docs/tscircuit-llms.txt` (60 s timeout) | `docs/` | 0 |
 

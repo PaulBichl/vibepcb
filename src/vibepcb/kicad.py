@@ -259,11 +259,10 @@ def export_schematic_svg(sch: Path, out_dir: Path) -> Path:
 def export_fab(pcb: Path, out_dir: Path) -> list[Path]:
     """Manufacturing + documentation outputs into ``out_dir``; returns the files written.
 
-    gerbers + drill (zipped), BOM (CSV, grouped by part), pick-and-place (CSV, mm),
-    schematic PDF, top/bottom 3D renders of the board, and the JLCPCB upload set in
+    gerbers + drill (zipped), pick-and-place (CSV, mm), the documentation set of
+    :func:`export_docs` (BOM, schematic PDF, 3D renders) and the JLCPCB upload set in
     ``jlcpcb/`` (see :func:`jlcpcb_files`).
     """
-    sch = pcb.with_suffix(".kicad_sch")
     gerber_dir = out_dir / "gerbers"
     if gerber_dir.exists():
         shutil.rmtree(gerber_dir)
@@ -274,52 +273,92 @@ def export_fab(pcb: Path, out_dir: Path) -> list[Path]:
     with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zf:
         for f in sorted(gerber_dir.iterdir()):
             zf.write(f, f.name)
+    pos = out_dir / f"{pcb.stem}-pos.csv"
+    _run("pcb", "export", "pos", "-o", str(pos), "--format", "csv", "--units", "mm", "--side", "both", "--exclude-dnp",
+         str(pcb))  # fmt: skip
+    docs = export_docs(pcb, out_dir)
+    bom = docs[0]
+    return [archive, pos, *docs, *jlcpcb_files(bom, pos, archive, out_dir / "jlcpcb")]
 
-    bom, pos, sch_pdf = (
-        out_dir / f"{pcb.stem}-bom.csv",
-        out_dir / f"{pcb.stem}-pos.csv",
-        out_dir / f"{pcb.stem}-schematic.pdf",
-    )
+
+def export_docs(pcb: Path, out_dir: Path) -> list[Path]:
+    """BOM (CSV, grouped by part; first in the result), schematic PDF and top/bottom 3D renders."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    sch = pcb.with_suffix(".kicad_sch")
+    bom, sch_pdf = out_dir / f"{pcb.stem}-bom.csv", out_dir / f"{pcb.stem}-schematic.pdf"
     _run(
         "sch", "export", "bom", "-o", str(bom), "--fields", ",".join(BOM_FIELDS), "--labels", ",".join(BOM_FIELDS.values()),
         "--group-by", "Value,Footprint,LCSC,MPN", "--ref-range-delimiter", "", "--exclude-dnp", str(sch),
     )  # fmt: skip
-    _run(
-        "pcb",
-        "export",
-        "pos",
-        "-o",
-        str(pos),
-        "--format",
-        "csv",
-        "--units",
-        "mm",
-        "--side",
-        "both",
-        "--exclude-dnp",
-        str(pcb),
-    )
     _run("sch", "export", "pdf", "-o", str(sch_pdf), str(sch))
     renders = []
     for side in ("top", "bottom"):
         render = out_dir / f"{pcb.stem}-{side}.png"
-        _run(
-            "pcb",
-            "render",
-            "-o",
-            str(render),
-            "--side",
-            side,
-            "--width",
-            "1600",
-            "--height",
-            "1200",
-            "--quality",
-            "high",
-            str(pcb),
-        )
+        _run("pcb", "render", "-o", str(render), "--side", side, "--width", "1600", "--height", "1200", "--quality", "high",
+             str(pcb))  # fmt: skip
         renders.append(render)
-    return [archive, bom, pos, sch_pdf, *renders, *jlcpcb_files(bom, pos, archive, out_dir / "jlcpcb")]
+    return [bom, sch_pdf, *renders]
+
+
+LAYOUT_PNG_WIDTH = 2400
+_COPPER_LAYER = re.compile(r'\(\d+ "([^"]+\.Cu)" (?:signal|power|mixed|jumper)')
+
+
+def copper_layers(pcb: Path) -> list[str]:
+    """The board's copper layers in stack order (F.Cu, In1.Cu, ..., B.Cu)."""
+    head = pcb.read_text(encoding="utf-8").split("(net ", 1)[0]
+    layers = list(dict.fromkeys(_COPPER_LAYER.findall(head)))
+    return sorted(layers, key=lambda n: (n != "F.Cu", n == "B.Cu", int(re.sub(r"\D", "", n) or 0)))
+
+
+def export_layout(pcb: Path, out_dir: Path) -> list[Path]:
+    """Layout for a first look: a PDF with one page per copper layer (board outline on each) and
+    front / back PNGs (copper + silkscreen + outline; the back mirrored, as seen from below)."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    pdf = out_dir / f"{pcb.stem}-layout.pdf"
+    _run("pcb", "export", "pdf", "-o", str(pdf), "--mode-multipage", "--layers", ",".join(copper_layers(pcb)),
+         "--cl", "Edge.Cuts", str(pcb))  # fmt: skip
+    written = [pdf]
+    if shutil.which("rsvg-convert"):
+        for side, layers, extra in (
+            ("front", "F.Cu,F.SilkS,Edge.Cuts", []),
+            ("back", "B.Cu,B.SilkS,Edge.Cuts", ["--mirror"]),
+        ):
+            svg = out_dir / f"{pcb.stem}-layout-{side}.svg"
+            _run("pcb", "export", "svg", "-o", str(svg), "--mode-single", "--layers", layers, "--exclude-drawing-sheet",
+                 "--fit-page-to-board", *extra, str(pcb))  # fmt: skip
+            png = svg.with_suffix(".png")
+            subprocess.run(["rsvg-convert", "-w", str(LAYOUT_PNG_WIDTH), "-b", "white", "-o", str(png), str(svg)],
+                           check=True)  # fmt: skip
+            svg.unlink()
+            written.append(png)
+    return written
+
+
+PUBLISHED_PROJECT_FILES = (".kicad_pro", ".kicad_pcb", ".kicad_sch", ".kicad_dru")
+
+
+def publish_project(kicad_dir: Path, stem: str, target: Path) -> list[Path]:
+    """Copy the KiCad project (board, schematic, rules, footprint library) to ``target``.
+
+    Left out: 3D models (tens of MB, fetched again by ``fix``), local settings (.kicad_prl),
+    backups. KiCad opens the copy as it is; only its 3D view lacks the part models.
+    """
+    if target.exists():
+        shutil.rmtree(target)
+    target.mkdir(parents=True)
+    written = []
+    for suffix in PUBLISHED_PROJECT_FILES:
+        src = kicad_dir / f"{stem}{suffix}"
+        if src.exists():
+            written.append(Path(shutil.copy2(src, target / src.name)))
+    for name in ("fp-lib-table", "sym-lib-table"):
+        if (kicad_dir / name).exists():
+            written.append(Path(shutil.copy2(kicad_dir / name, target / name)))
+    if (kicad_dir / "lib").is_dir():
+        shutil.copytree(kicad_dir / "lib", target / "lib")
+        written.append(target / "lib")
+    return written
 
 
 def jlcpcb_files(bom: Path, pos: Path, gerbers: Path, out_dir: Path) -> list[Path]:

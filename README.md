@@ -1,86 +1,93 @@
 # VibePCB
 
-Design PCBs with an LLM: the circuit is code ([tscircuit](https://tscircuit.com),
-React/TSX), exported to [KiCad](https://www.kicad.org), and post-processed there:
-scripted fixes for export quirks, ERC/DRC via `kicad-cli`, and a real KiCad
-project for final hand edits and Gerbers.
+**LLM-driven PCB design: tscircuit for generation, KiCad for post-processing.**
 
-```
-boards/<name>/index.circuit.tsx ──build──▶ out/<name>/raw ──fix──▶ out/<name>/kicad ──check──▶ reports
-       (LLM writes this)            tsci check + export      scripted fixes        kicad-cli ERC/DRC
-```
+You describe a board in plain words. An AI coding agent (Claude Code or similar) designs it
+as code in [tscircuit](https://tscircuit.com), lets tscircuit place and route it, and VibePCB
+turns the result into a clean [KiCad](https://www.kicad.org) project: checked by KiCad's own
+rule checks, with schematic, BOM and fabrication files. The tooling is written for the agent;
+you talk to the agent and review what comes out.
+
+## What you get
+
+For every board, without touching an EDA tool:
+
+- a **KiCad project** (board, schematic, design rules, footprint library) that opens cleanly in
+  KiCad for review or final hand edits
+- a **schematic** with real symbols, generated from the netlist (PDF + KiCad)
+- a **routed layout** that passes KiCad's DRC and ERC: every copper layer poured, ground through
+  the pours, no track bends sharper than 135 deg, no acute junctions, no dangling tracks, nothing
+  unconnected
+- a **BOM with LCSC / MPN part numbers** (JLCPCB assembly parts)
+- **3D renders** (top/bottom) and layout images to look at
+- **fabrication files**: Gerbers + drill, pick-and-place, and a ready JLCPCB PCBA upload set
+
+## Examples
+
+| Board | What it shows |
+|-------|---------------|
+| [vibepcb-smu](https://github.com/PaulBichl/vibepcb-smu) | 4-quadrant source/measure unit, +-30 V / +-1 A, USB-C PD, Ethernet, STM32; 4-layer main board (238 parts) + display board; loop simulated with TI's SPICE models |
+| [vibepcb-example-co2-monitor](https://github.com/PaulBichl/vibepcb-example-co2-monitor) | small sensor board, the end-to-end flow on a simple design |
 
 ## How it works
 
 ```
-index.circuit.tsx ─▶ tscircuit (evaluated ONCE) ─▶ circuit JSON ─▶ KiCad files ─▶ fix ─▶ check ─▶ fab
+your description ─▶ agent writes TSX ─▶ tscircuit: place + route ─▶ KiCad files ─▶ VibePCB fixes ─▶ KiCad DRC/ERC ─▶ fab files
+                         ▲                                                                              │
+                         └────────────────────── agent reads the findings and iterates ────────────────┘
 ```
 
-| Stage | Why it exists |
-|-------|---------------|
-| `build` | Placement gate first (about 1 min, fails before the slow routing); then one place + route pass whose circuit JSON feeds everything else (KiCad files, netlist, previews), so a board is never re-routed |
-| `fix` | tscircuit's KiCad export has systematic quirks and a messy autorouter; scripted fixes make it open cleanly, with a KiCad-verified safety net (nets KiCad finds broken are rolled back). All fixes: [table in docs/TOOLING.md](docs/TOOLING.md#52-table-of-all-fixes) |
-| `check` | KiCad's own ERC/DRC plus house rules (poured layers, no sharp bends, no antennas) decide when a board is done, not the eye |
-| `fab` | Gerbers, BOM, pick-and-place, PDF, renders, JLCPCB set; only for boards whose `check` passes |
+1. **Generation (tscircuit).** The circuit is React/TSX: parts (imported from JLCPCB by part
+   number), nets, placement hints and board rules. tscircuit's autorouter places and routes it,
+   and the circuit is exported to KiCad once. The agent uses tscircuit's own agent skill for the
+   syntax, so it doesn't invent props.
+2. **Post-processing (KiCad).** tscircuit's KiCad export and router have systematic quirks
+   (tracks bent sharper than the rules allow, vias on neighbouring pins, duplicate vias, stubs,
+   missing schematic symbols). VibePCB fixes them with scripted, tested fixes that follow
+   KiCad's own connection rules; any net KiCad finds broken afterwards is rolled back to its
+   routed state, so a fix never disconnects anything. The schematic is generated from the
+   netlist with real KiCad symbols.
+3. **Checks decide, not the eye.** KiCad's DRC and ERC plus house rules (poured layers, bend
+   angles, antennas) decide when a board is done. Fab files are only made for boards that pass.
 
-Timings on a 238-part, 4-layer board: build ~75 s (routing cached) to ~10 min, fix ~2 min, check ~2-5 min
-(`build --fast` trades routing effort for speed while experimenting).
+Anything the agent learns about tscircuit's export becomes a fix in the tooling, so the next
+board starts from there. The full list of fixes and why each exists: [docs/TOOLING.md](docs/TOOLING.md#52-table-of-all-fixes).
 
-## Setup
+## Getting started
 
-Requirements: [hatch](https://hatch.pypa.io), git, and for `check`/`fab` KiCad >= 9.
+Requirements: [hatch](https://hatch.pypa.io), git, KiCad >= 9 (for checks and fab files), and an
+AI coding agent such as [Claude Code](https://claude.com/claude-code).
 
 ```bash
-hatch run setup            # Node.js into the hatch env + npm install (tscircuit, bun)
-sudo pacman -S kicad       # or your distro's KiCad >= 9 package; provides kicad-cli (or set $KICAD_CLI)
-hatch run pcb docs         # optional: tscircuit's LLM docs -> docs/tscircuit-llms.txt
+git clone https://github.com/PaulBichl/vibepcb.git && cd vibepcb
+hatch run setup            # Node.js + tscircuit into the hatch env (no system node needed)
+sudo pacman -S kicad       # or your distro's KiCad >= 9 package
 ```
 
-## Usage
+Then open the repo in the agent and describe the board: what it should do, power, interfaces,
+size, fab house. The agent follows [CLAUDE.md](CLAUDE.md) and does the rest, and hands over the
+KiCad project and fab files once the checks pass. `pcb publish` puts the review set (schematic,
+layout, renders, BOM, KiCad project; no fab files) into the board's folder for sharing.
 
-```bash
-hatch run pcb all led-indicator    # build + fix + check the smoke-test board (worked example: github.com/PaulBichl/vibepcb-example-co2-monitor)
-hatch run pcb list                 # list the boards
-hatch run pcb new my-board         # scaffold boards/my-board/index.circuit.tsx
-hatch run pcb build my-board       # tsci check + export (KiCad, netlist, PNG/SVG previews)
-hatch run pcb fix my-board         # -> out/my-board/kicad/my-board.kicad_pro
-hatch run pcb check my-board       # ERC + DRC, exits 1 on errors
-hatch run pcb fab my-board         # gerbers/drill zip, BOM, pick-and-place, schematic PDF, renders
-hatch run tsci dev boards/my-board/index.circuit.tsx   # live browser preview
-```
+Boards can also live in their own repo next to this one (like the examples), running the
+tooling from this checkout.
 
-## Working with an LLM
+## Limits
 
-Open the repo in Claude Code (or another agent) and describe the board. The
-agent reads [CLAUDE.md](CLAUDE.md) for the loop and the vendored
-[tscircuit skill](.claude/skills/tscircuit/SKILL.md) for the syntax. It edits the
-TSX, builds, looks at the PNG previews and netlist, and iterates on the
-`tsci check` / KiCad ERC/DRC findings. Anything tscircuit consistently gets wrong
-in the KiCad export becomes a fix in `src/vibepcb/fixes.py` (see the table of fixes).
+- The autorouter is tscircuit's. Dense spots (0.5 mm-pitch chips) can need a few placement
+  iterations, which the agent runs itself; a large 4-layer board takes minutes per route.
+- Analog performance isn't checked by the tooling. For that, the agent writes SPICE decks per
+  board (see the SMU example).
+- Review before you order: the checks catch rule violations, not a wrong design choice. Look at
+  the schematic, the BOM and the 3D render.
 
-## Layout
+## For developers
 
-| Path | What |
-|------|------|
-| `boards/` | tscircuit sources, one folder per board |
-| `src/vibepcb/cli.py` | `vibepcb` command (`hatch run pcb ...`) |
-| `src/vibepcb/tscircuit.py` | wrapper around `tsci` (+ trace-net repair) |
-| `src/vibepcb/schgen.py` | netlist-style schematic for boards without tscircuit symbols |
-| `src/vibepcb/kicad.py` | project assembly + `kicad-cli` ERC/DRC/fab |
-| `src/vibepcb/fixes.py` | post-processing fixes on the KiCad files |
-| `src/vibepcb/tracks.py` | track-cleaning geometry (bends, junctions, clearances) |
-| `src/vibepcb/sexpr.py` | lossless KiCad S-expression reader/writer |
-| `src/vibepcb/paths.py` | project root and `boards/` / `out/` layout |
-| `tests/` | pytest suite, fixture board in `tests/data/` |
-| `docs/TOOLING.md` | full tooling reference (commands, [table of all fixes](docs/TOOLING.md#52-table-of-all-fixes), checks, gotchas) |
-| `.claude/skills/tscircuit/` | official tscircuit agent skill (`hatch run update-skill`) |
-| `out/` | generated, gitignored |
-
-## Development
+The agent-facing reference (commands, pipeline, every fix, timings, gotchas) is in
+[docs/TOOLING.md](docs/TOOLING.md); the working rules for the agent are in [CLAUDE.md](CLAUDE.md).
 
 ```bash
 hatch run test     # pytest
 hatch run style    # ruff
 hatch run type     # mypy
-hatch run fix      # pre-commit (ruff --fix, format, whitespace)
 ```
