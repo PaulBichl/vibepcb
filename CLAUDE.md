@@ -9,12 +9,14 @@ opens cleanly in KiCad for final touches and fab output.
 ```
 boards/<name>/index.circuit.tsx      <- you edit this (the source of truth)
         │  hatch run pcb build <name>   (placement gate, ONE routed evaluation -> circuit.json,
-        │                                everything else converted from that JSON; --fast = router 2x)
+        │                                everything else converted from that JSON; --fast = router 2x;
+        │                                tscircuit's schematic is always off: schematicDisabled copy)
         ▼
 out/<name>/raw/                       <- untouched tscircuit output, never edit
-   <name>.kicad.zip, .netlist.txt, .pcb.png, .sch.png, .circuit.json
+   <name>.kicad.zip, .netlist.txt, .pcb.png, .circuit.json
    (the footprint library lib/ is derived from the board in `fix`, not exported)
-        │  hatch run pcb fix <name>     (src/vibepcb/fixes.py)
+        │  hatch run pcb fix <name>     (schematic from schgen.py with KiCad / LCSC symbols, then fixes.py;
+        │                                preview out/<name>/reports/schematic.png)
         ▼
 out/<name>/kicad/<name>.kicad_pro     <- KiCad project, open this in KiCad
         │  hatch run pcb check <name>   (kicad-cli ERC + DRC)
@@ -44,9 +46,10 @@ Rules of the pipeline (details and timings: `docs/TOOLING.md`):
 2. `hatch run pcb build <name>`. It stops if `tsci check` reports errors: fix
    the TSX, not the output. Warnings are reported but don't stop the build.
 3. **Look at the result**: Read `out/<name>/raw/<name>.pcb.png` and
-   `<name>.sch.png`, and `<name>.netlist.txt` to verify connectivity
-   (every pin on the intended net, LED/diode polarity, power pins).
-4. `hatch run pcb fix <name>` then `hatch run pcb check <name>`. Fix DRC/ERC
+   `<name>.netlist.txt` to verify connectivity (every pin on the intended net,
+   LED/diode polarity, power pins).
+4. `hatch run pcb fix <name>` (then look at `out/<name>/reports/schematic.png`, crop
+   to zoom) and `hatch run pcb check <name>`. Fix DRC/ERC
    findings at the *source* (TSX placement, trace widths, net names) when
    possible; only systematic tscircuit->KiCad export quirks belong in
    `fixes.py`.
@@ -103,8 +106,9 @@ test in `tests/test_fixes.py` against the fixtures in `tests/data/`.
 - Check 4-pad tactile switches against the datasheet: tscircuit's 2-pin symbol
   treats pads 1/2 as the contacts. Give the footprint pads the switch's two
   terminals (`portHints`) instead of guessing diagonals.
-- Keep `schX/schY` compact (1 unit = 15 mm in KiCad): spread over ~25 x 16 units the
-  schematic fits A3.
+- The schematic is generated (`schgen.py`), not tscircuit's: `schX/schY` are ignored. Its
+  blocks are the TSX sections - group the parts under `{/* ===== title ===== */}` headers
+  by function (supply, MCU, ...); a part's passives go in its section.
 - If `check` leaves a few sharp bends/junctions in a cramped spot, the routing there
   is the problem: try `autorouterEffortLevel` (10x fixed one cramped board) and 0.2-0.5 mm
   nudges of the parts around it; tscircuit routing is deterministic, so compare

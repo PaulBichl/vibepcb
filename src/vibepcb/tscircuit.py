@@ -41,25 +41,32 @@ FAST_EFFORT = "2x"
 _RELATIVE_IMPORT = re.compile(r"""(\bfrom\s*|\bimport\s*\(?\s*)(["'])(\.{1,2}/[^"']*|\.{1,2})\2""")
 _EFFORT_PROP = re.compile(r"autorouterEffortLevel\s*=\s*(?:\"[^\"]*\"|'[^']*'|\{[^}]*\})")
 _BOARD_TAG = re.compile(r"<board(?=[\s>/])")
+_SCHEMATIC_DISABLED = re.compile(r"\bschematicDisabled\b")
 
 
-def fast_source(source: Path, target_dir: Path) -> Path:
-    """A copy of ``source`` in ``target_dir`` with the board's ``autorouterEffortLevel`` forced to ``"2x"``.
+def prepared_source(source: Path, target_dir: Path, *, effort: str | None = None) -> Path:
+    """A copy of ``source`` in ``target_dir`` that tscircuit evaluates instead of the board itself.
 
-    Relative imports are made absolute so the copy evaluates from its new place. For quick
-    placement experiments only: the router result differs from the final (full effort) one.
+    ``schematicDisabled`` is always set: tscircuit's schematic layout takes minutes to never on a
+    board of a few hundred parts, and ``fix`` generates the schematic from the circuit JSON
+    (:mod:`vibepcb.schgen`) anyway. ``effort`` forces ``autorouterEffortLevel`` (``--fast``: quick
+    placement experiments only, the router result differs from the full-effort one). Relative
+    imports are made absolute so the copy evaluates from its new place.
     """
     text = source.read_text(encoding="utf-8")
     here = source.resolve().parent
     text = _RELATIVE_IMPORT.sub(lambda m: f"{m[1]}{m[2]}{(here / m[3]).resolve()}{m[2]}", text)
-    prop = f'autorouterEffortLevel="{FAST_EFFORT}"'
-    if _EFFORT_PROP.search(text):
-        text = _EFFORT_PROP.sub(prop, text, count=1)
-    elif _BOARD_TAG.search(text):
-        text = _BOARD_TAG.sub(f"<board {prop}", text, count=1)
-    else:
+    if not _BOARD_TAG.search(text):
         msg = f"no <board> tag found in {source}"
         raise TscircuitError(msg)
+    if effort is not None:
+        prop = f'autorouterEffortLevel="{effort}"'
+        if _EFFORT_PROP.search(text):
+            text = _EFFORT_PROP.sub(prop, text, count=1)
+        else:
+            text = _BOARD_TAG.sub(f"<board {prop}", text, count=1)
+    if not _SCHEMATIC_DISABLED.search(text):
+        text = _BOARD_TAG.sub("<board schematicDisabled", text, count=1)
     target_dir.mkdir(parents=True, exist_ok=True)
     target = target_dir / source.name
     target.write_text(text, encoding="utf-8")

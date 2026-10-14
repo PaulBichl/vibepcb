@@ -249,6 +249,13 @@ def _run(*args: str) -> None:
         raise KicadCliError(msg)
 
 
+def export_schematic_svg(sch: Path, out_dir: Path) -> Path:
+    """``kicad-cli sch export svg``: the schematic as ``out_dir/<stem>.svg`` (a preview to look at)."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    _run("sch", "export", "svg", "-o", str(out_dir), str(sch))
+    return out_dir / f"{sch.stem}.svg"
+
+
 def export_fab(pcb: Path, out_dir: Path) -> list[Path]:
     """Manufacturing + documentation outputs into ``out_dir``; returns the files written.
 
