@@ -27,6 +27,8 @@ Layers (decided): 4 for the BGA-SDRAM step (54 balls, all near the edge); 6 for 
 (sig / GND / sig / split PWR 1.1/2.5/3.3 V / GND / sig): its inner balls are mostly power/GND and
 need planes right below. Dogbones, no via-in-pad: 0.8 mm pitch has room for them and it is the
 standard way at this pitch (via-in-pad is the answer for 0.5 mm and below).
+Vias: mechanically drilled through-hole vias only (no laser microvias / blind / buried - a later
+topic). At 0.8 mm pitch a dogbone via of 0.2 mm drill / 0.4 mm pad fits the gap between four balls.
 
 0. **Baseline**: bump tscircuit (0.0.2891 -> 0.0.2900), re-run the two dogbone crash repros; file
    them upstream if still broken.
