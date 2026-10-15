@@ -16,6 +16,9 @@ these from the board's config file into the KiCad project (:func:`fixes.apply_bo
     [diff_pair]                    # pairs = nets named <base>_P/_N or <base>+/-
     max_uncoupled = 5.0            # mm of the pair routed apart
 
+    [planes]                       # nets with a plane: each SMD pad gets its own via to it,
+    nets = ["GND", "V3V3"]         #   the router's tracks of the net go (fixes.plane_pad_vias)
+
 Net names: a net gets the name of its ``<net>``, else of a named ``<trace name="...">`` on it
 (see ``schgen``), so name the traces a rule should catch.
 """
@@ -53,7 +56,7 @@ def load(board: str) -> dict[str, Any]:
 
 
 def validate(data: dict[str, Any], where: str = CONFIG_NAME) -> None:
-    known = {"netclass", "length_group", "diff_pair"}
+    known = {"netclass", "length_group", "diff_pair", "planes"}
     if unknown := set(data) - known:
         msg = f"{where}: unknown section(s) {sorted(unknown)} (known: {sorted(known)})"
         raise ConfigError(msg)
@@ -64,6 +67,9 @@ def validate(data: dict[str, Any], where: str = CONFIG_NAME) -> None:
         if bad := set(cls) - {"nets", *NETCLASS_KEYS}:
             msg = f"{where}: netclass {name!r}: unknown key(s) {sorted(bad)}"
             raise ConfigError(msg)
+    if "planes" in data and not isinstance(data["planes"].get("nets"), list):
+        msg = f"{where}: [planes] needs nets = [...]"
+        raise ConfigError(msg)
     for name, group in data.get("length_group", {}).items():
         if not group.get("nets") or "max_skew" not in group:
             msg = f"{where}: length_group {name!r} needs nets = [...] and max_skew"

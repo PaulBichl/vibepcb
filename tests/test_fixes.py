@@ -959,3 +959,39 @@ def test_unconnected_pads_from_report() -> None:
         ],
     )
     assert result.unconnected_pads() == [("GND", (1.5, 2.0))]
+
+
+def test_plane_pad_vias(project: fixes.KicadProject) -> None:
+    assert fixes.plane_pad_vias(project) == []  # no [planes] in the config
+    zone = sexpr.loads(
+        '(zone (net 2 "GND") (layer "B.Cu") (polygon (pts (xy 85 90) (xy 110 90) (xy 110 110) (xy 85 110))))'
+    )
+    project.pcb.append(zone)
+    project.config = {"planes": {"nets": ["GND"]}}
+    routed_before = [s for s in fixes._copper(project.pcb).segs if s.net == "GND"]
+    assert routed_before  # the fixture routes GND with tracks
+    changes = fixes.plane_pad_vias(project)
+    assert len(changes) == 1
+    assert "pad vias to the plane" in changes[0]
+    copper = fixes._copper(project.pcb)
+    clearance, _ = fixes._design_clearances(project)
+    smd = [o for o in copper.pads_by_net["GND"] if len(o.layers) == 1]
+    assert len(copper.vias_by_net["GND"]) == len(smd)
+    for pad in smd:  # each SMD pad: a track from its centre to a via beside it
+        via = next(
+            c
+            for c, r in copper.vias_by_net["GND"]
+            if any(s.net == "GND" and {s.a, s.b} == {pad.centre, c} for s in copper.segs)
+        )
+        radius = copper.vias_by_net["GND"][0][1]
+        assert pad.distance(via, via) >= radius + clearance - 1e-6
+    assert all(s.a in {p.centre for p in smd} for s in copper.segs if s.net == "GND")  # the router's tracks are gone
+
+
+def test_net_node_track_form(project: fixes.KicadProject) -> None:
+    # tracks / vias take (net <id>); a pad's (net <id> "<name>") on a via crashes kicad-cli's DRC
+    for n in [n for n in project.pcb if sexpr.head(n) in ("segment", "via")]:
+        project.pcb.remove(n)  # only pads left to copy the net from
+    node = fixes._net_node(project.pcb, "GND")
+    assert node is not None
+    assert len(node) == 2

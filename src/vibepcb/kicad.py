@@ -208,6 +208,7 @@ def run_drc(pcb: Path, report: Path) -> CheckResult:
     reliefs and island removal (and is what the Gerbers from ``export_fab`` then contain).
     """
     report.parent.mkdir(parents=True, exist_ok=True)
+    report.unlink(missing_ok=True)  # a crashed run must not leave the last run's report to be read
     args = ["pcb", "drc", "--format", "json", "--severity-all", "--schematic-parity", "--refill-zones", "--save-board"]
     args += ["-o", str(report), str(pcb)]
     result = _kicad_cli(*args)
@@ -234,6 +235,7 @@ def unconnected_nets(pcb: Path, report: Path) -> set[str]:
 def run_erc(sch: Path, report: Path) -> CheckResult:
     """Electrical rule check of the schematic."""
     report.parent.mkdir(parents=True, exist_ok=True)
+    report.unlink(missing_ok=True)  # a crashed run must not leave the last run's report to be read
     result = _kicad_cli("sch", "erc", "--format", "json", "--severity-all", "-o", str(report), str(sch))
     if not report.exists():
         msg = f"kicad-cli sch erc failed:\n{result.stdout}{result.stderr}"
