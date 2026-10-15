@@ -14,6 +14,7 @@ vibepcb docs            download tscircuit's LLM docs to docs/tscircuit-llms.txt
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import shutil
@@ -118,10 +119,24 @@ def cmd_fix(board: str) -> int:
         for change in changes:
             print(f"  fix {name}: {change}")
     # safety net: nets KiCad finds broken after the track fixes go back to their routed state
-    lost = kicad.unconnected_nets(project.pcb_path, paths.OUT_DIR / board / "reports" / "fix-drc.json")
-    for change in fixes.restore_nets(project, lost):
+    report_path = paths.OUT_DIR / board / "reports" / "fix-drc.json"
+    lost = kicad.unconnected_nets(project.pcb_path, report_path)
+    restored = fixes.restore_nets(project, lost)
+    for change in restored:
         print(f"  fix restore_nets: {change}")
     project.save()
+    if restored:  # the routed geometry of a restored net can clash with its cleaned-up neighbours
+        before = copy.deepcopy(project.pcb)
+        repairs = fixes.relocate_vias(project) + fixes.push_tracks_clear(project)
+        if repairs:
+            project.save()
+            if broken := kicad.unconnected_nets(project.pcb_path, report_path) - lost:  # broke something: undo
+                project.pcb[:] = before
+                project.save()
+                print(f"  fix after restore: undone, it disconnected {', '.join(sorted(broken))}")
+            else:
+                for change in repairs:
+                    print(f"  fix after restore: {change}")
     if kicad.find_kicad_cli() and shutil.which("rsvg-convert"):  # preview to look at (LLM / human)
         svg = kicad.export_schematic_svg(sch, paths.OUT_DIR / board / "reports")
         svg = svg.replace(svg.with_name("schematic.svg"))
@@ -190,6 +205,9 @@ def cmd_check(board: str) -> int:
     print(f"Track bends: {len(corners)} sharper than 135 deg")
     for net, (x, y), angle in corners:
         print(f"  [error] sharp_corner: {net} bend of {angle:.1f} deg @ ({x:.3f}, {y:.3f}) mm")
+    unlabelled = fixes.unlabelled_connectors(loaded)
+    for warning in unlabelled:
+        print(f"  [warning] unlabelled_connector: {warning}")
     print(f"Pours: {len(unpoured)} copper layer(s) without a plane")
     for layer in unpoured:
         print(f"  [error] no_pour: {layer} - add a <copperpour> (GND or a supply net) on it")

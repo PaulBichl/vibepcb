@@ -58,6 +58,10 @@ Rules of the pipeline (details and timings: `docs/TOOLING.md`):
    top/bottom 3D renders in `out/<name>/fab/`, JLCPCB upload set in `fab/jlcpcb/`.
    Never hand over fab files of a board whose `check` fails.
 
+Silkscreen: every connector's pins labelled (`showSilkscreenPinLabels` or a `<silkscreentext>` per pin; `check` warns
+about connectors without text next to them), LEDs / switches / test points with their function, the board with a
+title and revision.
+
 Layout quality bar, enforced by `check` (not by eye): a pour on every copper layer
 (GND or a supply plane; `check` fails a layer without one), GND connects through the pours
 (no redundant GND tracks), no track bend sharper than 135 deg and no acute angle at

@@ -1742,16 +1742,20 @@ def _clean_round(
         segs = copper.segs_by_net.get(net, [])
         pads = copper.pads_by_net.get(net, [])
         vias = copper.vias_by_net.get(net, [])
-        before = tracks.pad_groups(pads, vias, segs)
+        # vias into a zone of the net reach its plane: a pad's track to one is its connection
+        planes = [poly for (n, _), polys in copper.zones.items() if n == net for poly in polys]
+        anchors = [i for i, (c, _) in enumerate(vias) if any(tracks.point_in_polygon(c, poly) for poly in planes)]
+        before = tracks.pad_groups(pads, vias, segs, anchors)
 
         def connected(
             pieces: list[_Piece],
             pads: list[tracks.Obstacle] = pads,
             vias: list[tuple[tracks.Point, float]] = vias,
             before: list[set[int]] = before,
+            anchors: list[int] = anchors,
         ) -> bool:
             rebuilt = [tracks.Seg(a, b, w, layer, "") for _, a, b, w, layer in pieces]
-            return tracks.still_connected(before, tracks.pad_groups(pads, vias, rebuilt))
+            return tracks.still_connected(before, tracks.pad_groups(pads, vias, rebuilt, anchors))
 
         drop: set[int] = set()  # duplicates, each dropped only if the net stays connected without it
         for i in tracks.redundant(segs):
@@ -3215,18 +3219,25 @@ def apply_post_fill(
     """Fixes that need KiCad's zone fill (run by ``check`` after the refill); saves when anything changed."""
     changes = prune_pour_tracks(project, keep_near, only_near)
     if changes:  # the pruned GND tracks leave room for corners that had none before
-        second = (
-            snap_near_ends(project)
-            + clean_tracks(project)
-            + separate_ends_on_pads(project)
-            + square_tees(project)
-            + push_tracks_clear(project)
-            + reroute_tracks(project)
-            + remove_antennas(project, filled_zones=True)
-        )
-        changes += [f"second pass: {c}" for c in second]
+        for _ in range(POST_FILL_PASSES):  # each step can leave work for an earlier one: repeat until quiet
+            second = (
+                snap_near_ends(project)
+                + clean_tracks(project)
+                + separate_ends_on_pads(project)
+                + square_tees(project)
+                + push_tracks_clear(project)
+                + relocate_vias(project)
+                + reroute_tracks(project)
+                + remove_antennas(project, filled_zones=True)
+            )
+            changes += [f"second pass: {c}" for c in second]
+            if not second:
+                break
         sexpr.dump(project.pcb, project.pcb_path)
     return changes
+
+
+POST_FILL_PASSES = 3
 
 
 type Fix = Callable[[KicadProject], list[str]]
@@ -3587,6 +3598,36 @@ def _design_via(project: KicadProject) -> tuple[float, float]:
 
 
 DEFAULT_VIA_MM = (0.6, 0.3)
+
+
+CONNECTOR_LABEL_REACH_MM = 6.0  # board text this close to a connector's pads counts as its labelling
+
+
+def unlabelled_connectors(project: KicadProject) -> list[str]:
+    """Connectors (reference J..., 3+ pads) without any board silkscreen text near their pads.
+
+    A header nobody can read is useless on the bench: pin labels (``showSilkscreenPinLabels`` or
+    ``<silkscreentext>`` per pin) or at least a caption belong next to every connector.
+    A warning only (``check`` reports it, the exit code doesn't change).
+    """
+    texts = []
+    for node in sexpr.children(project.pcb, "gr_text"):
+        if _layer(node) in ("F.SilkS", "B.SilkS"):
+            at = sexpr.child(node, "at")
+            texts.append((_num(at, 1), _num(at, 2)))
+    out = []
+    for ref, fp in sorted(_footprints_by_ref(project.pcb).items()):
+        pads = list(sexpr.children(fp, "pad"))
+        if not ref.startswith("J") or len(pads) < 3:
+            continue
+        to_board = _fp_to_board(fp)
+        centres = [to_board(_num(sexpr.child(p, "at"), 1), _num(sexpr.child(p, "at"), 2)) for p in pads]
+        x0, y0 = min(x for x, _ in centres), min(y for _, y in centres)
+        x1, y1 = max(x for x, _ in centres), max(y for _, y in centres)
+        r = CONNECTOR_LABEL_REACH_MM
+        if not any(x0 - r <= x <= x1 + r and y0 - r <= y <= y1 + r for x, y in texts):
+            out.append(f"{ref} ({len(pads)} pads): no silkscreen text next to it - label its pins")
+    return out
 
 
 def unpoured_copper_layers(project: KicadProject) -> list[str]:

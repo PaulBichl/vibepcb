@@ -995,3 +995,44 @@ def test_net_node_track_form(project: fixes.KicadProject) -> None:
     node = fixes._net_node(project.pcb, "GND")
     assert node is not None
     assert len(node) == 2
+
+
+def test_clean_tracks_keeps_pad_to_plane_via(project: fixes.KicadProject) -> None:
+    # a GND pad's track to a via inside a GND zone is the pad's way to the plane: clean_tracks keeps it
+    # (its connectivity model has no pours; without the via as an anchor the track looks redundant)
+    zone = sexpr.loads(
+        '(zone (net 2 "GND") (layer "B.Cu") (polygon (pts (xy 90 90) (xy 110 90) (xy 110 110) (xy 90 110))))'
+    )
+    via = sexpr.loads("(via (at 102.6 100.8) (size 0.4) (drill 0.2) (layers F.Cu B.Cu) (net 2))")
+    # as plane_pad_vias' dogleg leaves it: a piece inside the pad, then out to the via
+    track = [
+        sexpr.loads("(segment (start 101.825 102) (end 101.825 101.6) (width 0.15) (layer F.Cu) (net 2))"),
+        sexpr.loads("(segment (start 101.825 101.6) (end 102.6 100.8) (width 0.15) (layer F.Cu) (net 2))"),
+    ]
+    names = fixes._net_names(project.pcb)
+    for n in [
+        n
+        for n in project.pcb
+        if isinstance(n, list) and sexpr.head(n) in ("segment", "via") and fixes._net_of(n, names) == "GND"
+    ]:
+        project.pcb.remove(n)  # the pad's only connection is the new via (as after plane_pad_vias)
+    project.pcb += [zone, via, *track]
+    fixes.clean_tracks(project)
+    copper = fixes._copper(project.pcb)
+    assert any(
+        s.net == "GND" and min(math.dist(s.a, (102.6, 100.8)), math.dist(s.b, (102.6, 100.8))) <= 0.2
+        for s in copper.segs
+    )
+
+
+def test_unlabelled_connectors(project: fixes.KicadProject) -> None:
+    refs = [r for r, fp in fixes._footprints_by_ref(project.pcb).items() if r.startswith("J")]
+    warnings = fixes.unlabelled_connectors(project)
+    big = [r for r in refs if len(list(sexpr.children(fixes._footprints_by_ref(project.pcb)[r], "pad"))) >= 3]
+    assert len(warnings) == len(big)
+    if big:  # a text next to it silences the warning
+        at = sexpr.child(fixes._footprints_by_ref(project.pcb)[big[0]], "at")
+        assert at is not None
+        text = f'(gr_text "SIG" (at {at[1]} {at[2]}) (layer "F.SilkS") (effects (font (size 1 1))))'
+        project.pcb.append(sexpr.loads(text))
+        assert len(fixes.unlabelled_connectors(project)) == len(big) - 1

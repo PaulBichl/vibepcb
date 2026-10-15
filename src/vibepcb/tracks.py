@@ -512,16 +512,21 @@ class BoxIndex:
         )
 
 
-def pad_groups(pads: list[Obstacle], vias: list[tuple[Point, float]], segs: list[Seg]) -> list[set[int]]:
+def pad_groups(
+    pads: list[Obstacle], vias: list[tuple[Point, float]], segs: list[Seg], anchors: Iterable[int] = ()
+) -> list[set[int]]:
     """Which of one net's pads are joined by its tracks and vias (pours not counted).
 
     Connections as KiCad makes them: a track end inside a pad or a pad centre on a track
     (of a layer it is on); a track over a via's centre or ending on the via's copper
     (:func:`via_takes`); a track end on another track of the same layer; a via inside a pad.
+    ``anchors``: indices of vias that count like pads (vias into a plane of the net: a pad's
+    track to one is its connection even though the plane isn't modelled); they appear in the
+    groups as ``len(pads) + index``.
     """
     find = _connect(pads, vias, segs)
     groups: dict[int, set[int]] = {}
-    for i in range(len(pads)):
+    for i in [*range(len(pads)), *(len(pads) + v for v in anchors)]:
         groups.setdefault(find(i), set()).add(i)
     return list(groups.values())
 
