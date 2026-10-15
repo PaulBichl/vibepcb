@@ -902,3 +902,60 @@ def test_board_config_validation() -> None:
         config.validate({"length_group": {"X": {"nets": ["A*"]}}})
     with pytest.raises(config.ConfigError):
         config.validate({"netclass": {"USB": {"nets": ["U*"], "trace_width": 0.2}}})
+
+
+def test_split_tees_keeps_clearance(project: fixes.KicadProject) -> None:
+    # a VCC branch ends 0.08 mm off a VCC track's centre line (a T). Snapping it onto the line would
+    # bring it 0.597 mm from a GND via centre (needs 0.3 + 0.2 + 0.1 = 0.6): it stays put
+    through = sexpr.loads("(segment (start 64.7 70) (end 70 70) (width 0.2) (layer F.Cu) (net 1))")
+    branch = sexpr.loads("(segment (start 64.95 70.08) (end 65 75) (width 0.2) (layer F.Cu) (net 1))")
+    via = sexpr.loads("(via (at 64.353 70) (size 0.6) (drill 0.3) (layers F.Cu B.Cu) (net 2))")
+    project.pcb += [through, branch, via]
+    clearance, edge = fixes._design_clearances(project)
+    assert fixes._split_tees(project, clearance, edge) == 0
+    assert sexpr.child(branch, "start") == ["start", Sym("64.95"), Sym("70.08")]
+    project.pcb.remove(via)  # without the via the T is snapped
+    assert fixes._split_tees(project, clearance, edge) == 1
+
+
+def test_stitch_unconnected_pads(project: fixes.KicadProject) -> None:
+    # the SMD GND pad at (101.83, 102) gets a via into the (filled) GND pour on B.Cu
+    zone = sexpr.loads(
+        '(zone (net 2 "GND") (layer "B.Cu") (filled_polygon (layer "B.Cu") '
+        "(pts (xy 90 90) (xy 110 90) (xy 110 110) (xy 90 110))))"
+    )
+    project.pcb.append(zone)
+    before = {v[1] for v in fixes._copper(project.pcb).vias}
+    changes = fixes.stitch_unconnected_pads(project, [("GND", (101.83, 102.0))])
+    assert changes == ["GND pad at (101.83, 102): stitching via to its plane"]
+    copper = fixes._copper(project.pcb)
+    clearance, _ = fixes._design_clearances(project)
+    via = next(v for v in copper.vias if v[1] not in before)
+    assert via[3] == "GND"
+    pad = next(o for o in copper.pads_by_net["GND"] if o.distance((101.83, 102.0), (101.83, 102.0)) <= 0.01)
+    assert pad.distance(via[1], via[1]) >= via[2] + clearance - 1e-6  # beside the pad, not in it
+    centre, radius = via[1], via[2]
+    assert math.dist(centre, (101.83, 102.0)) <= 2.0
+    assert all(o.distance(centre, centre) >= radius + clearance - 1e-6 for o in copper.obstacles() if o.net != "GND")
+    assert any(  # from the pad centre (101.825, 102) to the via
+        s.net == "GND" and s.b == centre and math.dist(s.a, (101.83, 102.0)) < 0.01 for s in copper.segs
+    )
+    # a net without a pour elsewhere gets nothing
+    assert fixes.stitch_unconnected_pads(project, [("VCC", (92.73, 100.0))]) == []
+
+
+def test_unconnected_pads_from_report() -> None:
+    result = kicad.CheckResult(
+        "DRC",
+        Path("drc.json"),
+        [
+            {
+                "type": "unconnected_items",
+                "items": [
+                    {"description": "Pad 2 [GND] of U2 on F.Cu", "pos": {"x": 1.5, "y": 2.0}},
+                    {"description": "Zone [GND] on F.Cu, priority 0", "pos": {"x": 3.0, "y": 4.0}},
+                ],
+            }
+        ],
+    )
+    assert result.unconnected_pads() == [("GND", (1.5, 2.0))]

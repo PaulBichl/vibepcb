@@ -1586,16 +1586,28 @@ def _split_crossings(project: KicadProject) -> int:
     return len(cuts) // 2
 
 
-def _split_tees(project: KicadProject) -> int:
+def _split_tees(project: KicadProject, clearance: float, edge_clearance: float) -> int:
     """Give every T-junction a vertex in its through track and snap the ending track onto it.
 
     Track ends that already sit on a pad or via stay where they are (that is their connection).
+    The snapped track pivots about its other end and must keep its clearance (seen: a 7 mm
+    track swung 0.05 mm into a via); where it wouldn't, the T stays as it is (KiCad connects an
+    end lying on another track's copper).
     """
     copper = _copper(project.pcb)
+    obstacles = copper.obstacles()
+
+    def fits(seg: tracks.Seg, a: tracks.Point, b: tracks.Point) -> bool:
+        half = seg.width / 2
+        return all(
+            o.distance(a, b) >= clearance + half for o in obstacles if o.net != seg.net and seg.layer in o.layers
+        ) and all(e.distance(a, b) >= edge_clearance + half for e in copper.edges if seg.layer in e.layers)
+
     found = [
-        t
-        for t in tracks.tees(copper.segs)
-        if not copper.attached(copper.segs[t[0]].b if t[1] else copper.segs[t[0]].a, copper.segs[t[0]])
+        (i, end, j, q)
+        for i, end, j, q in tracks.tees(copper.segs)
+        if not copper.attached(copper.segs[i].b if end else copper.segs[i].a, copper.segs[i])
+        and fits(copper.segs[i], q, copper.segs[i].a if end else copper.segs[i].b)
     ]
     cuts: dict[int, list[tracks.Point]] = {}
     for i, end, j, q in found:
@@ -1717,7 +1729,7 @@ def _clean_round(
     totals = {"duplicates": 0, "dropped": 0, "fixed": 0, "left": 0, "kept": 0}
     changed = (
         _split_crossings(project)
-        + _split_tees(project)
+        + _split_tees(project, clearance, edge_clearance)
         + _snap_via_ends(project, clearance, edge_clearance)
         + _open_junctions(project, clearance, edge_clearance)
         > 0
@@ -3297,6 +3309,107 @@ def restore_nets(project: KicadProject, nets: set[str]) -> list[str]:
     return [
         f"{net}: tracks/vias restored as routed (KiCad found it unconnected after the clean-up)" for net in sorted(nets)
     ]
+
+
+STITCH_STEPS_MM = tuple(round(0.05 * k, 2) for k in range(1, 41))  # up to 2 mm from the pad
+STITCH_DIRECTIONS = 24
+
+
+def stitch_unconnected_pads(project: KicadProject, pads: list[tuple[str, tracks.Point]]) -> list[str]:
+    """Join pads of a poured net that KiCad reports unconnected to the net's plane with a via.
+
+    ``pads``: (net, pad position) from KiCad's unconnected-items report, after the zone fill.
+    A pad boxed in by other nets' tracks (seen: the GND pin between the two USB lines of an
+    ESD part) gets no copper from its own layer's pour, and tscircuit routes no track to a
+    poured net. The via goes to the nearest spot (<= 2 mm) where it keeps the clearance on
+    every layer and lands in the net's filled pour on another layer; a minimum-width track
+    joins it to the pad.
+    """
+    clearance, edge_clearance = _design_clearances(project)
+    width = _design_min_track_width(project)
+    via_size, via_drill = _design_via(project)
+    copper = _copper(project.pcb, filled_zones=True)
+    r = via_size / 2
+    changes = []
+    for net, pos in pads:
+        pad = next((o for o in copper.pads_by_net.get(net, []) if o.distance(pos, pos) <= tracks.ON_EDGE_MM), None)
+        if pad is None:
+            continue
+        layer = next((lay for lay in COPPER_LAYERS if lay in pad.layers), None)
+        planes = [poly for (n, lay), polys in copper.zones.items() if n == net and lay != layer for poly in polys]
+        if layer is None or not planes:
+            continue
+        others = [o for o in copper.obstacles() if o.net != net]
+        on_layer = [o for o in others if layer in o.layers]
+
+        def fits(q: tracks.Point, others: list[tracks.Obstacle] = others, on_layer: list[tracks.Obstacle] = on_layer,
+                 planes: list[list[tracks.Point]] = planes, pad: tracks.Obstacle = pad) -> bool:  # fmt: skip
+            return (
+                all(o.distance(q, q) >= r + clearance for o in others)
+                and all(e.distance(q, q) >= r + edge_clearance for e in copper.edges)
+                and pad.distance(q, q) >= r + clearance  # beside the pad: no via-in-pad (solder wicks away)
+                and any(tracks.point_in_polygon(q, poly) for poly in planes)
+                and all(o.distance(pad.centre, q) >= clearance + width / 2 for o in on_layer)
+            )
+
+        spot = next(
+            (
+                q
+                for step in STITCH_STEPS_MM
+                for k in range(STITCH_DIRECTIONS)
+                if fits(
+                    q := (
+                        pad.centre[0] + step * math.cos(2 * math.pi * k / STITCH_DIRECTIONS),
+                        pad.centre[1] + step * math.sin(2 * math.pi * k / STITCH_DIRECTIONS),
+                    )
+                )
+            ),
+            None,
+        )
+        net_node = _net_node(project.pcb, net)
+        if spot is None or net_node is None:
+            changes.append(f"{net} pad at ({_mm(pos[0])}, {_mm(pos[1])}): no room for a stitching via")
+            continue
+        x, y = _mm(spot[0]), _mm(spot[1])
+        px, py = _mm(pad.centre[0]), _mm(pad.centre[1])
+        via_uuid = uuid.uuid5(uuid.NAMESPACE_OID, f"stitch:{net}:{x},{y}")
+        seg_uuid = uuid.uuid5(uuid.NAMESPACE_OID, f"stitch-track:{net}:{x},{y}")
+        via = sexpr.loads(
+            f'(via (at {x} {y}) (size {_mm(via_size)}) (drill {_mm(via_drill)}) (layers "F.Cu" "B.Cu") '
+            f'(uuid "{via_uuid}"))'
+        )
+        seg = sexpr.loads(
+            f'(segment (start {px} {py}) (end {x} {y}) (width {_mm(width)}) (layer "{layer}") (uuid "{seg_uuid}"))'
+        )
+        for node in (via, seg):
+            node.insert(len(node) - 1, copy.deepcopy(net_node))  # before the uuid, as KiCad writes it
+        project.pcb += [seg, via]
+        changes.append(f"{net} pad at ({_mm(pos[0])}, {_mm(pos[1])}): stitching via to its plane")
+    return changes
+
+
+def _net_node(pcb: list[Node], net: str) -> list[Node] | None:
+    """A ``(net ...)`` node of ``net`` as the board writes it (with or without a net id)."""
+    names = _net_names(pcb)
+    for node in sexpr.walk(pcb):
+        if sexpr.head(node) in ("pad", "segment", "via") and isinstance(node, list):
+            child = sexpr.child(node, "net")
+            if child is not None and _net_of(node, names) == net:
+                return child
+    return None
+
+
+def _design_via(project: KicadProject) -> tuple[float, float]:
+    """(via diameter, drill) of the Default net class."""
+    try:
+        data = json.loads(project.pcb_path.with_suffix(".kicad_pro").read_text(encoding="utf-8"))
+        default = next(c for c in data["net_settings"]["classes"] if c.get("name") == "Default")
+        return float(default["via_diameter"]), float(default["via_drill"])
+    except (OSError, ValueError, KeyError, StopIteration):
+        return DEFAULT_VIA_MM
+
+
+DEFAULT_VIA_MM = (0.6, 0.3)
 
 
 def unpoured_copper_layers(project: KicadProject) -> list[str]:

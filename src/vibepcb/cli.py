@@ -169,6 +169,19 @@ def cmd_check(board: str) -> int:
     else:
         print(f"  post-fill: gave up after {POST_FILL_ATTEMPTS} attempts, board left as filled")
         drc = kicad.run_drc(pcb, reports / "drc.json")
+    if pads := drc.unconnected_pads():  # pads their pour can't reach: a via to the net's plane
+        loaded, stitched = fixes.KicadProject.load(project, board), pcb.read_bytes()
+        changes = fixes.stitch_unconnected_pads(loaded, pads)
+        if any("stitching via" in c for c in changes):
+            loaded.save()
+            fewer = kicad.run_drc(pcb, reports / "drc.json")
+            if fewer.unconnected < drc.unconnected:
+                drc = fewer
+            else:
+                pcb.write_bytes(stitched)
+                drc = kicad.run_drc(pcb, reports / "drc.json")
+        for change in changes:
+            print(f"  post-fill: {change}")
     loaded = fixes.KicadProject.load(project, board)
     corners = fixes.sharp_corners(loaded)
     unpoured = fixes.unpoured_copper_layers(loaded)

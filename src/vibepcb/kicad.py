@@ -157,6 +157,18 @@ class CheckResult:
             if "pos" in item
         ]
 
+    def unconnected_pads(self) -> list[tuple[str, tuple[float, float]]]:
+        """(net, position) of the pads in unconnected-item reports."""
+        out = []
+        for v in self.violations:
+            if v.get("type") != "unconnected_items":
+                continue
+            for item in v.get("items", []):
+                m = re.match(r"Pad \S+ \[([^\]]+)\]", str(item.get("description", "")))
+                if m and "pos" in item:
+                    out.append((m[1], (float(item["pos"]["x"]), float(item["pos"]["y"]))))
+        return out
+
     def unconnected_nets(self) -> set[str]:
         """Nets of the items in unconnected-item reports."""
         return {
