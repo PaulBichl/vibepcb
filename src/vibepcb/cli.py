@@ -23,7 +23,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
-from vibepcb import fixes, kicad, paths, schgen, sexpr, tscircuit
+from vibepcb import config, fixes, kicad, paths, schgen, sexpr, tscircuit
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -112,6 +112,7 @@ def cmd_fix(board: str) -> int:
             print(f"  schematic: {note}")
         print(f"  schematic generated from {circuit.relative_to(paths.ROOT)}")
     project = fixes.KicadProject.load(target, board)
+    project.config = config.load(board)
     report = fixes.apply_all(project)
     for name, changes in report.items():
         for change in changes:
@@ -269,7 +270,7 @@ def main(argv: list[str] | None = None) -> int:
                     return cmd_build(args.board, fast=args.fast)
                 handler = {"new": cmd_new, "fix": cmd_fix, "check": cmd_check, "fab": cmd_fab, "publish": cmd_publish}
                 return handler[command](args.board)
-    except (tscircuit.TscircuitError, kicad.KicadCliError, FileNotFoundError) as exc:
+    except (tscircuit.TscircuitError, kicad.KicadCliError, config.ConfigError, FileNotFoundError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 

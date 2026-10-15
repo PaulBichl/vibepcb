@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from vibepcb import fixes, kicad, sexpr, tracks, tscircuit
+from vibepcb import config, fixes, kicad, sexpr, tracks, tscircuit
 from vibepcb.sexpr import Sym
 
 if TYPE_CHECKING:
@@ -867,3 +867,38 @@ def test_drop_loose_power_symbols(project: fixes.KicadProject) -> None:
     assert loose not in project.sch
     assert all(s in project.sch for s in power[1:])
     assert fixes.drop_loose_power_symbols(project) == []
+
+
+def test_apply_board_config(project: fixes.KicadProject) -> None:
+    assert fixes.apply_board_config(project) == []  # no config
+    pro = project.pcb_path.with_suffix(".kicad_pro")
+    pro.write_text(json.dumps({"net_settings": {"classes": [{"name": "Default", "clearance": 0.2}]}}), encoding="utf-8")
+    project.config = {
+        "netclass": {"USB": {"nets": ["USB_D*"], "track_width": 0.2, "diff_pair_gap": 0.15}},
+        "length_group": {"SDRAM_DQ": {"nets": ["SD_DQ*"], "max_skew": 2}},
+        "diff_pair": {"max_uncoupled": 5},
+    }
+    assert len(fixes.apply_board_config(project)) == 2
+    settings = json.loads(pro.read_text(encoding="utf-8"))["net_settings"]
+    usb = next(c for c in settings["classes"] if c["name"] == "USB")
+    assert usb == {"name": "USB", "clearance": 0.2, "track_width": 0.2, "diff_pair_gap": 0.15}
+    assert settings["netclass_patterns"] == [{"netclass": "USB", "pattern": "USB_D*"}]
+    dru = project.pcb_path.with_suffix(".kicad_dru").read_text(encoding="utf-8")
+    assert "(constraint skew (max 2mm))" in dru
+    assert "A.NetName == 'SD_DQ*'" in dru
+    assert "(constraint diff_pair_uncoupled (max 5mm))" in dru
+    assert fixes.apply_board_config(project) == []  # idempotent
+    project.config["length_group"]["SDRAM_DQ"]["max_skew"] = 1
+    assert len(fixes.apply_board_config(project)) == 1
+    dru = project.pcb_path.with_suffix(".kicad_dru").read_text(encoding="utf-8")
+    assert dru.count("length group SDRAM_DQ") == 1  # replaced, not appended
+
+
+def test_board_config_validation() -> None:
+    config.validate({"netclass": {"USB": {"nets": ["USB*"], "track_width": 0.2}}})
+    with pytest.raises(config.ConfigError):
+        config.validate({"netclasses": {}})
+    with pytest.raises(config.ConfigError):
+        config.validate({"length_group": {"X": {"nets": ["A*"]}}})
+    with pytest.raises(config.ConfigError):
+        config.validate({"netclass": {"USB": {"nets": ["U*"], "trace_width": 0.2}}})

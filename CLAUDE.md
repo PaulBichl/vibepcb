@@ -66,6 +66,13 @@ junctions, no antennas (dangling track ends / vias), nothing unconnected.
 Extra tscircuit checks: `hatch run tsci check netlist|placement|shorts <file>`
 (`hatch run tsci ...` = the `tsci` the skill talks about).
 
+## Board config (`boards/<name>/vibepcb.toml`)
+
+What the TSX can't say: KiCad net classes (track width, clearance, diff-pair width/gap by net-name
+pattern), length groups (max skew, e.g. an SDRAM bus) and diff-pair rules. `fix` writes them into the
+KiCad project; KiCad's DRC enforces them. Format: `src/vibepcb/config.py`. Nets get the name of a
+named `<trace name="SD_DQ0">` (else the chip pin), so name the traces a rule should catch.
+
 ## Post-processing fixes (`src/vibepcb/fixes.py`)
 
 A fix is `def my_fix(project: KicadProject) -> list[str]`: edit `project.pcb` /

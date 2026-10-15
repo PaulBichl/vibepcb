@@ -125,11 +125,21 @@ class Part:
 def _nets(circuit: list[dict[str, Any]]) -> dict[str, str]:
     """source_port_id -> net name.
 
-    An unnamed net is named after the first chip pin on it with a real pin name (``U1_VREG_1V2``),
-    else KiCad-style after its first pin (``Net-(R5-Pad2)``). ``fixes.rename_auto_nets`` gives the
-    PCB nets the same names (via :func:`pin_net_names`), so schematic and board agree.
+    An unnamed net takes the name of a named trace on it (``<trace name="SD_DQ0">``: rules,
+    net classes and diff pairs can then refer to it), else the first chip pin on it with a real
+    pin name (``U1_VREG_1V2``), else KiCad-style after its first pin (``Net-(R5-Pad2)``).
+    ``fixes.rename_auto_nets`` gives the PCB nets the same names (via :func:`pin_net_names`), so
+    schematic and board agree.
     """
     named = {e["subcircuit_connectivity_map_key"]: e["name"] for e in circuit if e.get("type") == "source_net"}
+    traces = sorted(
+        (e for e in circuit if e.get("type") == "source_trace" and _user_trace_name(e)),
+        key=lambda e: str(e["name"]),
+    )
+    for e in traces:  # a net (no <net> name) joined by a named trace: the trace's name
+        key = e.get("subcircuit_connectivity_map_key")
+        if key and key not in named and not e.get("connected_source_net_ids"):
+            named[key] = str(e["name"])
     comps = {e["source_component_id"]: e for e in circuit if e.get("type") == "source_component"}
     traced = {p for e in circuit if e.get("type") == "source_trace" for p in e.get("connected_source_port_ids", [])}
     by_key: dict[str, list[dict[str, Any]]] = {}
@@ -169,6 +179,12 @@ def _nets(circuit: list[dict[str, Any]]) -> dict[str, str]:
         for p in ports:
             out[p["source_port_id"]] = name
     return out
+
+
+def _user_trace_name(trace: dict[str, Any]) -> bool:
+    """Whether a source_trace has a name the board author gave it (not tscircuit's id)."""
+    name = trace.get("name")
+    return bool(name) and not str(name).startswith("source_trace")
 
 
 def pin_net_names(circuit: list[dict[str, Any]]) -> dict[tuple[str, str], str]:

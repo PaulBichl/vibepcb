@@ -17,7 +17,7 @@ import math
 import re
 import uuid
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from vibepcb import schgen, sexpr, tracks
 from vibepcb.sexpr import Sym
@@ -45,6 +45,7 @@ class KicadProject:
     pcb_path: Path
     sch_path: Path
     before_track_fixes: list[Node] | None = None  # board copy taken by apply_all (see restore_nets)
+    config: dict[str, Any] = field(default_factory=dict)  # boards/<board>/vibepcb.toml (see vibepcb.config)
 
     @classmethod
     def load(cls, directory: Path, stem: str) -> KicadProject:
@@ -2970,6 +2971,76 @@ SHARP_CORNER_RULE = "no acute track angles"
 STRICT_SEVERITIES = {"track_dangling": "error", "via_dangling": "error", "track_angle": "error"}
 
 
+BOARD_CONFIG_RULE = "board config"  # prefix of the .kicad_dru rules apply_board_config writes
+
+
+def apply_board_config(project: KicadProject) -> list[str]:
+    """Net classes, length groups and diff-pair rules from ``boards/<board>/vibepcb.toml``.
+
+    tscircuit has no net classes or KiCad length rules: classes (widths, clearance, diff-pair
+    width / gap) and their net-name patterns go into the .kicad_pro; each length group becomes a
+    ``skew`` rule and the diff-pair settings a ``diff_pair_uncoupled`` rule in the .kicad_dru, so
+    KiCad's DRC (and ``check``) fails on them. Rewritten from the config on every run.
+    """
+    cfg = project.config
+    if not cfg:
+        return []
+    changes = []
+    pro = project.pcb_path.with_suffix(".kicad_pro")
+    if pro.exists() and cfg.get("netclass"):
+        data = json.loads(pro.read_text(encoding="utf-8"))
+        settings = data.setdefault("net_settings", {})
+        classes = [c for c in settings.get("classes", []) if c.get("name") == "Default"]
+        default = classes[0] if classes else {}
+        patterns = []
+        for name, cls in cfg["netclass"].items():
+            entry = {**default, "name": name}
+            entry.update({k: float(v) for k, v in cls.items() if k != "nets"})
+            classes.append(entry)
+            patterns += [{"netclass": name, "pattern": str(p)} for p in cls["nets"]]
+        if settings.get("classes") != classes or settings.get("netclass_patterns") != patterns:
+            settings["classes"] = classes
+            settings["netclass_patterns"] = patterns
+            pro.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+            changes.append(f"{pro.name}: net classes {', '.join(cfg['netclass'])}")
+    rules = []
+    for name, group in cfg.get("length_group", {}).items():
+        condition = " || ".join(f"A.NetName == '{p}'" for p in group["nets"])
+        rules.append(
+            f'(rule "{BOARD_CONFIG_RULE}: length group {name}"\n  (condition "{condition}")\n'
+            f"  (constraint skew (max {_mm(float(group['max_skew']))}mm)))\n"
+        )
+    if (uncoupled := cfg.get("diff_pair", {}).get("max_uncoupled")) is not None:
+        rules.append(
+            f'(rule "{BOARD_CONFIG_RULE}: diff pairs"\n  (condition "A.inDiffPair(\'*\')")\n'
+            f"  (constraint diff_pair_uncoupled (max {_mm(float(uncoupled))}mm)))\n"
+        )
+    if rules:
+        dru = project.pcb_path.with_suffix(".kicad_dru")
+        text = dru.read_text(encoding="utf-8") if dru.exists() else "(version 1)\n"
+        kept = [r for r in _dru_rules(text) if f'(rule "{BOARD_CONFIG_RULE}' not in r]
+        new_text = "".join(kept) + "".join(rules)
+        if new_text != text:
+            dru.write_text(new_text, encoding="utf-8")
+            changes.append(f"{dru.name}: {len(rules)} rule(s) from the board config")
+    return changes
+
+
+def _dru_rules(text: str) -> list[str]:
+    """A .kicad_dru split into its top-level forms (version line, rules), each with its newline."""
+    out, depth, start = [], 0, 0
+    for i, ch in enumerate(text):
+        if ch == "(":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                out.append(text[start : i + 1] + "\n")
+    return out
+
+
 def strict_track_rules(project: KicadProject) -> list[str]:
     """Make KiCad DRC fail on sharp track corners and on antennas (dangling tracks/vias).
 
@@ -3178,6 +3249,7 @@ FIXES: dict[str, Fix] = {
     "thermal_spoke_rule": thermal_spoke_rule,
     "router_clearance_tolerance": router_clearance_tolerance,
     "strict_track_rules": strict_track_rules,
+    "apply_board_config": apply_board_config,
     "place_reference_designators": place_reference_designators,
     "fit_schematic_sheet": fit_schematic_sheet,
 }

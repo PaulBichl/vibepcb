@@ -200,3 +200,64 @@ def test_connectivity_errors_see_pins_on_wires(tmp_path: Path) -> None:
     )
     tampered = text.replace("(sheet_instances", f"{short}\n(sheet_instances")
     assert schgen.connectivity_errors(tampered, parts) == ["U1 pin 5 on VCC"]
+
+
+def test_named_trace_names_its_net() -> None:
+    # an unnamed pad-to-pad net joined by <trace name="SD_DQ0"> is called SD_DQ0 (not U1_B16 / Net-(...)),
+    # so net classes, length groups and diff pairs can refer to it; a trace to a named net keeps that name
+    comp = [
+        {"type": "source_component", "source_component_id": "c0", "name": "U1", "ftype": "simple_chip"},
+        {"type": "source_component", "source_component_id": "c1", "name": "U2", "ftype": "simple_chip"},
+    ]
+    ports = [
+        {
+            "type": "source_port",
+            "source_port_id": f"p{i}",
+            "name": n,
+            "pin_number": i % 3 + 1,
+            "source_component_id": c,
+            "subcircuit_connectivity_map_key": k,
+        }
+        for i, (n, c, k) in enumerate(
+            [
+                ("B16", "c0", "k1"),
+                ("A1", "c0", "kg"),
+                ("X", "c0", "k9"),
+                ("DQ0", "c1", "k1"),
+                ("VSS", "c1", "kg"),
+                ("Y", "c1", "k9"),
+            ]
+        )
+    ]
+    traces = [
+        {
+            "type": "source_trace",
+            "source_trace_id": "t0",
+            "name": "SD_DQ0",
+            "subcircuit_connectivity_map_key": "k1",
+            "connected_source_port_ids": ["p0", "p3"],
+            "connected_source_net_ids": [],
+        },
+        {
+            "type": "source_trace",
+            "source_trace_id": "t1",
+            "name": "GND_A1",
+            "subcircuit_connectivity_map_key": "kg",
+            "connected_source_port_ids": ["p1"],
+            "connected_source_net_ids": ["n0"],
+        },
+        {
+            "type": "source_trace",
+            "source_trace_id": "t2",
+            "name": "source_trace_2",
+            "subcircuit_connectivity_map_key": "k9",
+            "connected_source_port_ids": ["p2", "p5"],
+            "connected_source_net_ids": [],
+        },
+    ]
+    nets = [{"type": "source_net", "source_net_id": "n0", "name": "GND", "subcircuit_connectivity_map_key": "kg"}]
+    names = schgen.pin_net_names([*comp, *ports, *traces, *nets])
+    assert names["U1", "1"] == "SD_DQ0"
+    assert names["U2", "1"] == "SD_DQ0"
+    assert names["U1", "2"] == "GND"
+    assert names["U1", "3"] == "U1_X"  # tscircuit's own trace id is no name
