@@ -17,33 +17,34 @@ escape crashes on any board with a copper pour; replayed dogbones (`pcbTracePath
 TopologyMergingSolver; the plain router ran 43+ min and failed on length matching.
 
 Plan (learning ladder; each step is a board in `../VibePCB-la` that must pass `check`, stock
-checked 2026-10-15):
+checked 2026-10-15). Priorities: learning, then usability; fab price doesn't matter.
 
-0. **Baseline**: bump tscircuit (0.0.2891 -> 0.0.2900) and re-run the two crash repros (pour +
-   dogbone, replayed dogbones); file them upstream if still broken. Cheap, and it decides whether
-   step 2 can use tscircuit's dogbones or needs our own.
+Terms: *escape* = the short route from a ball out of the ball field; *dogbone* = the usual escape
+for a ball that can't leave on the top layer: a short stub from the ball pad to a via in the gap
+between four balls, then out on an inner layer.
+
+Layers (decided): 4 for the BGA-SDRAM step (54 balls, all near the edge); 6 for the ECP5
+(sig / GND / sig / split PWR 1.1/2.5/3.3 V / GND / sig): its inner balls are mostly power/GND and
+need planes right below. Dogbones, no via-in-pad: 0.8 mm pitch has room for them and it is the
+standard way at this pitch (via-in-pad is the answer for 0.5 mm and below).
+
+0. **Baseline**: bump tscircuit (0.0.2891 -> 0.0.2900), re-run the two dogbone crash repros; file
+   them upstream if still broken.
 1. **First BGA = the SDRAM** (`la-bga54`, copy of la-main): W9825G6KH (TSOP-54) -> IS42S16160J-7BLI
    (C1348766, 699 in stock; same 256 Mbit x16 SDR, TFBGA-54, 0.8 mm). 6 x 9 balls, middle three
-   columns empty, so every ball is at most 3 balls from an edge: the whole escape problem in
-   small. 4 layers stay. Learn: ball pad size / mask (NSMD), dogbone geometry at 0.8 mm
-   (0.3/0.5 mm via in the diagonal gap, check JLCPCB's limits), which balls leave on top vs inner.
-2. **VibePCB escape generator** (`vibepcb.fanout`), built on step 1: from the footprint's ball grid
-   and the net of each ball, write per-ball escapes that end *outside* the package (ring 0 straight
-   out on top, ring 1 out between ring 0, deeper rings dogbone + inner layer, power/GND balls a
-   dogbone via to their plane) as `pcbTracePaths` JSON the TSX imports; tscircuit routes only from
-   those end points (`routeRemaining`). Deterministic, unit-tested on a synthetic grid; `check`
-   gets a BGA rule (every used ball escaped, no via in a ball pad unless the fab does via-in-pad).
-3. **ECP5 escape spike** (`la-ecp5-escape`): LFE5U-25F-7BG256I (C1550762, 1277 in stock; 0.8 mm
-   CABGA-256) alone with decoupling and headers, 6 layers (sig / GND / sig / split PWR 1.1/2.5/3.3 V /
-   GND / sig). Only the outer two rings carry signals; pin plan over all four sides. Goal: the
-   generator's escapes + power vias + routing to headers pass `check`.
-4. **la-ecp5**: the logic analyzer with ECP5 + BGA SDRAM, length-matched bus, split power plane
-   (`check`: a diff pair or bus over a plane split = warning). Bonus of the bigger FPGA: DDR
-   inputs -> 200 MSa/s.
-
-Open questions to settle on the way: JLCPCB via-in-pad (POFV) price/availability on 4 vs 6 layers;
-smallest via they build without surcharge; whether tscircuit's `<breakout>` helps once the escapes
-are ours.
+   columns empty. Learn: ball pad / mask, dogbones at 0.8 mm, which balls leave on which layer.
+2. **New tool - VibePCB escape generator** (`vibepcb.fanout`): VibePCB, not the autorouter, routes
+   every ball out of the package (ring 0 straight out on top, ring 1 between ring 0, deeper rings
+   dogbone + inner layer, power/GND balls dogbone to their plane) and hands tscircuit the end
+   points (`pcbTracePaths`); tscircuit routes only the open board. New `check` rule: every used
+   ball escaped, no via in a ball pad.
+3. **New tool features, tested on the ECP5** (`la-ecp5-escape`, LFE5U-25F-7BG256I C1550762, 1277 in
+   stock, alone with decoupling + headers): split power plane (several supply zones on one layer
+   from `vibepcb.toml`, tscircuit can't), 6-layer stack-up from the config, power balls to the
+   right plane region, pin plan over four sides.
+4. **la-ecp5**: mostly project implementation (the logic analyzer with ECP5 + BGA SDRAM). New
+   on the tool side only: escape lengths counted in the length groups, and a `check` warning for a
+   bus or diff pair crossing a plane split.
 
 Why the plain-router spike failed (la-bga-nobus picture): the pin plan put 39 of 59 signals (the whole
 SDRAM bus) into the three right-most ball columns, so every escape left through one 12 mm edge and
