@@ -132,6 +132,10 @@ test in `tests/test_fixes.py` against the fixtures in `tests/data/`.
 - Fine-pitch MCUs (0.5 mm LQFP): assign pins by package side (each signal leaves on the side facing
   its destination) and use 0.3/0.5 mm vias; with random pins and 0.6 mm vias the router dropped vias
   onto neighbouring pins (STM32 on smu-main: 39 errors -> 0).
+- Imported QFP/QFN footprints may be rotated against the datasheet drawing (`pin1location(...)` in the
+  footprint name): before assigning pins by side, check where each pin group lands (port positions in
+  the circuit JSON) and rotate the part so its groups face their partners. A bus too wide for one side:
+  split it over both corners next to the partner, not around one corner.
 - Check display/connector footprints' orientation against the datasheet in the 3D render
   (`fab` top PNG): a dip12 7-segment rotated 90 deg passed every check but read sideways.
 - SPICE: chips have no models, so per-board ngspice decks with behavioural models live in
