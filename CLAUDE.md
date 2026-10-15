@@ -12,19 +12,29 @@ boards/<name>/index.circuit.tsx      <- you edit this (the source of truth)
         │                                everything else converted from that JSON; --fast = router 2x;
         │                                tscircuit's schematic is always off: schematicDisabled copy)
         ▼
-out/<name>/raw/                       <- untouched tscircuit output, never edit
-   <name>.kicad.zip, .netlist.txt, .pcb.png, .circuit.json
-   (the footprint library lib/ is derived from the board in `fix`, not exported)
-        │  hatch run pcb fix <name>     (schematic from schgen.py with KiCad / LCSC symbols, then fixes.py;
-        │                                preview out/<name>/reports/schematic.png)
+out/<name>/.work/raw/                 <- untouched tscircuit output (.kicad.zip, .netlist.txt, .circuit.json)
+        │  hatch run pcb fix <name>     (schematic from schgen.py with KiCad / LCSC symbols, then fixes.py)
         ▼
 out/<name>/kicad/<name>.kicad_pro     <- KiCad project, open this in KiCad
-        │  hatch run pcb check <name>   (kicad-cli ERC + DRC)
+        │  hatch run pcb check <name>   (kicad-cli ERC + DRC, post-fill fixes, house rules)
         ▼
-out/<name>/reports/{erc,drc}.json
+out/<name>/check.txt, board.svg       <- result (JSON reports in .work/reports/)
 ```
 
-`hatch run pcb all <name>` = build + fix + check. `out/` is generated and gitignored.
+`hatch run pcb all <name>` = build + fix + check. `out/` is generated and gitignored; its layout:
+
+```
+out/<name>/                           <- what a person looks at (README.md there says what to open)
+   README.md        index: check verdict, links
+   kicad/           the KiCad project (open <name>.kicad_pro)
+   board.svg        layout preview (top copper + silkscreen, after check)
+   schematic.svg    schematic preview
+   check.txt        the check summary
+   fab/             after `fab`: <name>-gerbers.zip, -bom.csv, -cpl.csv (JLCPCB format), -schematic.pdf,
+                    -top/-bottom.png (3D renders)
+   .work/           internals: raw/ (tscircuit output, never edit), src/ (prepared copy), reports/ (ERC/DRC
+                    JSON, check.json), preview/*.png (for the agent: routed.png, board.png, schematic.png)
+```
 
 Rules of the pipeline (details and timings: `docs/TOOLING.md`):
 
@@ -45,17 +55,17 @@ Rules of the pipeline (details and timings: `docs/TOOLING.md`):
    docs to `docs/tscircuit-llms.txt` - grep it, never read it whole (900 KB).
 2. `hatch run pcb build <name>`. It stops if `tsci check` reports errors: fix
    the TSX, not the output. Warnings are reported but don't stop the build.
-3. **Look at the result**: Read `out/<name>/raw/<name>.pcb.png` and
-   `<name>.netlist.txt` to verify connectivity (every pin on the intended net,
+3. **Look at the result**: Read `out/<name>/.work/preview/routed.png` and
+   `.work/raw/<name>.netlist.txt` to verify connectivity (every pin on the intended net,
    LED/diode polarity, power pins).
-4. `hatch run pcb fix <name>` (then look at `out/<name>/reports/schematic.png`, crop
+4. `hatch run pcb fix <name>` (then look at `out/<name>/.work/preview/schematic.png`, crop
    to zoom) and `hatch run pcb check <name>`. Fix DRC/ERC
    findings at the *source* (TSX placement, trace widths, net names) when
    possible; only systematic tscircuit->KiCad export quirks belong in
    `fixes.py`.
 5. Repeat until `check` exits 0 (errors = 0). Then `hatch run pcb fab <name>`:
-   gerbers/drill zip, BOM CSV (with LCSC/MPN), pick-and-place CSV, schematic PDF,
-   top/bottom 3D renders in `out/<name>/fab/`, JLCPCB upload set in `fab/jlcpcb/`.
+   gerbers/drill zip, BOM and CPL in JLCPCB's format (BOM with LCSC + MPN), schematic PDF,
+   top/bottom 3D renders, all in `out/<name>/fab/` (after check, look at `.work/preview/board.png`).
    Never hand over fab files of a board whose `check` fails.
 
 Silkscreen: every connector's pins labelled (`showSilkscreenPinLabels` or a `<silkscreentext>` per pin; `check` warns

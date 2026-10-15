@@ -72,6 +72,13 @@ def _footprints_by_ref(pcb: list[Node]) -> dict[str, list[Node]]:
 _AUTO_NET = re.compile(r"^\.|\s>\s|\sto\s")  # e.g. ".R1 > .pin2 to .D1 > .anode"
 
 
+def _raw_circuit(project: KicadProject) -> Path:
+    """tscircuit's circuit JSON of the board: ``out/<board>/.work/raw/`` next to ``kicad/``."""
+    stem = project.pcb_path.stem
+    work = project.directory.parent / ".work" / "raw" / f"{stem}.circuit.json"
+    return work if work.exists() else project.directory.parent / "raw" / f"{stem}.circuit.json"
+
+
 def rename_auto_nets(project: KicadProject) -> list[str]:
     """Replace tscircuit's selector-style net names with the schematic's names for them.
 
@@ -79,7 +86,7 @@ def rename_auto_nets(project: KicadProject) -> list[str]:
     ``Net-(R1-Pad2)``; read from ``../raw/<stem>.circuit.json``, without it KiCad-style always.
     """
     pcb = project.pcb
-    circuit = project.directory.parent / "raw" / f"{project.pcb_path.stem}.circuit.json"
+    circuit = _raw_circuit(project)
     pin_names = schgen.pin_net_names(json.loads(circuit.read_text(encoding="utf-8"))) if circuit.exists() else {}
     first_pad: dict[str, str] = {}  # net name -> "Net-(R1-Pad2)" after its first pad
     schematic: dict[str, str] = {}  # net name -> the schematic's name for it
@@ -796,7 +803,7 @@ def add_part_numbers(project: KicadProject) -> list[str]:
     Adds hidden ``MPN`` and ``LCSC`` fields (read from ``../raw/<stem>.circuit.json``) and
     uses the MPN as Value where the export left it empty.
     """
-    circuit = project.directory.parent / "raw" / f"{project.pcb_path.stem}.circuit.json"
+    circuit = _raw_circuit(project)
     if not circuit.exists():
         return []
     parts: dict[str, dict[str, str]] = {}

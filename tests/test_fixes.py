@@ -445,7 +445,7 @@ def test_prune_pour_tracks_drops_tracks_inside_the_fill(project: fixes.KicadProj
 
 
 def test_jlcpcb_files(tmp_path: Path) -> None:
-    bom, pos, zipped = tmp_path / "b-bom.csv", tmp_path / "b-pos.csv", tmp_path / "b-gerbers.zip"
+    bom, pos = tmp_path / "b-bom.csv", tmp_path / "b-pos.csv"
     bom.write_text(
         '"Qty","Designator","Value","Footprint","MPN","LCSC Part #"\n"2","R1,R2","1k","tscircuit:res0402","","C11702"\n',
         encoding="utf-8",
@@ -454,14 +454,13 @@ def test_jlcpcb_files(tmp_path: Path) -> None:
         'Ref,Val,Package,PosX,PosY,Rot,Side\n"","","hole",1,2,0,top\n"R1","1k","res0402",10.5,-20.25,90,top\n',
         encoding="utf-8",
     )
-    zipped.write_bytes(b"zip")
-    out = kicad.jlcpcb_files(bom, pos, zipped, tmp_path / "jlc")
-    assert [p.name for p in out] == ["b-gerbers.zip", "b-bom-jlcpcb.csv", "b-cpl-jlcpcb.csv"]
-    assert out[1].read_text(encoding="utf-8").splitlines() == [
-        "Comment,Designator,Footprint,LCSC Part #",
-        '1k,"R1,R2",res0402,C11702',
+    out = kicad.jlcpcb_files(bom, pos, tmp_path / "fab", "b")
+    assert [p.name for p in out] == ["b-bom.csv", "b-cpl.csv"]
+    assert out[0].read_text(encoding="utf-8").splitlines() == [
+        "Comment,Designator,Footprint,LCSC Part #,MPN,Qty",
+        '1k,"R1,R2",res0402,C11702,,2',
     ]
-    assert out[2].read_text(encoding="utf-8").splitlines() == [
+    assert out[1].read_text(encoding="utf-8").splitlines() == [
         "Designator,Mid X,Mid Y,Layer,Rotation",
         "R1,10.5000mm,-20.2500mm,Top,90",
     ]

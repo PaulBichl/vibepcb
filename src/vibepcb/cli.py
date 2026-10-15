@@ -71,7 +71,7 @@ def cmd_build(board: str, *, fast: bool = False) -> int:
     # evaluated as a copy without tscircuit's schematic (`fix` generates it from the circuit JSON)
     board_tsx = source
     source = tscircuit.prepared_source(
-        source, paths.OUT_DIR / board / "src", effort=tscircuit.FAST_EFFORT if fast else None
+        source, paths.work_dir(board) / "src", effort=tscircuit.FAST_EFFORT if fast else None
     )
     raw = paths.raw_dir(board)
     circuit = raw / f"{board}.circuit.json"
@@ -94,14 +94,16 @@ def cmd_build(board: str, *, fast: bool = False) -> int:
     if errors:
         print(f"tscircuit found {errors} error(s) - fix {board_tsx.relative_to(paths.ROOT)} first", file=sys.stderr)
         return 1
-    written = [circuit, *tscircuit.build(circuit, raw, board, JSON_FORMATS)]
-    if shutil.which("rsvg-convert"):  # PNGs so an LLM can look at the board / schematic
-        svg = raw / f"{board}.pcb.svg"
-        subprocess.run(["rsvg-convert", "-w", "1200", "-o", str(svg.with_suffix(".png")), str(svg)], check=True)
-        written.append(svg.with_suffix(".png"))
-    for f in written:
-        print(f"  {f.relative_to(paths.ROOT)}")
+    tscircuit.build(circuit, raw, board, JSON_FORMATS)
+    if shutil.which("rsvg-convert"):  # the routed board as tscircuit left it, for an agent to look at
+        _png(raw / f"{board}.pcb.svg", paths.preview_dir(board) / "routed.png", 1200)
+    print(f"  tscircuit output: {raw.relative_to(paths.ROOT)}/ (internal; `fix` makes the KiCad project)")
     return 0
+
+
+def _png(svg: Path, png: Path, width: int) -> None:
+    png.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["rsvg-convert", "-w", str(width), "-b", "white", "-o", str(png), str(svg)], check=True)
 
 
 def cmd_fix(board: str) -> int:
@@ -119,7 +121,7 @@ def cmd_fix(board: str) -> int:
         for change in changes:
             print(f"  fix {name}: {change}")
     # safety net: nets KiCad finds broken after the track fixes go back to their routed state
-    report_path = paths.OUT_DIR / board / "reports" / "fix-drc.json"
+    report_path = paths.reports_dir(board) / "fix-drc.json"
     lost = kicad.unconnected_nets(project.pcb_path, report_path)
     restored = fixes.restore_nets(project, lost)
     for change in restored:
@@ -137,13 +139,14 @@ def cmd_fix(board: str) -> int:
             else:
                 for change in repairs:
                     print(f"  fix after restore: {change}")
-    if kicad.find_kicad_cli() and shutil.which("rsvg-convert"):  # preview to look at (LLM / human)
-        svg = kicad.export_schematic_svg(sch, paths.OUT_DIR / board / "reports")
-        svg = svg.replace(svg.with_name("schematic.svg"))
-        png = svg.with_suffix(".png")
-        subprocess.run(["rsvg-convert", "-w", str(SCHEMATIC_PNG_WIDTH), "-o", str(png), str(svg)], check=True)
-        print(f"  schematic preview: {png.relative_to(paths.ROOT)} (+ .svg)")
+    if kicad.find_kicad_cli():  # preview to look at: SVG for people, PNG for an agent
+        svg = kicad.export_schematic_svg(sch, paths.work_dir(board))
+        svg = svg.replace(paths.board_out(board) / "schematic.svg")
+        if shutil.which("rsvg-convert"):
+            _png(svg, paths.preview_dir(board) / "schematic.png", SCHEMATIC_PNG_WIDTH)
+        print(f"  schematic: {svg.relative_to(paths.ROOT)}")
     print(f"KiCad project: {(target / f'{board}.kicad_pro').relative_to(paths.ROOT)}")
+    _write_index(board)
     return 0
 
 
@@ -151,7 +154,7 @@ POST_FILL_ATTEMPTS = 4
 
 
 def cmd_check(board: str) -> int:
-    project, reports = paths.kicad_dir(board), paths.OUT_DIR / board / "reports"
+    project, reports = paths.kicad_dir(board), paths.reports_dir(board)
     pcb = project / f"{board}.kicad_pcb"
     with ThreadPoolExecutor(max_workers=2) as pool:  # independent kicad-cli processes
         erc_job = pool.submit(kicad.run_erc, project / f"{board}.kicad_sch", reports / "erc.json")
@@ -200,20 +203,51 @@ def cmd_check(board: str) -> int:
     loaded = fixes.KicadProject.load(project, board)
     corners = fixes.sharp_corners(loaded)
     unpoured = fixes.unpoured_copper_layers(loaded)
-    print(erc)
-    print(drc)
-    print(f"Track bends: {len(corners)} sharper than 135 deg")
-    for net, (x, y), angle in corners:
-        print(f"  [error] sharp_corner: {net} bend of {angle:.1f} deg @ ({x:.3f}, {y:.3f}) mm")
-    unlabelled = fixes.unlabelled_connectors(loaded)
-    for warning in unlabelled:
-        print(f"  [warning] unlabelled_connector: {warning}")
-    print(f"Pours: {len(unpoured)} copper layer(s) without a plane")
-    for layer in unpoured:
-        print(f"  [error] no_pour: {layer} - add a <copperpour> (GND or a supply net) on it")
+    summary = [str(erc), str(drc), f"Track bends: {len(corners)} sharper than 135 deg"]
+    summary += [
+        f"  [error] sharp_corner: {net} bend of {a:.1f} deg @ ({x:.3f}, {y:.3f}) mm" for net, (x, y), a in corners
+    ]
+    summary += [f"  [warning] unlabelled_connector: {w}" for w in fixes.unlabelled_connectors(loaded)]
+    summary.append(f"Pours: {len(unpoured)} copper layer(s) without a plane")
+    summary += [f"  [error] no_pour: {layer} - add a <copperpour> (GND or a supply net) on it" for layer in unpoured]
     passed = not (erc.errors or drc.errors or corners or unpoured)
     _write_check_status(board, pcb, passed)
+    verdict = "PASSED" if passed else f"FAILED ({erc.errors + drc.errors + len(corners) + len(unpoured)} error(s))"
+    summary.append(f"check: {verdict}")
+    print("\n".join(summary))
+    (paths.board_out(board) / "check.txt").write_text("\n".join(summary) + "\n", encoding="utf-8")
+    svg = kicad.export_board_svg(pcb, paths.board_out(board) / "board.svg")  # the filled, final board
+    if shutil.which("rsvg-convert"):
+        _png(svg, paths.preview_dir(board) / "board.png", BOARD_PNG_WIDTH)
+    _write_index(board)
     return 0 if passed else 1
+
+
+BOARD_PNG_WIDTH = 2400
+
+
+def _write_index(board: str) -> None:
+    """``out/<board>/README.md``: what to open, the check verdict, the fab files - one place to start."""
+    out = paths.board_out(board)
+    check = out / "check.txt"
+    verdict = check.read_text(encoding="utf-8").splitlines()[-1] if check.exists() else "check: not run yet"
+    lines = [
+        f"# {board}",
+        "",
+        f"Generated by VibePCB from `boards/{board}/` - don't edit here; rebuild with `hatch run pcb all {board}`.",
+        "",
+        f"- **{verdict}** - details: [check.txt](check.txt)",
+        f"- **KiCad project**: [kicad/{board}.kicad_pro](kicad/{board}.kicad_pro) (open in KiCad)",
+        "- **Previews**: [board.svg](board.svg) (top copper + silkscreen), [schematic.svg](schematic.svg)",
+    ]
+    fab = out / "fab"
+    if fab.is_dir() and any(fab.iterdir()):
+        files = ", ".join(f"[{f.name}](fab/{f.name})" for f in sorted(fab.iterdir()))
+        lines.append(f"- **Fab** (JLCPCB upload: gerbers zip, BOM, CPL): {files}")
+    else:
+        lines.append(f"- **Fab**: not made yet - `hatch run pcb fab {board}` (only for a board that passes check)")
+    lines += ["", "Internals (tscircuit output, JSON reports, PNG previews for the agent) are in `.work/`."]
+    (out / "README.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def _board_hash(pcb: Path) -> str:
@@ -223,12 +257,12 @@ def _board_hash(pcb: Path) -> str:
 def _write_check_status(board: str, pcb: Path, passed: bool) -> None:
     """``reports/check.json``: the verdict of the last ``check`` and the board it was for."""
     status = {"passed": passed, "board_sha256": _board_hash(pcb)}
-    (paths.OUT_DIR / board / "reports" / "check.json").write_text(json.dumps(status, indent=2), encoding="utf-8")
+    (paths.reports_dir(board) / "check.json").write_text(json.dumps(status, indent=2), encoding="utf-8")
 
 
 def _check_passed(board: str, pcb: Path) -> bool:
     """Whether the last ``check`` passed on the board as it is now."""
-    path = paths.OUT_DIR / board / "reports" / "check.json"
+    path = paths.reports_dir(board) / "check.json"
     try:
         status = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -241,10 +275,12 @@ def cmd_fab(board: str) -> int:
     source = paths.board_source(board)
     if source.exists():
         print("checking part availability (tscircuit parts engine) ...")
-        warnings = tscircuit.availability_warnings(tscircuit.prepared_source(source, paths.OUT_DIR / board / "src"))
+        warnings = tscircuit.availability_warnings(tscircuit.prepared_source(source, paths.work_dir(board) / "src"))
         print("\n".join(f"  {w}" for w in warnings) if warnings else "  all parts available")
-    for f in kicad.export_fab(paths.kicad_dir(board) / f"{board}.kicad_pcb", paths.OUT_DIR / board / "fab"):
+    pcb = paths.kicad_dir(board) / f"{board}.kicad_pcb"
+    for f in kicad.export_fab(pcb, paths.board_out(board) / "fab", paths.work_dir(board) / "fab"):
         print(f"  {f.relative_to(paths.ROOT)}")
+    _write_index(board)
     return 0
 
 

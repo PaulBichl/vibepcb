@@ -17,23 +17,25 @@ Contents: 1. Pipeline - 2. Requirements and setup - 3. CLI commands - 4. Hatch s
 boards/<name>/index.circuit.tsx        source of truth (tscircuit / React TSX)
     │  vibepcb build <name>   placement gate (tsci build --routing-disabled), one routed evaluation, exports from the JSON
     ▼
-out/<name>/raw/                        untouched tscircuit output, regenerated each build
-    <name>.kicad.zip, <name>.netlist.txt, .pcb.png, .pcb.svg, <name>.circuit.json
-    (no schematic: builds evaluate a copy with schematicDisabled)
+out/<name>/.work/raw/                  untouched tscircuit output, regenerated each build
+    <name>.kicad.zip, <name>.netlist.txt, .pcb.svg, <name>.circuit.json (+ .work/preview/routed.png)
+    (no schematic: builds evaluate a copy with schematicDisabled, in .work/src/)
     │  vibepcb fix <name>     unpack zip, rename to <name>.kicad_*, generate the schematic (schgen),
-    │                         run registered fixes, preview reports/schematic.{svg,png}
+    │                         run registered fixes, schematic.svg (+ .work/preview/schematic.png)
     ▼
 out/<name>/kicad/<name>.kicad_pro      KiCad project; open this one in KiCad
     │  vibepcb check <name>   kicad-cli ERC + DRC, refill zones, post-fill fixes, sharp-corner check
     ▼
-out/<name>/reports/{erc,drc}.json
-    │  vibepcb fab <name>     gerbers + drill zip, BOM, pick-and-place, schematic PDF, renders, JLCPCB set
+out/<name>/check.txt, board.svg        (JSON reports and check.json in .work/reports/)
+    │  vibepcb fab <name>     gerbers zip, BOM + CPL (JLCPCB format), schematic PDF, 3D renders
     ▼
 out/<name>/fab/
 ```
 
 `vibepcb all <name>` runs build, fix and check in sequence. `out/` is generated and
-git-ignored. `raw/` is never edited; all changes happen in `kicad/` through the fixes.
+git-ignored. `out/<name>/README.md` (written by fix / check / fab) says what to open; internals live in
+`.work/`. `.work/raw/` is never edited; all changes happen in `kicad/` through the fixes. PNG previews exist only
+in `.work/preview/` (an agent can't read SVG); people get SVGs.
 
 Ownership split: tscircuit produces the netlist and placement; KiCad's own tools
 (`kicad-cli`) do ERC, DRC, zone refill and fab exports; this project only adds scripted
@@ -51,7 +53,7 @@ corrections for systematic export quirks, plus track cleanup and a few hard rule
 | tscircuit, bun | npm packages from `package.json` (`tscircuit`, `bun`, `@types/react`) |
 | KiCad >= 9 (`kicad-cli`) | system install (`sudo pacman -S kicad`), or set `$KICAD_CLI`. Needed for `check` and `fab` only |
 | ngspice | optional, only for `boards/<name>/sim/*.cir` decks (`ngspice -b <deck>`) |
-| rsvg-convert | optional, makes `out/<name>/raw/<name>.pcb.png` and `out/<name>/reports/schematic.png` from the SVGs |
+| rsvg-convert | optional, makes the agent's PNG previews in `out/<name>/.work/preview/` from the SVGs |
 
 Setup sequence:
 
@@ -83,12 +85,12 @@ docstring of `cli.py` doubles as `--help` text.
 | Command | Does | Writes | Exit code |
 |---------|------|--------|-----------|
 | `new <board>` | writes a starter board (a 30x20 mm board with R1, C1 and a trace) to `boards/<board>/index.circuit.tsx`; refuses if the file exists | `boards/<board>/` | 1 if it exists |
-| `build <board> [--fast]` | placement gate: `tsci build --routing-disabled`, stops on placement/outside-board/overlap/clearance errors (about 1 min on a 238-part board); then ONE routed `tsci export -f circuit-json` (stops on `*_error` elements), and `kicad_zip`, netlist, PCB SVG are converted from that JSON; PNG via `rsvg-convert`. tscircuit always evaluates a copy in `out/<board>/src/` with `schematicDisabled` (`tscircuit.prepared_source`: its schematic layout does not scale, `fix` generates the schematic); `--fast` also sets `autorouterEffortLevel="2x"` in that copy | `out/<board>/raw/` | 1 on errors or unknown board |
-| `fix <board>` | removes and re-creates `out/<board>/kicad/` from the raw zip (the footprint library `lib/footprints/tscircuit_builtin.pretty` is written from the footprints embedded in the board, `kicad.write_footprint_library`), renames the files to the board name, replaces the schematic with `schgen.write` (from the circuit JSON + the TSX sections), then runs `fixes.apply_all` and prints one line per change; exports `reports/schematic.svg` + `.png` (4000 px) as a preview | `out/<board>/kicad/` | 0 (exceptions reported as `error:`, exit 1) |
-| `check <board>` | `kicad-cli sch erc`, `kicad-cli pcb drc` (refills zones, saves the board), post-fill loop, sharp-corner check, prints both reports | `out/<board>/reports/{erc,drc}.json`, modifies the KiCad PCB | 1 if ERC errors, DRC errors or sharp corners |
+| `build <board> [--fast]` | placement gate: `tsci build --routing-disabled`, stops on placement/outside-board/overlap/clearance errors (about 1 min on a 238-part board); then ONE routed `tsci export -f circuit-json` (stops on `*_error` elements), and `kicad_zip`, netlist, PCB SVG are converted from that JSON; PNG via `rsvg-convert`. tscircuit always evaluates a copy in `out/<board>/.work/src/` with `schematicDisabled` (`tscircuit.prepared_source`: its schematic layout does not scale, `fix` generates the schematic); `--fast` also sets `autorouterEffortLevel="2x"` in that copy | `out/<board>/.work/raw/` | 1 on errors or unknown board |
+| `fix <board>` | removes and re-creates `out/<board>/kicad/` from the raw zip (the footprint library `lib/footprints/tscircuit_builtin.pretty` is written from the footprints embedded in the board, `kicad.write_footprint_library`), renames the files to the board name, replaces the schematic with `schgen.write` (from the circuit JSON + the TSX sections), then runs `fixes.apply_all` and prints one line per change; exports `schematic.svg` (+ `.work/preview/schematic.png`, 4000 px) and refreshes `README.md` | `out/<board>/kicad/` | 0 (exceptions reported as `error:`, exit 1) |
+| `check <board>` | `kicad-cli sch erc`, `kicad-cli pcb drc` (refills zones, saves the board), post-fill loop, sharp-corner and unlabelled-connector checks; prints the summary, writes it to `check.txt`, exports `board.svg` | `out/<board>/check.txt`, `board.svg`, `.work/reports/`, modifies the KiCad PCB | 1 if ERC errors, DRC errors or sharp corners |
 | `all <board>` | `build`, then `fix`, then `check`, short-circuiting on a non-zero result | all of the above | first non-zero, else `check`'s result |
-| `fab <board>` | part availability check once (parts engine, placement-only evaluation), then `kicad.export_fab` on `out/<board>/kicad/<board>.kicad_pcb` | `out/<board>/fab/` | 0 |
-| `publish <board>` | only if the last `check` passed on the current board (`reports/check.json`, board hash): KiCad project without 3D models, BOM, schematic PDF, renders (`kicad.export_docs`), layout PDF (a page per copper layer) + front/back PNGs (`kicad.export_layout`) | `boards/<board>/hardware/` (committed) | 0 |
+| `fab <board>` | part availability check once (parts engine, placement-only evaluation), then `kicad.export_fab` on `out/<board>/kicad/<board>.kicad_pcb`: one file per purpose (gerbers zip, JLCPCB BOM with MPN, CPL, schematic PDF, top/bottom renders); intermediates in `.work/fab/` | `out/<board>/fab/` | 0 |
+| `publish <board>` | only if the last `check` passed on the current board (`.work/reports/check.json`, board hash): KiCad project without 3D models, BOM, schematic PDF, renders (`kicad.export_docs`), layout PDF (a page per copper layer) + front/back SVGs (`kicad.export_layout`) | `boards/<board>/hardware/` (committed) | 0 |
 | `list` | prints board names (folders with `index.circuit.tsx` under `boards/`) | none | 0 |
 | `docs` | downloads `https://docs.tscircuit.com/llms.txt` to `docs/tscircuit-llms.txt` (60 s timeout) | `docs/` | 0 |
 
@@ -456,7 +458,7 @@ fails" (CLAUDE.md).
 | node / npm | tscircuit, bun | `nodeenv` (hatch env) or system | `shutil.which("node")` is checked |
 | bun | tsci's shebang is `env bun` | npm devDependency | comes from `node_modules/.bin` |
 | `kicad-cli` (KiCad >= 9) | `kicad.py` | `$KICAD_CLI`, else PATH | ERC, DRC, refill, fab exports, renders |
-| `rsvg-convert` | `cli.cmd_build`, `cli.cmd_fix` | PATH, optional | makes `<board>.pcb.png` and `reports/schematic.png`; skipped silently if absent |
+| `rsvg-convert` | `cli.cmd_build`, `cli.cmd_fix`, `cli.cmd_check` | PATH, optional | makes the PNG previews in `.work/preview/`; skipped silently if absent |
 | ngspice | `boards/<name>/sim/*.cir` | PATH | run manually: `ngspice -b <deck>` |
 | git | `update-skill`, `clean` | PATH | `git clean -ffX` deletes ignored files in `.tmp` and `out` |
 | network | `docs` (llms.txt), `update-skill` (GitHub clone), `fix` (LCSC symbols, first time per part) | - | `fix` works offline: uncached parts get boxes |
@@ -503,7 +505,7 @@ History: used to be circuit-json export (~10 min) + a second `kicad-library` exp
    set exit 1. Read the printed warnings anyway.
 9. **`schematic_net_labels` and `place_reference_designators` depend on geometry thresholds**
    (`LABEL_SNAP_MM = 3.0`, text box estimates with `CHAR_ADVANCE = 0.8`). Check the
-   result on `reports/schematic.png` / `pcb.png` after changes.
+   result on `.work/preview/schematic.png` / `routed.png` / `board.png` after changes.
 10. **Board thickness, reference size and clearances are constants** in `fixes.py`
     (`STANDARD_BOARD_THICKNESS_MM = 1.6`, `REF_TEXT_SIZE_MM = 0.8`, `THERMAL_GAP_MM = 0.3`,
     `FOOTPRINT_INTERNAL_HOLE_CLEARANCE_MM = 0.15`). Change them there, not per board.

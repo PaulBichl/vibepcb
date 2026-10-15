@@ -70,7 +70,10 @@ KiCad project and fab files once the checks pass. `pcb publish` puts the review 
 layout, renders, BOM, KiCad project; no fab files) into the board's folder for sharing.
 
 Boards can also live in their own repo next to this one (like the examples), running the
-tooling from this checkout.
+tooling from this checkout; `templates/project.gitignore` says what such a repo keeps.
+
+Each board's output is in `out/<board>/`: its `README.md` says what to open (the KiCad project,
+`board.svg`, `schematic.svg`, `check.txt`, and `fab/` once fab files are made).
 
 ## Limits
 
