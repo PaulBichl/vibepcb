@@ -35,6 +35,22 @@ def export(source: Path, fmt: str, output: Path) -> None:
     if result.returncode != 0 or not output.exists():
         msg = f"tsci export -f {fmt} failed:\n{result.stdout}{result.stderr}"
         raise TscircuitError(msg)
+    if crash := autorouting_crash(result.stdout + result.stderr):
+        msg = f"tscircuit's autorouter crashed, the board is unrouted: {crash}"
+        raise TscircuitError(msg)
+
+
+_ROUTER_CRASH = re.compile(r'Async effect error in PcbTraceRender "autorouting":\s*\n\s*(?:\x1b\[[0-9;]*m)*(.+)')
+
+
+def autorouting_crash(output: str) -> str | None:
+    """The error message if tscircuit's autorouter crashed during an export, else None.
+
+    tscircuit logs the crash and still exits 0 with a circuit JSON that has no traces at all
+    (seen: two traces of one net declared as one ``<differentialpair>`` side).
+    """
+    match = _ROUTER_CRASH.search(output)
+    return re.sub(r"\x1b\[[0-9;]*m", "", match[1]).strip() if match else None
 
 
 FAST_EFFORT = "2x"

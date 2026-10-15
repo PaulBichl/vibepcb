@@ -71,3 +71,16 @@ def test_routed_errors_block_only_source_and_routing_failures(tmp_path: Path) ->
     assert errors == 1
     assert "source_failed_to_create_component_error" in report
     assert "1 x pcb_pad_pad_clearance_error" in report
+
+
+def test_autorouting_crash() -> None:
+    log = (
+        'Generating circuit JSON...\n\x1b[0m\x1b[31mAsync effect error in PcbTraceRender "autorouting":\n'
+        'Error: Subcircuit connectivity map key "net4" matches multiple SRJ connections\n'
+        "    at getDifferentialPairSrjConnectionNamesByCohortOrThrow (index.js:1:1)\n"
+    )
+    assert (
+        tscircuit.autorouting_crash(log)
+        == 'Error: Subcircuit connectivity map key "net4" matches multiple SRJ connections'
+    )
+    assert tscircuit.autorouting_crash("Circuit JSON written to x.json") is None
