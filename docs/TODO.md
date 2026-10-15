@@ -28,3 +28,16 @@ smallest step first:
    USB / Ethernet PHY or a small FPGA in a 0.8 mm package) - escapes on the top layer, vias only
    for power.
 5. **Then the 256-ball FPGA** with a length-matched memory bus.
+
+Why the plain-router spike failed (la-bga-nobus picture): the pin plan put 39 of 59 signals (the whole
+SDRAM bus) into the three right-most ball columns, so every escape left through one 12 mm edge and
+the router stacked its vias there; the SDRAM's pin rows ran parallel to that edge (90 deg turn for
+every line). Work around the router, don't rely on it:
+
+- pin plan: buses over two sides, outer two ball rings only (197 IO leave plenty); memory rotated so
+  its pin rows face the FPGA;
+- VibePCB escape generator: full per-ball escapes ending outside the package (ring 0 top straight
+  out, ring 1 dogbone + inner layer between ring-0 vias, ...), passed as `pcbTracePaths`; tscircuit
+  routes only from those launch points (its crashes happened with escapes ending inside the BGA);
+- one layer per bus (`<bus pcbAllowedLayers>`), so buses don't fight for a layer;
+- last resort: route the bus with VibePCB's own maze router (`tracks.grid_route`), `check` judges.
