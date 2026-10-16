@@ -177,3 +177,13 @@ def test_crossing() -> None:
     assert tracks.crossing((0, 0), (2, 2), (0, 2), (2, 0)) == (1.0, 1.0)
     assert tracks.crossing((0, 0), (1, 0), (0, 1), (1, 1)) is None  # parallel
     assert tracks.crossing((0, 0), (1, 0), (2, -1), (2, 1)) is None  # beyond the end
+
+
+def test_via_takes_follows_kicad_not_copper_overlap() -> None:
+    via = (0.0, 0.0)
+    over_centre = tracks.Seg((-1.0, 0.0), (1.0, 0.0), 0.15, "F.Cu", "N")
+    end_inside = tracks.Seg((0.15, 0.0), (1.0, 0.0), 0.15, "F.Cu", "N")
+    end_just_outside = tracks.Seg((0.22, 0.005), (1.0, 0.0), 0.15, "F.Cu", "N")  # copper overlaps, KiCad: open
+    assert tracks.via_takes(via, 0.2, over_centre)
+    assert tracks.via_takes(via, 0.2, end_inside)
+    assert not tracks.via_takes(via, 0.2, end_just_outside)

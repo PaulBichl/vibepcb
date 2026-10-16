@@ -174,3 +174,15 @@ def test_plane_balls_get_their_own_via() -> None:
         if e.pin in gnd:  # a via near the ball (the plane), besides the outward stub tscircuit routes to
             ball = next(b for b in balls if b.pin == e.pin)
             assert any(math.dist(v, (ball.x, ball.y)) < 1.2 for v in e.vias)
+
+
+def test_channel_escapes_end_staggered_with_a_strip_stand_in() -> None:
+    plan = fanout.plan("U2", _grid([0, 1, 2, 6, 7, 8], 9))
+    north = [e for e in plan.escapes if e.side == "N" and e.end_layer == "top"]
+    ends = sorted({round(e.end[1], 3) for e in north})
+    assert len(ends) == 2  # straight ones one pitch out, channel ones one more
+    assert ends[1] - ends[0] == pytest.approx(PITCH)
+    far = next(e for e in north if round(e.end[1], 3) == ends[1])
+    pad = fanout._standin_pad(plan, far)
+    assert 'width="0.2mm"' in pad
+    assert 'height="0.2mm"' not in pad  # a strip from the keepout edge out to the end

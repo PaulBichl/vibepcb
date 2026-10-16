@@ -148,7 +148,12 @@ def apply_escapes(project: KicadProject) -> list[str]:
             continue
         pads = [p for p in fp if sexpr.head(p) == "pad" and isinstance(p, list)]
         standin = round(fanout.STANDIN_PAD_MM, 4)
-        if not pads or any(abs(_num(sexpr.child(p, "size"), 1) - standin) > 1e-4 for p in pads):
+
+        def standin_size(pad: list[Node], standin: float = standin) -> bool:  # square, or a staggered end strip
+            size = sexpr.child(pad, "size")
+            return abs(min(_num(size, 1), _num(size, 2)) - standin) <= 1e-4
+
+        if not pads or not all(standin_size(p) for p in pads):
             continue  # real balls already (or not a stand-in)
         to_board = _fp_to_board(fp)
         net_of_pin = {str(p[1]): sexpr.child(p, "net") for p in pads}
@@ -1589,10 +1594,9 @@ class _Copper:
     def attached(self, p: tracks.Point, s: tracks.Seg) -> bool:
         """Whether track end p of s connects to a pad or via the way KiCad sees it.
 
-        A pad takes any track end inside it; a via a track end whose copper overlaps it (see
-        :func:`tracks.via_takes`).
+        A pad takes any track end inside it; a via a track end inside it (see :func:`tracks.via_takes`).
         """
-        if any(math.dist(p, c) <= r + s.width / 2 - tracks.EPS for c, r in self.vias_by_net.get(s.net, [])):
+        if any(math.dist(p, c) <= r - tracks.EPS for c, r in self.vias_by_net.get(s.net, [])):
             return True
         index = self.pad_index_by_net.get(s.net)
         if index is None:
@@ -3053,8 +3057,8 @@ def separate_ends_on_pads(project: KicadProject) -> list[str]:
 
     Two routes entering one pad often end on the same point; KiCad's ``track_angle`` rule then
     measures the angle between them although the pad copper joins them anyway. Each end but
-    the first moves back along its own track (no new bend) while it stays inside the pad, or
-    on the via's copper, so it keeps its connection.
+    the first moves back along its own track (no new bend) while it stays inside the same pad,
+    or the same via, as the junction, so it keeps its connection.
     """
     copper = _copper(project.pcb)
     groups: dict[tuple[str, str, tuple[int, int]], list[tuple[tracks.Seg, int]]] = {}
@@ -3078,7 +3082,9 @@ def separate_ends_on_pads(project: KicadProject) -> list[str]:
                 if step >= length - tracks.EPS:
                     break
                 q = (j[0] + (other[0] - j[0]) * step / length, j[1] + (other[1] - j[1]) * step / length)
-                if copper.attached(q, s):
+                # on the same pad / via as the junction: one beside it (a via next to a pad) would cut
+                # the link the junction made between the two
+                if copper.attached(q, s) and copper.same_anchor(j, q, net, layer):
                     node = sexpr.child(_source(s), "start" if k == 0 else "end")
                     assert node is not None
                     node[1:3] = [Sym(_mm(q[0])), Sym(_mm(q[1]))]
@@ -3095,7 +3101,7 @@ PULL_BACK_STEPS_MM = tuple(round(0.05 * k, 2) for k in range(1, 21))  # up to 1 
 def _pull_back_overlapping_ends(project: KicadProject) -> list[str]:
     """A track ending on a pad/via whose copper overlaps another track of its net at an acute
     angle (KiCad measures it) retreats along its own line until they no longer touch, as long
-    as its end stays on the pad/via."""
+    as its end stays on the same pad/via."""
     copper = _copper(project.pcb)
     changes = []
     touched: set[int] = set()
@@ -3124,7 +3130,7 @@ def _pull_back_overlapping_ends(project: KicadProject) -> list[str]:
                 if step >= length - tracks.EPS:
                     break
                 q = (end[0] + (far[0] - end[0]) * step / length, end[1] + (far[1] - end[1]) * step / length)
-                if not copper.attached(q, s):
+                if not (copper.attached(q, s) and copper.same_anchor(end, q, s.net, s.layer)):
                     break
                 if all(tracks.seg_seg_distance(q, far, t.a, t.b) > (s.width + t.width) / 2 for t in crossing):
                     node = sexpr.child(_source(s), ("start", "end")[k])

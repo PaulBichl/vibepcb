@@ -41,6 +41,7 @@ Point = tuple[float, float]
 SIDES: dict[str, Point] = {"N": (0.0, 1.0), "E": (1.0, 0.0), "S": (0.0, -1.0), "W": (-1.0, 0.0)}
 ALIGN_WEIGHT = 0.9  # side choice: one ring deeper is worth less than facing the net's other pads
 STANDIN_PAD_MM = 0.2  # square stand-in pad at an escape end
+STAGGER_PITCHES = 1.0  # channel escapes end this many pitches further out than the straight ones
 GRID_TOL = 0.02  # mm: a ball within this of a grid point is on it
 
 
@@ -210,8 +211,11 @@ def plan(ref: str, balls: list[Ball], rules: Rules | None = None) -> Plan:
         n = SIDES[side]
 
         def end_at(a: float, side: str = side, back: Any = back, n: Point = n) -> Point:
+            # channel escapes (half positions) end one pitch further out than the ball lines: the
+            # ends of a side are then 0.8 mm apart instead of 0.4, room for the router's tracks
             x, y = grid.at(*back(a, 0))
-            return x + n[0] * end_offset, y + n[1] * end_offset
+            d = end_offset + (STAGGER_PITCHES * p if a % 1 else 0.0)
+            return x + n[0] * d, y + n[1] * d
 
         start = (b.x, b.y)
         clear = all(by_index.get(back(along, d)) is None for d in range(depth))
@@ -490,13 +494,7 @@ def standin_tsx(p: Plan) -> str:
     No courtyard: tscircuit counts a courtyard over a keepout as a placement error and skips the
     routing; ``fixes.apply_escapes`` draws it in KiCad.
     """
-    s = _n(STANDIN_PAD_MM)
-    pads = [
-        f'<smtpad portHints={{["{e.pin}"]}} pcbX="{_n(e.end[0])}mm" pcbY="{_n(e.end[1])}mm" width="{s}mm" '
-        f'height="{s}mm" shape="rect"' + ("" if e.end_layer == "top" else f' layer="{e.end_layer}"') + " />"
-        for e in p.escapes
-        if e.end_layer  # via-only plane balls get no stand-in pad: tscircuit leaves their port alone
-    ]
+    pads = [_standin_pad(p, e) for e in p.escapes if e.end_layer]  # via-only plane balls: none
     art = [
         f"<{g['kind']} " + ("route" if g["kind"] == "silkscreenpath" else "outline")
         + "={" + json.dumps([{"x": round(x, 4), "y": round(y, 4)} for x, y in g["route"]]) + "} />"
@@ -504,6 +502,34 @@ def standin_tsx(p: Plan) -> str:
         if g["kind"] == "silkscreenpath"
     ]  # fmt: skip
     return "<footprint>" + "".join(pads + art) + "</footprint>"
+
+
+def _standin_pad(p: Plan, e: Escape) -> str:
+    """The stand-in pad of an escape end. An end further out than the keepout edge (a staggered
+    channel escape) gets a strip from the keepout edge to the end: tscircuit sees the escape's copper
+    outside the keepout and keeps clear of it (it may join the strip anywhere; the escape track runs
+    along it)."""
+    half = STANDIN_PAD_MM / 2
+    x, y = e.end
+    w = h = STANDIN_PAD_MM
+    x0, y0, x1, y1 = p.keepout
+    edge = {"N": y1, "S": y0, "E": x1, "W": x0}.get(e.side)
+    if edge is not None:
+        n = SIDES[e.side]
+        inner = edge + (n[0] + n[1]) * p.rules.clearance  # just outside the keepout
+        coord = x if n[0] else y
+        length = abs(coord - inner) + half
+        if length > STANDIN_PAD_MM + 1e-6:
+            mid = (coord + half * (n[0] + n[1]) + inner) / 2
+            if n[0]:
+                x, w = mid, length
+            else:
+                y, h = mid, length
+    layer = "" if e.end_layer == "top" else f' layer="{e.end_layer}"'
+    return (
+        f'<smtpad portHints={{["{e.pin}"]}} pcbX="{_n(x)}mm" pcbY="{_n(y)}mm" width="{_n(w)}mm" '
+        f'height="{_n(h)}mm" shape="rect"{layer} />'
+    )
 
 
 def keepout_tsx(p: Plan, cx: float, cy: float, rotation: float, layers: list[str]) -> str:

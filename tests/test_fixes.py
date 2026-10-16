@@ -591,6 +591,21 @@ def test_separate_ends_on_pads(project: fixes.KicadProject) -> None:
     assert fixes.separate_ends_on_pads(project) == []
 
 
+def test_separate_ends_stay_on_the_junctions_via(project: fixes.KicadProject) -> None:
+    """A junction on a via just beside a pad: an end moved back onto the pad would leave the via (la-bga54e)."""
+    # J1 pad 1 spans x 91.98..93.48; the VCC via (r 0.2) at 93.75 covers x 93.55..93.95: a gap between them
+    via = sexpr.loads("(via (at 93.75 100) (size 0.4) (drill 0.2) (layers F.Cu B.Cu) (net 1))")
+    a = sexpr.loads("(segment (start 93.56 100) (end 93.2 100) (width 0.2) (layer F.Cu) (net 1))")  # pad <-> via
+    b = sexpr.loads(
+        "(segment (start 93.56 100) (end 93.45 101.6) (width 0.2) (layer F.Cu) (net 1))"
+    )  # 86 deg, off the pad
+    project.pcb += [via, b, a]
+    fixes.separate_ends_on_pads(project)
+    start = sexpr.child(a, "start")
+    assert start is not None
+    assert math.dist((float(str(start[1])), float(str(start[2]))), (93.75, 100)) <= 0.2  # still on the via
+
+
 def test_restore_nets(project: fixes.KicadProject) -> None:
     assert fixes.restore_nets(project, {"VCC"}) == []  # no snapshot yet
     project.before_track_fixes = copy.deepcopy(project.pcb)

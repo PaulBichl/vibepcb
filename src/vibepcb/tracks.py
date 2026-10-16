@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
 
 type Point = tuple[float, float]
+type Box = tuple[float, float, float, float]  # xmin, ymin, xmax, ymax
 
 EPS = 0.01  # mm: points closer than this are the same point (tracks are >= 0.1 mm wide)
 ON_EDGE_MM = 0.001  # a track end this close outside a pad is on its edge: KiCad connects it
@@ -47,6 +48,7 @@ class Obstacle:
     points: tuple[Point, ...]
     radius: float = 0.0
     polygon: bool = False
+    routed: bool = False  # copper the router added: it can be ripped up again
 
     @property
     def centre(self) -> Point:
@@ -98,9 +100,12 @@ def point_seg_distance(p: Point, a: Point, b: Point) -> float:
 
 
 def via_takes(centre: Point, radius: float, s: Seg) -> bool:
-    """Whether KiCad connects track ``s`` to a via: their copper overlaps (measured for a
-    track end: connected up to radius + half width; EPS margin), body or end alike."""
-    return point_seg_distance(centre, s.a, s.b) <= radius + s.width / 2 - EPS
+    """Whether KiCad connects track ``s`` to a via: the via centre on the track, or a track end
+    inside the via (EPS margin). Mere copper overlap is not enough: KiCad reported a track
+    ending 0.22 mm from the centre of a 0.2 mm-radius via unconnected (la-bga54e, KiCad 10)."""
+    return point_seg_distance(centre, s.a, s.b) <= s.width / 2 - EPS or any(
+        math.dist(centre, e) <= radius - EPS for e in (s.a, s.b)
+    )
 
 
 def on_track_body(p: Point, a: Point, b: Point, half: float) -> bool:
