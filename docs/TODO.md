@@ -44,6 +44,10 @@ topic). At 0.8 mm pitch a dogbone via of 0.2 mm drill / 0.4 mm pad fits the gap 
    stock, alone with decoupling + headers): split power plane (several supply zones on one layer
    from `vibepcb.toml`, tscircuit can't), 6-layer stack-up from the config, power balls to the
    right plane region, pin plan over four sides.
+3b. **Via-in-pad option** (after the ECP5 escape works with dogbones): `[escape.<ref>] via_in_pad = true` puts
+   the via in the ball pad (filled + capped, still mechanically drilled); `fab` output must call for filled vias,
+   `plane_pad_vias` accepts it for those parts only. Compare the same ECP5 board both ways (routing room,
+   results). Needed later for 0.65 / 0.5 mm pitch.
 4. **la-ecp5**: mostly project implementation (the logic analyzer with ECP5 + BGA SDRAM). New
    on the tool side only: escape lengths counted in the length groups, and a `check` warning for a
    bus or diff pair crossing a plane split.

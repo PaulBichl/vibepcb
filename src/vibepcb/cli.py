@@ -24,7 +24,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
-from vibepcb import config, fixes, kicad, paths, schgen, sexpr, tscircuit
+from vibepcb import config, fanout, fixes, kicad, paths, schgen, sexpr, tscircuit
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -84,6 +84,20 @@ def cmd_build(board: str, *, fast: bool = False) -> int:
         print(report)
         print(f"placement errors - fix {board_tsx.relative_to(paths.ROOT)} first", file=sys.stderr)
         return 1
+    if escape := config.load(board).get("escape"):  # BGA escapes by VibePCB: tscircuit routes to their ends
+        unrouted = raw / f"{board}.unrouted.circuit.json"
+        planes = frozenset(config.load(board).get("planes", {}).get("nets", []))
+        plans = fanout.plan_board(unrouted, escape, planes)
+        if problems := [v for p in plans for v in fanout.violations(p)]:
+            print("\n".join(f"  {v}" for v in problems))
+            print(f"escape plan has {len(problems)} problem(s) - see [escape] in vibepcb.toml", file=sys.stderr)
+            return 1
+        fanout.prepare_source(source, unrouted, plans)
+        fanout.save(plans, fanout_path := raw / f"{board}.escapes.json")
+        for p in plans:
+            vias = sum(len(e.vias) for e in p.escapes)
+            print(f"  {p.ref}: {len(p.escapes)} balls escaped ({vias} via dogbones), tscircuit routes to their ends")
+        print(f"  escape plan: {fanout_path.relative_to(paths.ROOT)}")
     # tscircuit evaluates (places + routes) the board on every call: do it once, export the rest from the JSON
     print(f"building {board} with tscircuit (placement + routing) ...")
     tscircuit.export(source, "circuit-json", circuit)

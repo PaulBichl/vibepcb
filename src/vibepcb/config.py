@@ -19,6 +19,10 @@ these from the board's config file into the KiCad project (:func:`fixes.apply_bo
     [planes]                       # nets with a plane: each SMD pad gets its own via to it,
     nets = ["GND", "V3V3"]         #   the router's tracks of the net go (fixes.plane_pad_vias)
 
+    [escape.U2]                    # ball grid escaped by VibePCB, not tscircuit's router (vibepcb.fanout);
+    track_width = 0.1              #   all optional: track_width, clearance, via_diameter, via_drill,
+    layers = ["bottom"]            #   layers (escape layers of balls that can't leave on top)
+
 Net names: a net gets the name of its ``<net>``, else of a named ``<trace name="...">`` on it
 (see ``schgen``), so name the traces a rule should catch.
 """
@@ -34,6 +38,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 CONFIG_NAME = "vibepcb.toml"
+ESCAPE_KEYS = ("track_width", "clearance", "via_diameter", "via_drill", "layers")
 NETCLASS_KEYS = ("track_width", "clearance", "via_diameter", "via_drill", "diff_pair_width", "diff_pair_gap")
 
 
@@ -56,7 +61,7 @@ def load(board: str) -> dict[str, Any]:
 
 
 def validate(data: dict[str, Any], where: str = CONFIG_NAME) -> None:
-    known = {"netclass", "length_group", "diff_pair", "planes"}
+    known = {"netclass", "length_group", "diff_pair", "planes", "escape"}
     if unknown := set(data) - known:
         msg = f"{where}: unknown section(s) {sorted(unknown)} (known: {sorted(known)})"
         raise ConfigError(msg)
@@ -70,6 +75,10 @@ def validate(data: dict[str, Any], where: str = CONFIG_NAME) -> None:
     if "planes" in data and not isinstance(data["planes"].get("nets"), list):
         msg = f"{where}: [planes] needs nets = [...]"
         raise ConfigError(msg)
+    for ref, part in data.get("escape", {}).items():
+        if bad := set(part) - set(ESCAPE_KEYS):
+            msg = f"{where}: escape {ref!r}: unknown key(s) {sorted(bad)} (known: {list(ESCAPE_KEYS)})"
+            raise ConfigError(msg)
     for name, group in data.get("length_group", {}).items():
         if not group.get("nets") or "max_skew" not in group:
             msg = f"{where}: length_group {name!r} needs nets = [...] and max_skew"

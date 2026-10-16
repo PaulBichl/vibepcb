@@ -84,3 +84,16 @@ def test_autorouting_crash() -> None:
         == 'Error: Subcircuit connectivity map key "net4" matches multiple SRJ connections'
     )
     assert tscircuit.autorouting_crash("Circuit JSON written to x.json") is None
+
+
+def test_prune_empty_stops_at_content_and_at_dist(tmp_path: Path) -> None:
+    dist = tmp_path / "dist"
+    (dist / "out" / "b" / ".work" / "src").mkdir(parents=True)
+    (dist / "out" / "keep").mkdir()
+    (dist / "out" / "keep" / "f").write_text("x")
+    tscircuit._prune_empty(dist / "out" / "b" / ".work" / "src", dist)
+    assert sorted(p.name for p in dist.rglob("*")) == ["f", "keep", "out"]
+    (dist / "out" / "keep" / "f").unlink()
+    tscircuit._prune_empty(dist / "out" / "keep", dist)
+    assert not dist.exists()
+    assert tmp_path.exists()

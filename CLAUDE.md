@@ -83,7 +83,9 @@ Extra tscircuit checks: `hatch run tsci check netlist|placement|shorts <file>`
 ## Board config (`boards/<name>/vibepcb.toml`)
 
 What the TSX can't say: KiCad net classes (track width, clearance, diff-pair width/gap by net-name
-pattern), length groups (max skew, e.g. an SDRAM bus) and diff-pair rules. `fix` writes them into the
+pattern), length groups (max skew, e.g. an SDRAM bus), diff-pair rules, plane nets (`[planes]`: a via per
+pad) and BGA escapes (`[escape.<ref>]`: VibePCB escapes the ball grid, tscircuit routes from the escape ends;
+`src/vibepcb/fanout.py`). `fix` writes them into the
 KiCad project; KiCad's DRC enforces them. Format: `src/vibepcb/config.py`. Nets get the name of a
 named `<trace name="SD_DQ0">` (else the chip pin), so name the traces a rule should catch.
 
@@ -152,6 +154,10 @@ test in `tests/test_fixes.py` against the fixtures in `tests/data/`.
   split it over both corners next to the partner, not around one corner.
 - Check display/connector footprints' orientation against the datasheet in the 3D render
   (`fab` top PNG): a dip12 7-segment rotated 90 deg passed every check but read sideways.
+- BGA: don't let tscircuit's router into a ball field (it tangles: 199 acute angles on a 54-ball SDRAM) and
+  don't use its fanout (dogbone + pour crashes, tscircuit/core#4660; saved `pcbTracePaths` + `routeRemaining`
+  crash, #4663). Use `[escape.<ref>]`. Saved paths, if ever needed: group-relative coordinates, the first
+  point within 1e-4 mm of the pad, every connection of the chip covered.
 - SPICE: chips have no models, so per-board ngspice decks with behavioural models live in
   `boards/<name>/sim/*.cir` (`ngspice -b <deck>`).
 

@@ -109,7 +109,17 @@ def evaluate_unrouted(source: Path, output: Path, *, parts_engine: bool = False)
     output.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(circuit, output)
     shutil.rmtree(circuit.parent)
+    _prune_empty(circuit.parent.parent, ROOT / "dist")
     return output
+
+
+def _prune_empty(directory: Path, stop: Path) -> None:
+    """Remove ``directory`` and its parents up to ``stop`` (included) while they are empty."""
+    while directory.is_relative_to(stop) and directory.is_dir() and not any(directory.iterdir()):
+        directory.rmdir()
+        if directory == stop:
+            break
+        directory = directory.parent
 
 
 def availability_warnings(source: Path) -> list[str]:

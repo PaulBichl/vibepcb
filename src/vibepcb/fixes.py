@@ -19,7 +19,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from vibepcb import schgen, sexpr, tracks
+from vibepcb import fanout, schgen, sexpr, tracks
 from vibepcb.sexpr import Sym
 
 if TYPE_CHECKING:
@@ -77,6 +77,203 @@ def _raw_circuit(project: KicadProject) -> Path:
     stem = project.pcb_path.stem
     work = project.directory.parent / ".work" / "raw" / f"{stem}.circuit.json"
     return work if work.exists() else project.directory.parent / "raw" / f"{stem}.circuit.json"
+
+
+def _escape_plans(project: KicadProject) -> list[fanout.Plan]:
+    """The escape plans ``build`` saved next to the circuit JSON (``vibepcb.fanout``)."""
+    name = f"{project.pcb_path.stem}.escapes.json"
+    for raw in (project.directory.parent / ".work" / "raw", project.directory.parent / "raw"):
+        if (raw / name).exists():
+            return fanout.load(raw / name)
+    return []
+
+
+def _kicad_layer(layer: str) -> str:
+    """tscircuit layer name -> KiCad copper layer."""
+    if layer.startswith("inner"):
+        return f"In{layer.removeprefix('inner')}.Cu"
+    return {"top": "F.Cu", "bottom": "B.Cu"}[layer]
+
+
+def _escape_boxes(project: KicadProject) -> list[Box]:
+    """Board-frame boxes of the escaped ball fields, out to the escape ends (``vibepcb.fanout``)."""
+    boxes = []
+    refs = _footprints_by_ref(project.pcb)
+    for plan in _escape_plans(project):
+        fp = refs.get(plan.ref)
+        if fp is None:
+            continue
+        to_board = _fp_to_board(fp)
+        ends = [e.end for e in plan.escapes] + [(b.x, b.y) for b in plan.balls]
+        boxes.append(_bbox([to_board(x, -y) for x, y in ends], grow=plan.rules.via_diameter))
+    return boxes
+
+
+def _box_has(box: Box, p: tuple[float, float]) -> bool:
+    return box[0] <= p[0] <= box[2] and box[1] <= p[1] <= box[3]
+
+
+def _in_escape(node: list[Node], boxes: list[Box]) -> bool:
+    """A track or via lying wholly in an escaped ball field."""
+    keys = ("start", "end") if sexpr.head(node) == "segment" else ("at",)
+    pts = [(_num(c, 1), _num(c, 2)) for k in keys if (c := sexpr.child(node, k)) is not None]
+    return bool(pts) and any(all(_box_has(b, q) for q in pts) for b in boxes)
+
+
+def _declared_net(pcb: list[Node], name: str) -> list[Node] | None:
+    """A pad's ``(net <id> "<name>")`` node of a net the board declares, or None."""
+    for n in sexpr.children(pcb, "net"):
+        if len(n) > 2 and str(n[2]) == name:
+            return [Sym("net"), n[1], name]
+        if len(n) == 2 and str(n[1]) == name:
+            return [Sym("net"), name]
+    return None
+
+
+def apply_escapes(project: KicadProject) -> list[str]:
+    """Real balls and VibePCB's escapes for parts tscircuit routed through a stand-in (``vibepcb.fanout``).
+
+    ``build`` gave each ``[escape.<ref>]`` part a stand-in footprint (a small pad per escape end)
+    and a keepout over the package, so tscircuit's tracks end at the escape ends. Here the stand-in
+    pads become the real balls again (their nets carried over), the planned escape tracks and vias
+    are added, and the keepout goes (the escapes live inside it).
+    """
+    changes = []
+    refs = _footprints_by_ref(project.pcb)
+    names = _net_names(project.pcb)
+    for plan in _escape_plans(project):
+        fp = refs.get(plan.ref)
+        if fp is None:
+            changes.append(f"{plan.ref}: not on the board, escape plan skipped")
+            continue
+        pads = [p for p in fp if sexpr.head(p) == "pad" and isinstance(p, list)]
+        standin = round(fanout.STANDIN_PAD_MM, 4)
+        if not pads or any(abs(_num(sexpr.child(p, "size"), 1) - standin) > 1e-4 for p in pads):
+            continue  # real balls already (or not a stand-in)
+        to_board = _fp_to_board(fp)
+        net_of_pin = {str(p[1]): sexpr.child(p, "net") for p in pads}
+        template = copy.deepcopy(pads[0])
+        for p in pads:
+            fp.remove(p)
+        added = 0
+        for ball in plan.balls:
+            number = ball.pin.removeprefix("pin")
+            pad = copy.deepcopy(template)
+            pad[1] = number
+            pad[3] = Sym("circle")
+            at = sexpr.child(pad, "at")
+            if at is not None:
+                at[1:3] = [Sym(_mm(ball.x)), Sym(_mm(-ball.y))]
+            size = sexpr.child(pad, "size")
+            if size is not None:
+                size[1:] = [Sym(_mm(2 * ball.radius)), Sym(_mm(2 * ball.radius))]
+            layers = sexpr.child(pad, "layers")
+            if layers is not None:
+                layers[1:] = [Sym("F.Cu"), Sym("F.Paste"), Sym("F.Mask")]
+            old_net = sexpr.child(pad, "net")
+            if old_net is not None:
+                pad.remove(old_net)
+            net = net_of_pin.get(number) or (_declared_net(project.pcb, ball.net_name) if ball.net_name else None)
+            if net is not None:  # the stand-in pad's net, else (a via-only plane ball) the plane net
+                pad.insert(len(pad) - 1, copy.deepcopy(net))
+                net_of_pin[number] = net
+            uid = sexpr.child(pad, "uuid")
+            if uid is not None:
+                new = str(uuid.uuid5(uuid.NAMESPACE_OID, f"ball:{plan.ref}:{number}"))
+                uid[1] = Sym(new) if isinstance(uid[1], Sym) else new
+            fp.append(pad)
+        for g in plan.graphics:  # the courtyard the stand-in left out (tscircuit: courtyard over a keepout)
+            if g["kind"] != "courtyardoutline":
+                continue
+            ring: list[tuple[float, float]] = []
+            for q in g["route"]:  # tscircuit repeats corner points; KiCad wants a closed outline
+                if not ring or math.dist(ring[-1], q) > 1e-6:
+                    ring.append((q[0], q[1]))
+            if len(ring) > 2 and math.dist(ring[0], ring[-1]) > 1e-6:
+                ring.append(ring[0])
+            for k, (a, b) in enumerate(itertools.pairwise(ring)):
+                line_uuid = uuid.uuid5(uuid.NAMESPACE_OID, f"courtyard:{plan.ref}:{k}")
+                fp.append(sexpr.loads(
+                    f"(fp_line (start {_mm(a[0])} {_mm(-a[1])}) (end {_mm(b[0])} {_mm(-b[1])}) "
+                    f'(stroke (width 0.05) (type solid)) (layer "F.CrtYd") (uuid "{line_uuid}"))'
+                ))  # fmt: skip
+        r = plan.rules
+        for esc in plan.escapes:
+            pad_net = net_of_pin.get(esc.pin.removeprefix("pin"))
+            net_node = _net_node(project.pcb, _net_of([Sym("pad"), pad_net], names)) if pad_net else None
+            nodes = []
+            for layer, pts in esc.tracks:
+                board = [to_board(x, -y) for x, y in pts]
+                for a, b in itertools.pairwise(board):
+                    key = f"escape:{plan.ref}:{esc.pin}:{_mm(a[0])},{_mm(a[1])}:{_mm(b[0])},{_mm(b[1])}"
+                    nodes.append(sexpr.loads(
+                        f"(segment (start {_mm(a[0])} {_mm(a[1])}) (end {_mm(b[0])} {_mm(b[1])}) "
+                        f'(width {_mm(r.track_width)}) (layer "{_kicad_layer(layer)}") '
+                        f'(uuid "{uuid.uuid5(uuid.NAMESPACE_OID, key)}"))'
+                    ))  # fmt: skip
+            for x, y in esc.vias:
+                vx, vy = to_board(x, -y)
+                key = f"escape-via:{plan.ref}:{esc.pin}:{_mm(vx)},{_mm(vy)}"
+                nodes.append(sexpr.loads(
+                    f"(via (at {_mm(vx)} {_mm(vy)}) (size {_mm(r.via_diameter)}) (drill {_mm(r.via_drill)}) "
+                    f'(layers "F.Cu" "B.Cu") (uuid "{uuid.uuid5(uuid.NAMESPACE_OID, key)}"))'
+                ))  # fmt: skip
+            for node in nodes:
+                if net_node is not None:
+                    node.insert(len(node) - 1, copy.deepcopy(net_node))
+                project.pcb.append(node)
+            added += len(nodes)
+        # the keepout tscircuit kept the router out with: the escapes are inside it
+        x0, y0, x1, y1 = plan.keepout
+        box = _bbox([to_board(x, -y) for x, y in ((x0, y0), (x1, y1))])
+        dropped = 0
+        for zone in [z for z in sexpr.children(project.pcb, "zone") if sexpr.child(z, "keepout") is not None]:
+            pts = [(_num(q, 1), _num(q, 2)) for q in sexpr.walk(zone) if isinstance(q, list) and sexpr.head(q) == "xy"]
+            if pts and all(abs(a - b) < 0.05 for a, b in zip(_bbox(pts), box, strict=True)):
+                project.pcb.remove(zone)
+                dropped += 1
+        # tscircuit cut the keepout out of its pours too: a zone's extra polygons are holes (its voids,
+        # merged into large shapes). Those over the package go; KiCad's refill keeps its own clearances.
+        holes = 0
+        opened: list[tuple[str, str, list[tuple[float, float]]]] = []  # (net, layer, hole outline)
+        for zone in list(sexpr.children(project.pcb, "zone")):
+            for poly in list(sexpr.children(zone, "polygon"))[1:]:
+                pts = [
+                    (_num(q, 1), _num(q, 2)) for q in sexpr.walk(poly) if isinstance(q, list) and sexpr.head(q) == "xy"
+                ]
+                if pts and _overlaps(_bbox(pts), box):
+                    zone.remove(poly)
+                    holes += 1
+                    opened.append((_net_of(zone, names), _layer(zone), pts))
+        # tscircuit's pour pieces inside an opened hole now overlap the zone around them (zones_intersect)
+        for zone in list(sexpr.children(project.pcb, "zone")):
+            outline = sexpr.child(zone, "polygon")
+            pts = [
+                (_num(q, 1), _num(q, 2))
+                for q in sexpr.walk(outline or [])
+                if isinstance(q, list) and sexpr.head(q) == "xy"
+            ]
+            zone_net, zone_layer = _net_of(zone, names), _layer(zone)
+            if pts and any(n == zone_net and lay == zone_layer and all(tracks.point_in_polygon(q, hole) for q in pts)
+                           for n, lay, hole in opened):  # fmt: skip
+                project.pcb.remove(zone)
+        # plane copper has to pass between the vias at ball pitch: zone clearance / minimum width to suit
+        pitch = min((abs(a.x - b.x) for a in plan.balls for b in plan.balls if abs(a.x - b.x) > 0.01), default=1.0)
+        gap = pitch - r.via_diameter - 2 * r.clearance
+        for zone in sexpr.children(project.pcb, "zone"):
+            if sexpr.child(zone, "keepout") is not None:
+                continue
+            clearance = sexpr.child(sexpr.child(zone, "connect_pads") or [], "clearance")
+            if clearance is not None and _num(clearance, 1) > r.clearance:
+                clearance[1] = Sym(_mm(r.clearance))
+            thickness = sexpr.child(zone, "min_thickness")
+            if thickness is not None and gap > 0 and _num(thickness, 1) > gap * 0.75:
+                thickness[1] = Sym(_mm(round(gap * 0.75, 3)))
+        changes.append(
+            f"{plan.ref}: {len(plan.balls)} balls back in place of the stand-in, "
+            f"{added} escape tracks/vias added, {dropped} keepout(s) and {holes} pour hole(s) removed"
+        )
+    return changes
 
 
 def rename_auto_nets(project: KicadProject) -> list[str]:
@@ -1505,6 +1702,14 @@ def _source(seg: tracks.Seg) -> list[Node]:
     return seg.source
 
 
+def _drop(tree: list[Node], node: list[Node]) -> None:
+    """Remove exactly this node (by identity, not ``==``: duplicate tracks are equal), if still there."""
+    for k, n in enumerate(tree):
+        if n is node:
+            del tree[k]
+            return
+
+
 def _segment_node(template: list[Node], a: tracks.Point, b: tracks.Point, width: float) -> list[Node]:
     node = copy.deepcopy(template)
     for key, values in (("start", a), ("end", b), ("width", (width,))):
@@ -1720,7 +1925,7 @@ def _open_junctions(project: KicadProject, clearance: float, edge_clearance: flo
         touched.update(i for i, _ in users)
         for i, end in users:
             if i == collapsed:
-                project.pcb.remove(_source(copper.segs[i]))
+                _drop(project.pcb, _source(copper.segs[i]))
                 continue
             node = sexpr.child(_source(copper.segs[i]), ("start", "end")[end])
             if node is not None:
@@ -1777,7 +1982,7 @@ def _clean_round(
             continue
         index = min(project.pcb.index(_source(s)) for s in segs)
         for s in segs:
-            project.pcb.remove(_source(s))
+            _drop(project.pcb, _source(s))
         project.pcb[index:index] = [_segment_node(template, a, b, w) for template, a, b, w, _ in result.pieces()]
         changed = stale = True
         for key, value in result.stats().items():
@@ -2229,7 +2434,7 @@ def _relocate_via_rerouting(
             at[1:3] = [Sym(_mm(q[0])), Sym(_mm(q[1]))]
             for r in stubs:
                 for seg in r.segs:
-                    project.pcb.remove(_source(seg))
+                    _drop(project.pcb, _source(seg))
             for r, route, width, replaced in new_runs:
                 template = _source(r.segs[0])
 
@@ -2241,7 +2446,7 @@ def _relocate_via_rerouting(
                 old_segs = [s for s in r.segs if on_replaced(s.a) and on_replaced(s.b)]
                 index_ = min(project.pcb.index(_source(s)) for s in old_segs)
                 for s in old_segs:
-                    project.pcb.remove(_source(s))
+                    _drop(project.pcb, _source(s))
                 for k, (a, b) in enumerate(itertools.pairwise(route)):
                     project.pcb.insert(index_ + k, _segment_node(template, a, b, width))
             return q
@@ -2711,7 +2916,7 @@ def reroute_tracks(project: KicadProject) -> list[str]:
             template = _source(run.segs[0])
             index = min(project.pcb.index(_source(s)) for s in run.segs)
             for s in run.segs:
-                project.pcb.remove(_source(s))
+                _drop(project.pcb, _source(s))
             for k, (p, q) in enumerate(itertools.pairwise(new_points)):
                 project.pcb.insert(index + k, _segment_node(template, p, q, width))
                 made.add(_piece_key(p, q))
@@ -2963,7 +3168,7 @@ def remove_antennas(project: KicadProject, *, filled_zones: bool = False) -> lis
         removed_segs += [s for k, s in enumerate(segs) if k in segs_i and all(s is not r for r in removed_segs)]
         island_vias |= {id(net_vias[v][0]) for v in vias_i}
     for s in removed_segs:
-        project.pcb.remove(_source(s))
+        _drop(project.pcb, _source(s))
     alive = [s for s in copper.segs if all(s is not r for r in removed_segs)]
 
     removed_vias = 0
@@ -3192,7 +3397,7 @@ def prune_pour_tracks(
         if not fills and pads:  # the track lies in pad gaps only: the pads must share a piece
             fills = set.intersection(*(pieces_at_pad(k, s) for k in pads))
         if fills and all(fills & pieces_at_pad(k, s) for k in pads):
-            project.pcb.remove(_source(s))
+            _drop(project.pcb, _source(s))
             pruned += 1
     changes = [f"pours: removed {pruned} track segment(s) the pour already connects"] if pruned else []
     return changes + remove_antennas(project, filled_zones=True)
@@ -3265,6 +3470,7 @@ def plane_pad_vias(project: KicadProject) -> list[str]:
     if not nets:
         return []
     changes = []
+    escapes = _escape_boxes(project)  # escaped ball fields (vibepcb.fanout) keep their own escapes
     for net in nets:
         copper = _copper(project.pcb)
         if not any(n == net for n, _ in copper.zones):
@@ -3274,14 +3480,21 @@ def plane_pad_vias(project: KicadProject) -> list[str]:
         routed = [
             n
             for n in project.pcb
-            if sexpr.head(n) in ("segment", "via") and isinstance(n, list) and _net_of(n, names) == net
+            if sexpr.head(n) in ("segment", "via")
+            and isinstance(n, list)
+            and _net_of(n, names) == net
+            and not _in_escape(n, escapes)
         ]
         for n in routed:
             project.pcb.remove(n)
         copper = _copper(project.pcb)
         others = [o for o in copper.obstacles() if o.net != net]
         added: list[list[Node]] = []
-        smd = [o for o in copper.pads_by_net.get(net, []) if len(o.layers & frozenset(COPPER_LAYERS)) == 1]
+        smd = [
+            o
+            for o in copper.pads_by_net.get(net, [])
+            if len(o.layers & frozenset(COPPER_LAYERS)) == 1 and not any(_box_has(b, o.centre) for b in escapes)
+        ]
         with_via: list[tracks.Obstacle] = []
         no_room = []
         for pad in smd:
@@ -3352,6 +3565,7 @@ def _pad_link(
 FIXES: dict[str, Fix] = {
     "rename_auto_nets": rename_auto_nets,
     "propagate_split_pad_nets": propagate_split_pad_nets,
+    "apply_escapes": apply_escapes,
     "repair_zero_width_tracks": repair_zero_width_tracks,
     "drop_tracks_inside_pads": drop_tracks_inside_pads,
     "merge_duplicate_vias": merge_duplicate_vias,
