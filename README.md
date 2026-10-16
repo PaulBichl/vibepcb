@@ -1,12 +1,13 @@
 # VibePCB
 
-**LLM-driven PCB design: tscircuit for generation, KiCad for post-processing.**
+**LLM-driven PCB design: tscircuit routes, VibePCB repairs, KiCad checks.**
 
 You describe a board in plain words. An AI coding agent (Claude Code or similar) designs it
-as code in [tscircuit](https://tscircuit.com), lets tscircuit place and route it, and VibePCB
-turns the result into a clean [KiCad](https://www.kicad.org) project: checked by KiCad's own
-rule checks, with schematic, BOM and fabrication files. The tooling is written for the agent;
-you talk to the agent and review what comes out.
+as code in [tscircuit](https://tscircuit.com) (parts, nets, placement), tscircuit's autorouter
+routes it, and VibePCB repairs the routed board and turns it into a clean
+[KiCad](https://www.kicad.org) project: checked by KiCad's own rule checks, with schematic, BOM
+and fabrication files. KiCad does no routing here: it checks, refills the pours and writes the
+fab files. The tooling is written for the agent; you talk to the agent and review what comes out.
 
 ## What you get
 
@@ -32,26 +33,34 @@ For every board, without touching an EDA tool:
 ## How it works
 
 ```
-your description ─▶ agent writes TSX ─▶ tscircuit: place + route ─▶ KiCad files ─▶ VibePCB fixes ─▶ KiCad DRC/ERC ─▶ fab files
-                         ▲                                                                              │
-                         └────────────────────── agent reads the findings and iterates ────────────────┘
+your description ─▶ agent writes TSX ─▶ tscircuit routes ─▶ KiCad files ─▶ VibePCB repairs ─▶ KiCad DRC/ERC ─▶ fab files
+                         ▲                                                                            │
+                         └─────────────────────── agent reads the findings and iterates ─────────────┘
 ```
 
-1. **Generation (tscircuit).** The circuit is React/TSX: parts (imported from JLCPCB by part
-   number), nets, placement hints and board rules. tscircuit's autorouter places and routes it,
-   and the circuit is exported to KiCad once. The agent uses tscircuit's own agent skill for the
-   syntax, so it doesn't invent props.
-2. **Post-processing (KiCad).** tscircuit's KiCad export and router have systematic quirks
-   (tracks bent sharper than the rules allow, vias on neighbouring pins, duplicate vias, stubs,
-   missing schematic symbols). VibePCB fixes them with scripted, tested fixes that follow
-   KiCad's own connection rules; any net KiCad finds broken afterwards is rolled back to its
-   routed state, so a fix never disconnects anything. The schematic is generated from the
-   netlist with real KiCad symbols.
-3. **Checks decide, not the eye.** KiCad's DRC and ERC plus house rules (poured layers, bend
-   angles, antennas) decide when a board is done. Fab files are only made for boards that pass.
+Who does what:
 
-Anything the agent learns about tscircuit's export becomes a fix in the tooling, so the next
-board starts from there. The full list of fixes and why each exists: [docs/TOOLING.md](docs/TOOLING.md#52-table-of-all-fixes).
+| Step | Done by | What |
+|------|---------|------|
+| Circuit + placement | the agent, in TSX | parts (imported from JLCPCB by part number), nets, every part's position, board rules |
+| Routing | tscircuit's autorouter | all tracks and vias, a first draft of the copper pours; exported to KiCad once |
+| BGA escape | VibePCB | the routes out of a ball grid (tscircuit's router can't); tscircuit routes on from their ends |
+| Repair | VibePCB, editing the KiCad files | removes the router's quirks (sharp bends, vias on neighbouring pins, duplicate vias, stubs), a via per pad of a power plane, small local reroutes; generates the schematic with real KiCad symbols |
+| Checks | KiCad (`kicad-cli`) | DRC + ERC on refilled pours, plus house rules (poured layers, bend angles, antennas) |
+| Output | KiCad (`kicad-cli`) | Gerbers, drill, BOM / pick-and-place, schematic PDF, 3D renders |
+
+1. **Generation (tscircuit).** The circuit is React/TSX. The agent uses tscircuit's own agent
+   skill for the syntax, so it doesn't invent props.
+2. **Repair (VibePCB).** Scripted, tested fixes that follow KiCad's own connection rules; any net
+   KiCad finds broken afterwards is rolled back to its routed state, so a fix never disconnects
+   anything. Board settings tscircuit can't express (net classes, length groups, diff-pair rules,
+   plane nets, BGA escapes) come from a `vibepcb.toml` next to the board.
+3. **Checks decide, not the eye.** KiCad's DRC and ERC plus the house rules decide when a board
+   is done. Fab files are only made for boards that pass.
+
+Anything the agent learns about tscircuit's router and export becomes a fix in the tooling, so
+the next board starts from there. The full list of fixes and why each exists:
+[docs/TOOLING.md](docs/TOOLING.md#52-table-of-all-fixes).
 
 ## Getting started
 
@@ -77,8 +86,10 @@ Each board's output is in `out/<board>/`: its `README.md` says what to open (the
 
 ## Limits
 
-- The autorouter is tscircuit's. Dense spots (0.5 mm-pitch chips) can need a few placement
-  iterations, which the agent runs itself; a large 4-layer board takes minutes per route.
+- The router is tscircuit's: routing quality depends on it. Dense spots (0.5 mm-pitch chips) can
+  need a few placement iterations, which the agent runs itself; a large 4-layer board takes
+  minutes per route. Ball grids (BGA) are escaped by VibePCB, the rest is still tscircuit's.
+- Length groups and differential pairs are checked (KiCad DRC), not tuned: no meanders.
 - Analog performance isn't checked by the tooling. For that, the agent writes SPICE decks per
   board (see the SMU example).
 - Review before you order: the checks catch rule violations, not a wrong design choice. Look at
