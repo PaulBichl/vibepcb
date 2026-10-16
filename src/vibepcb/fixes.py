@@ -46,6 +46,7 @@ class KicadProject:
     sch_path: Path
     before_track_fixes: list[Node] | None = None  # board copy taken by apply_all (see restore_nets)
     config: dict[str, Any] = field(default_factory=dict)  # boards/<board>/vibepcb.toml (see vibepcb.config)
+    routes: dict[str, Any] = field(default_factory=dict)  # boards/<board>/routes.toml (see vibepcb.routes)
 
     @classmethod
     def load(cls, directory: Path, stem: str) -> KicadProject:
@@ -3568,10 +3569,31 @@ def _pad_link(
     return None
 
 
+UNROUTED_NAME = "unrouted.kicad_pcb"
+
+
+def apply_routes(project: KicadProject) -> list[str]:
+    """Manual routing (``[routing] mode = "manual"``): ``routes.toml`` becomes tracks and vias (``vibepcb.routes``).
+
+    The board as it is before the routes goes to ``.work/unrouted.kicad_pcb``: ``pcb route`` redoes the
+    routes from it in seconds. Entries that fail are listed; the board keeps what did route.
+    """
+    if project.config.get("routing", {}).get("mode") != "manual":
+        return []
+    from vibepcb import routes
+
+    snapshot = project.directory.parent / ".work" / UNROUTED_NAME
+    snapshot.parent.mkdir(parents=True, exist_ok=True)
+    sexpr.dump(project.pcb, snapshot)
+    report = routes.apply(project, project.routes)
+    return [f"{r.entry}: {r.detail}" if r.ok else f"FAILED {r.entry}: {r.detail}" for r in report.results]
+
+
 FIXES: dict[str, Fix] = {
     "rename_auto_nets": rename_auto_nets,
     "propagate_split_pad_nets": propagate_split_pad_nets,
     "apply_escapes": apply_escapes,
+    "apply_routes": apply_routes,
     "repair_zero_width_tracks": repair_zero_width_tracks,
     "drop_tracks_inside_pads": drop_tracks_inside_pads,
     "merge_duplicate_vias": merge_duplicate_vias,

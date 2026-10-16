@@ -1,6 +1,12 @@
 # Routing plan: agent-directed ("manual") routing
 
-Status: plan, not started (written 2026-10-16). Implement phase by phase; each phase ends with its
+Status (2026-10-16): phase 1 done; phase 2 partly (router, `routes.toml` `[[route]]` pad-to-pad / net,
+`pcb route`; manual-mode pipeline and the la-main-manual acceptance still open).
+Deviations so far: `board.py` wraps `fixes._copper` instead of moving it (no refactor of `fixes` yet);
+the router's grid search runs coarse (0.1 mm) then fine (0.05 mm) with a weighted heuristic; multi-pad nets
+are chained pad to pad (no T-junction to track copper yet); `REF.pinlabel` pad names not resolved yet;
+the search area is not limited to the outline (edge clearance only).
+Original text: Implement phase by phase; each phase ends with its
 acceptance test green and `hatch run test` / `style` / `type` passing. Keep this file up to date as
 phases land (what was done, what changed from the plan).
 

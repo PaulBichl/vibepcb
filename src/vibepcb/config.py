@@ -19,6 +19,9 @@ these from the board's config file into the KiCad project (:func:`fixes.apply_bo
     [planes]                       # nets with a plane: each SMD pad gets its own via to it,
     nets = ["GND", "V3V3"]         #   the router's tracks of the net go (fixes.plane_pad_vias)
 
+    [routing]                      # mode = "manual": tscircuit places only, routes.toml routes (vibepcb.routes);
+    mode = "manual"                #   default "auto" = tscircuit's autorouter
+
     [escape.U2]                    # ball grid escaped by VibePCB, not tscircuit's router (vibepcb.fanout);
     track_width = 0.1              #   all optional: track_width, clearance, via_diameter, via_drill,
     layers = ["bottom"]            #   layers (escape layers of balls that can't leave on top)
@@ -61,7 +64,7 @@ def load(board: str) -> dict[str, Any]:
 
 
 def validate(data: dict[str, Any], where: str = CONFIG_NAME) -> None:
-    known = {"netclass", "length_group", "diff_pair", "planes", "escape"}
+    known = {"netclass", "length_group", "diff_pair", "planes", "escape", "routing"}
     if unknown := set(data) - known:
         msg = f"{where}: unknown section(s) {sorted(unknown)} (known: {sorted(known)})"
         raise ConfigError(msg)
@@ -72,6 +75,9 @@ def validate(data: dict[str, Any], where: str = CONFIG_NAME) -> None:
         if bad := set(cls) - {"nets", *NETCLASS_KEYS}:
             msg = f"{where}: netclass {name!r}: unknown key(s) {sorted(bad)}"
             raise ConfigError(msg)
+    if data.get("routing", {}).get("mode", "auto") not in ("auto", "manual"):
+        msg = f'{where}: [routing] mode must be "auto" (tscircuit routes) or "manual" (routes.toml)'
+        raise ConfigError(msg)
     if "planes" in data and not isinstance(data["planes"].get("nets"), list):
         msg = f"{where}: [planes] needs nets = [...]"
         raise ConfigError(msg)

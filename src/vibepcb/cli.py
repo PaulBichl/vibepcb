@@ -3,6 +3,8 @@
 vibepcb new <board>     scaffold boards/<board>/index.circuit.tsx
 vibepcb build <board>   [--fast] tscircuit -> out/<board>/raw (KiCad zip, netlist, SVG/PNG previews)
 vibepcb fix <board>     raw -> out/<board>/kicad, apply post-processing fixes
+vibepcb route <board>   [--only NET] [--dry-run] routes.toml -> tracks on the KiCad board (seconds, no rebuild)
+vibepcb inspect <board> [--area x0 y0 x1 y1] [--net PAT] [--layer L] [--scale PX/MM] [--source unrouted]  PNG of the board
 vibepcb check <board>   KiCad DRC + ERC -> out/<board>/reports (after refill: drop tracks the GND pour provides)
 vibepcb all <board>     [--fast] build + fix + check
 vibepcb fab <board>     part availability check, gerbers/drill zip, BOM, pick-and-place, schematic PDF, 3D renders
@@ -24,7 +26,8 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
-from vibepcb import config, fanout, fixes, kicad, paths, schgen, sexpr, tscircuit
+from vibepcb import board as board_model
+from vibepcb import config, fanout, fixes, inspect, kicad, paths, routes, schgen, sexpr, tscircuit
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -98,6 +101,16 @@ def cmd_build(board: str, *, fast: bool = False) -> int:
             vias = sum(len(e.vias) for e in p.escapes)
             print(f"  {p.ref}: {len(p.escapes)} balls escaped ({vias} via dogbones), tscircuit routes to their ends")
         print(f"  escape plan: {fanout_path.relative_to(paths.ROOT)}")
+    if config.load(board).get("routing", {}).get("mode") == "manual":  # routes.toml routes, tscircuit only places
+        print(f"building {board} with tscircuit (placement only; routing: routes.toml) ...")
+        tscircuit.evaluate_unrouted(source, circuit)
+        tscircuit.build(circuit, raw, board, JSON_FORMATS)
+        if shutil.which("rsvg-convert"):
+            _png(raw / f"{board}.pcb.svg", paths.preview_dir(board) / "routed.png", 1200)
+        print(
+            f"  tscircuit output: {raw.relative_to(paths.ROOT)}/ (internal; `fix` makes the KiCad project and routes it)"
+        )
+        return 0
     # tscircuit evaluates (places + routes) the board on every call: do it once, export the rest from the JSON
     print(f"building {board} with tscircuit (placement + routing) ...")
     tscircuit.export(source, "circuit-json", circuit)
@@ -130,6 +143,7 @@ def cmd_fix(board: str) -> int:
         print(f"  schematic generated from {circuit.relative_to(paths.ROOT)}")
     project = fixes.KicadProject.load(target, board)
     project.config = config.load(board)
+    project.routes = routes.load(paths.board_source(board).parent / routes.ROUTES_NAME)
     report = fixes.apply_all(project)
     for name, changes in report.items():
         for change in changes:
@@ -161,6 +175,58 @@ def cmd_fix(board: str) -> int:
         print(f"  schematic: {svg.relative_to(paths.ROOT)}")
     print(f"KiCad project: {(target / f'{board}.kicad_pro').relative_to(paths.ROOT)}")
     _write_index(board)
+    return 0
+
+
+def cmd_route(board: str, *, only: str | None = None, dry_run: bool = False) -> int:
+    """Quick loop: ``routes.toml`` onto the KiCad board as ``fix`` had it before routing, without the clean-up fixes."""
+    spec = routes.load(paths.board_source(board).parent / routes.ROUTES_NAME)
+    if not spec:
+        print(f"no {routes.ROUTES_NAME} for {board}", file=sys.stderr)
+        return 1
+    target = paths.kicad_dir(board)
+    pcb = target / f"{board}.kicad_pcb"
+    snapshot = paths.work_dir(board) / fixes.UNROUTED_NAME  # written by `fix` (manual mode) before it routes
+    if not snapshot.exists():
+        print(f"{snapshot.relative_to(paths.ROOT)} missing - run `pcb fix {board}` first ([routing] mode = \"manual\")",
+              file=sys.stderr)  # fmt: skip
+        return 1
+    project = fixes.KicadProject.load(target, board)
+    project.pcb = sexpr.load(snapshot)
+    project.config = config.load(board)
+    report = routes.apply(project, spec, only=only)
+    for r in report.results:
+        print(f"  {'routed' if r.ok else 'FAILED'} {r.entry}: {r.detail}")
+    print(f"{len(report.results) - len(report.failed)} routed, {len(report.failed)} failed")
+    if not dry_run:
+        sexpr.dump(project.pcb, pcb)
+        print(f"saved {pcb.relative_to(paths.ROOT)}")
+    return 1 if report.failed else 0
+
+
+def cmd_inspect(
+    board: str, area: list[float] | None, net: str | None, layers: list[str] | None, scale: float, source: str
+) -> int:
+    """PNG of the board (or an area) with a mm grid and pad labels into ``.work/preview/inspect.png``."""
+    target = paths.kicad_dir(board)
+    project = fixes.KicadProject.load(target, board)
+    if source == "unrouted":
+        project.pcb = sexpr.load(paths.work_dir(board) / fixes.UNROUTED_NAME)
+    project.config = config.load(board)
+    model = board_model.Board.from_project(project)
+    if area is None:
+        xs = [p for e in model.edges for p in (e.points[0][0], e.points[-1][0])]
+        ys = [p for e in model.edges for p in (e.points[0][1], e.points[-1][1])]
+        area = [min(xs) - 1, min(ys) - 1, max(xs) + 1, max(ys) + 1]
+    box = (area[0], area[1], area[2], area[3])
+    svg = paths.preview_dir(board) / "inspect.svg"
+    svg.parent.mkdir(parents=True, exist_ok=True)
+    svg.write_text(inspect.render(project, model, box, px_per_mm=scale, layers=layers, net=net), encoding="utf-8")
+    png = svg.with_suffix(".png")
+    _png(svg, png, round((box[2] - box[0]) * scale))
+    print(f"{png.relative_to(paths.ROOT)}  ({box[0]:g},{box[1]:g})-({box[2]:g},{box[3]:g}) mm, {scale:g} px/mm")
+    for line in inspect.summary(project, box, net)[:80]:
+        print(f"  {line}")
     return 0
 
 
@@ -328,11 +394,20 @@ def cmd_docs() -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="vibepcb", description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("new", "build", "fix", "check", "all", "fab", "publish"):
+    for name in ("new", "build", "fix", "route", "inspect", "check", "all", "fab", "publish"):
         command_parser = sub.add_parser(name)
         command_parser.add_argument("board")
         if name in ("build", "all"):
             command_parser.add_argument("--fast", action="store_true", help="router effort 2x (quick experiments)")
+        if name == "inspect":
+            command_parser.add_argument("--area", nargs=4, type=float, metavar=("X0", "Y0", "X1", "Y1"))
+            command_parser.add_argument("--net", help="net pattern drawn at full strength, others dimmed")
+            command_parser.add_argument("--layer", action="append", help="copper layer to draw (repeatable)")
+            command_parser.add_argument("--scale", type=float, default=40.0, help="pixels per mm")
+            command_parser.add_argument("--source", choices=["current", "unrouted"], default="current")
+        if name == "route":
+            command_parser.add_argument("--only", help="route only nets matching this pattern")
+            command_parser.add_argument("--dry-run", action="store_true", help="report, don't save")
     sub.add_parser("list")
     sub.add_parser("docs")
     args = parser.parse_args(argv)
@@ -349,9 +424,19 @@ def main(argv: list[str] | None = None) -> int:
             case command:
                 if command == "build":
                     return cmd_build(args.board, fast=args.fast)
+                if command == "inspect":
+                    return cmd_inspect(args.board, args.area, args.net, args.layer, args.scale, args.source)
+                if command == "route":
+                    return cmd_route(args.board, only=args.only, dry_run=args.dry_run)
                 handler = {"new": cmd_new, "fix": cmd_fix, "check": cmd_check, "fab": cmd_fab, "publish": cmd_publish}
                 return handler[command](args.board)
-    except (tscircuit.TscircuitError, kicad.KicadCliError, config.ConfigError, FileNotFoundError) as exc:
+    except (
+        tscircuit.TscircuitError,
+        kicad.KicadCliError,
+        config.ConfigError,
+        routes.RoutesError,
+        FileNotFoundError,
+    ) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
