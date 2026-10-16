@@ -10,6 +10,7 @@ from __future__ import annotations
 import copy
 import datetime
 import functools
+import importlib
 import itertools
 import json
 import logging
@@ -3580,7 +3581,7 @@ def apply_routes(project: KicadProject) -> list[str]:
     """
     if project.config.get("routing", {}).get("mode") != "manual":
         return []
-    from vibepcb import routes
+    routes = importlib.import_module("vibepcb.routes")  # routes imports this module: no import at the top
 
     snapshot = project.directory.parent / ".work" / UNROUTED_NAME
     snapshot.parent.mkdir(parents=True, exist_ok=True)
