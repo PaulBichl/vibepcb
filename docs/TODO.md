@@ -9,6 +9,10 @@
   skip the routing pass.
 - **`check` post-fill speed**: not profiled yet (minutes on a 238-part board).
 
+## Agent-directed routing (next big topic)
+
+Plan for implementation (phases, formats, acceptance tests): [ROUTING-PLAN.md](ROUTING-PLAN.md).
+
 ## BGA support (future topic)
 
 Status (tscircuit core 0.0.2891, autorouter 0.0.982, ECP5 CABGA-256 at 0.8 mm on 6 layers, see
