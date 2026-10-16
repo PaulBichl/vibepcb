@@ -1638,6 +1638,7 @@ def _zone_polygons(zone: list[Node], *, filled: bool) -> list[tuple[str, list[tr
 
 
 KEEPOUT_NET = "<keepout>"  # pseudo net of keepout areas: other copper to every real net
+KEEPOUT_VIA_NET = "<via-keepout>"  # keepout areas that only forbid vias
 KEEPOUT_INSET_MM = 0.09  # <= any board clearance (fab minimum): copper never ends up inside the keepout
 
 
@@ -1686,9 +1687,14 @@ def _copper(pcb: list[Node], *, filled_zones: bool = False) -> _Copper:
         if keepout is None:
             for layer, poly in _zone_polygons(zone, filled=filled_zones):
                 zones.setdefault((_net_of(zone, names), layer), []).append(poly)
-        elif sexpr.child(keepout, "tracks") in (["tracks", Sym("not_allowed")], ["tracks", "not_allowed"]):
-            for layer, poly in _zone_polygons(zone, filled=False):
-                keepouts.append(tracks.Obstacle(KEEPOUT_NET, frozenset({layer}), _inset(poly), polygon=True))
+        else:
+            blocked = {
+                str(r[0]) for r in keepout[1:] if isinstance(r, list) and len(r) > 1 and str(r[1]) == "not_allowed"
+            }
+            net = KEEPOUT_NET if "tracks" in blocked else KEEPOUT_VIA_NET if "vias" in blocked else None
+            if net is not None:
+                for layer, poly in _zone_polygons(zone, filled=False):
+                    keepouts.append(tracks.Obstacle(net, frozenset({layer}), _inset(poly), polygon=True))
     return _Copper(names, segs, vias, pads, rect_pads, edges, zones, keepouts)
 
 
@@ -3570,6 +3576,79 @@ def _pad_link(
     return None
 
 
+KEEPOUT_ZONE_PREFIX = "vibepcb:keepout:"
+
+
+def _part_area(project: KicadProject, ref: str) -> Box | None:
+    """Board-frame bounding box of a part: its pads and its courtyard (F/B.CrtYd)."""
+    fp = _footprints_by_ref(project.pcb).get(ref)
+    if fp is None:
+        return None
+    to_board = _fp_to_board(fp)
+    points = []
+    for pad in sexpr.children(fp, "pad"):
+        points += _pad_corners(pad, to_board)
+    for g in fp:
+        if isinstance(g, list) and _layer(g) in ("F.CrtYd", "B.CrtYd"):
+            points += [to_board(x, y) for x, y in _graphic_points(g)]
+    return _bbox(points) if points else None
+
+
+def apply_keepouts(project: KicadProject) -> list[str]:
+    """Keepout areas from the board config (``[keepout.<name>]``, see ``vibepcb.config``).
+
+    A global pour (GND) under an antenna, a crystal or a switching node is wrong; here each keepout is a
+    KiCad rule area over a part's pads / courtyard (or a box) that forbids a pour, tracks and / or vias
+    on the chosen layers. KiCad's zone fill and DRC enforce it, and the router stays out of the track and
+    via areas. Rewritten from the config on every run.
+    """
+    cfg = project.config.get("keepout", {})
+    for z in [z for z in sexpr.children(project.pcb, "zone") if _is_keepout_zone(z)]:
+        project.pcb.remove(z)
+    layer_names = {
+        str(n[1]) for n in (sexpr.child(project.pcb, "layers") or [])[1:] if isinstance(n, list) and len(n) > 1
+    }
+    board_layers = [lay for lay in COPPER_LAYERS if lay in layer_names]
+    changes = []
+    for name, entry in cfg.items():
+        if "area" in entry:
+            x0, y0, x1, y1 = (float(v) for v in entry["area"])
+        else:
+            part = _part_area(project, entry["ref"])
+            if part is None:
+                changes.append(f"{name}: part {entry['ref']} not on the board, keepout skipped")
+                continue
+            x0, y0, x1, y1 = part
+        grow = float(entry.get("margin", 0.0))
+        x0, y0, x1, y1 = x0 - grow, y0 - grow, x1 + grow, y1 + grow
+        layers = [lay for lay in entry.get("layers", board_layers) if lay in board_layers]
+        block = set(entry.get("block", ["pour"]))
+        rules = (
+            "".join(
+                f"({rule} {'not_allowed' if key in block else 'allowed'})"
+                for key, rule in (("tracks", "tracks"), ("vias", "vias"), ("pour", "copperpour"))
+            )
+            + "(pads allowed)(footprints allowed)"
+        )
+        uid = uuid.uuid5(uuid.NAMESPACE_OID, f"keepout:{name}")
+        layer_list = " ".join(f'"{lay}"' for lay in layers)
+        project.pcb.append(sexpr.loads(
+            f'(zone (net 0) (net_name "") (layers {layer_list}) (uuid "{uid}") (name "{KEEPOUT_ZONE_PREFIX}{name}") '
+            f"(hatch edge 0.5) (connect_pads (clearance 0)) (min_thickness 0.25) (keepout {rules}) "
+            f'(placement (enabled no) (sheetname "")) (fill (thermal_gap 0.5) (thermal_bridge_width 0.5)) '
+            f"(polygon (pts (xy {_mm(x0)} {_mm(y0)}) (xy {_mm(x1)} {_mm(y0)}) (xy {_mm(x1)} {_mm(y1)}) (xy {_mm(x0)} {_mm(y1)}))))"
+        ))  # fmt: skip
+        changes.append(
+            f"{name}: no {', '.join(sorted(block))} on {', '.join(layers)} in ({_mm(x0)}, {_mm(y0)})-({_mm(x1)}, {_mm(y1)})"
+        )
+    return changes
+
+
+def _is_keepout_zone(zone: list[Node]) -> bool:
+    name = sexpr.child(zone, "name")
+    return name is not None and len(name) > 1 and str(name[1]).startswith(KEEPOUT_ZONE_PREFIX)
+
+
 UNROUTED_NAME = "unrouted.kicad_pcb"
 
 
@@ -3594,6 +3673,7 @@ FIXES: dict[str, Fix] = {
     "rename_auto_nets": rename_auto_nets,
     "propagate_split_pad_nets": propagate_split_pad_nets,
     "apply_escapes": apply_escapes,
+    "apply_keepouts": apply_keepouts,
     "apply_routes": apply_routes,
     "repair_zero_width_tracks": repair_zero_width_tracks,
     "drop_tracks_inside_pads": drop_tracks_inside_pads,

@@ -84,7 +84,7 @@ Extra tscircuit checks: `hatch run tsci check netlist|placement|shorts <file>`
 
 What the TSX can't say: KiCad net classes (track width, clearance, diff-pair width/gap by net-name
 pattern), length groups (max skew, e.g. an SDRAM bus), diff-pair rules, plane nets (`[planes]`: a via per
-pad) and BGA escapes (`[escape.<ref>]`: VibePCB escapes the ball grid, tscircuit routes from the escape ends;
+pad), keepout areas (`[keepout.<name>]`: no pour / tracks / vias under a part or in a box, per layer) and BGA escapes (`[escape.<ref>]`: VibePCB escapes the ball grid, tscircuit routes from the escape ends;
 `src/vibepcb/fanout.py`). `fix` writes them into the
 KiCad project; KiCad's DRC enforces them. Format: `src/vibepcb/config.py`. Nets get the name of a
 named `<trace name="SD_DQ0">` (else the chip pin), so name the traces a rule should catch.

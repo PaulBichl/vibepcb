@@ -1050,3 +1050,47 @@ def test_unlabelled_connectors(project: fixes.KicadProject) -> None:
         text = f'(gr_text "SIG" (at {at[1]} {at[2]}) (layer "F.SilkS") (effects (font (size 1 1))))'
         project.pcb.append(sexpr.loads(text))
         assert len(fixes.unlabelled_connectors(project)) == len(big) - 1
+
+
+def test_apply_keepouts_makes_rule_areas_from_the_config(project: fixes.KicadProject) -> None:
+    project.config = {
+        "keepout": {
+            "under_r1": {"ref": "R1", "margin": 1.0, "layers": ["F.Cu"], "block": ["pour", "vias"]},
+            "box": {"area": [90, 90, 92, 94]},
+            "ghost": {"ref": "X9"},
+        }
+    }
+    changes = fixes.apply_keepouts(project)
+    assert any(c.startswith("under_r1: no pour, vias on F.Cu") for c in changes)
+    assert "ghost: part X9 not on the board, keepout skipped" in changes
+    zones = {
+        str(sexpr.child(z, "name")[1]): z  # type: ignore[index]
+        for z in sexpr.children(project.pcb, "zone")
+        if sexpr.child(z, "keepout") is not None
+    }
+    area = zones["vibepcb:keepout:under_r1"]
+    keepout = sexpr.child(area, "keepout")
+    assert keepout is not None
+    assert sexpr.child(keepout, "copperpour") == ["copperpour", Sym("not_allowed")]
+    assert sexpr.child(keepout, "vias") == ["vias", Sym("not_allowed")]
+    assert sexpr.child(keepout, "tracks") == ["tracks", Sym("allowed")]
+    box = zones["vibepcb:keepout:box"]
+    layers = sexpr.child(box, "layers")
+    assert layers is not None
+    assert layers[1:] == ["F.Cu", "B.Cu"]  # default: every copper layer
+    xs = {float(str(xy[1])) for xy in sexpr.walk(sexpr.child(box, "polygon") or []) if sexpr.head(xy) == "xy"}
+    assert xs == {90.0, 92.0}
+    # rewritten, not duplicated
+    fixes.apply_keepouts(project)
+    assert len([z for z in sexpr.children(project.pcb, "zone") if fixes._is_keepout_zone(z)]) == 2
+    project.config = {}
+    fixes.apply_keepouts(project)
+    assert not [z for z in sexpr.children(project.pcb, "zone") if fixes._is_keepout_zone(z)]
+
+
+def test_keepout_config_is_validated() -> None:
+    with pytest.raises(config.ConfigError, match="either ref"):
+        config.validate({"keepout": {"a": {"margin": 1}}})
+    with pytest.raises(config.ConfigError, match="block takes"):
+        config.validate({"keepout": {"a": {"ref": "U1", "block": ["copper"]}}})
+    config.validate({"keepout": {"a": {"ref": "U1", "block": ["pour", "vias"]}, "b": {"area": [0, 0, 1, 1]}}})

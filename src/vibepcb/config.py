@@ -19,6 +19,12 @@ these from the board's config file into the KiCad project (:func:`fixes.apply_bo
     [planes]                       # nets with a plane: each SMD pad gets its own via to it,
     nets = ["GND", "V3V3"]         #   the router's tracks of the net go (fixes.plane_pad_vias)
 
+    [keepout.antenna]              # rule area (KiCad enforces it: pour fill + DRC; the router keeps out of tracks / vias)
+    ref = "U3"                     #   over this part's pads + courtyard (or: area = [x0, y0, x1, y1] board mm)
+    margin = 1.0                   #   mm around it (default 0)
+    layers = ["F.Cu", "In1.Cu"]    #   default: every copper layer
+    block = ["pour", "vias"]       #   any of pour, tracks, vias (default: ["pour"]) - e.g. no GND under an antenna
+
     [routing]                      # mode = "manual": tscircuit places only, routes.toml routes (vibepcb.routes);
     mode = "manual"                #   default "auto" = tscircuit's autorouter
 
@@ -42,6 +48,7 @@ if TYPE_CHECKING:
 
 CONFIG_NAME = "vibepcb.toml"
 ESCAPE_KEYS = ("track_width", "clearance", "via_diameter", "via_drill", "layers")
+KEEPOUT_KEYS = {"ref", "area", "margin", "layers", "block"}
 NETCLASS_KEYS = ("track_width", "clearance", "via_diameter", "via_drill", "diff_pair_width", "diff_pair_gap")
 
 
@@ -64,7 +71,7 @@ def load(board: str) -> dict[str, Any]:
 
 
 def validate(data: dict[str, Any], where: str = CONFIG_NAME) -> None:
-    known = {"netclass", "length_group", "diff_pair", "planes", "escape", "routing"}
+    known = {"netclass", "length_group", "diff_pair", "planes", "escape", "routing", "keepout"}
     if unknown := set(data) - known:
         msg = f"{where}: unknown section(s) {sorted(unknown)} (known: {sorted(known)})"
         raise ConfigError(msg)
@@ -78,6 +85,19 @@ def validate(data: dict[str, Any], where: str = CONFIG_NAME) -> None:
     if data.get("routing", {}).get("mode", "auto") not in ("auto", "manual"):
         msg = f'{where}: [routing] mode must be "auto" (tscircuit routes) or "manual" (routes.toml)'
         raise ConfigError(msg)
+    for name, k in data.get("keepout", {}).items():
+        if ("ref" in k) == ("area" in k):
+            msg = f'{where}: keepout {name!r} needs either ref = "U1" (the part) or area = [x0, y0, x1, y1]'
+            raise ConfigError(msg)
+        if bad := set(k) - KEEPOUT_KEYS:
+            msg = f"{where}: keepout {name!r}: unknown key(s) {sorted(bad)} (known: {sorted(KEEPOUT_KEYS)})"
+            raise ConfigError(msg)
+        if bad := set(k.get("block", [])) - {"pour", "tracks", "vias"}:
+            msg = f'{where}: keepout {name!r}: block takes "pour", "tracks", "vias" (got {sorted(bad)})'
+            raise ConfigError(msg)
+        if "area" in k and len(k["area"]) != 4:
+            msg = f"{where}: keepout {name!r}: area needs 4 numbers (x0 y0 x1 y1)"
+            raise ConfigError(msg)
     if "planes" in data and not isinstance(data["planes"].get("nets"), list):
         msg = f"{where}: [planes] needs nets = [...]"
         raise ConfigError(msg)

@@ -56,7 +56,7 @@ def scan_track(
     m = _margin(board, width / 2)
     near = board.near(min(a[0], b[0]) - m, min(a[1], b[1]) - m, max(a[0], b[0]) + m, max(a[1], b[1]) + m)
     for o in near:
-        if _skipped(o, net, ignore) or layer not in o.layers:
+        if _skipped(o, net, ignore) or layer not in o.layers or o.net == fixes.KEEPOUT_VIA_NET:
             continue
         keepout = o.net == fixes.KEEPOUT_NET
         need = 0.0 if keepout else board.rules.clearance(net, o.net)
@@ -79,7 +79,7 @@ def scan_via(
     for o in near:
         if _skipped(o, net, ignore):
             continue
-        keepout = o.net == fixes.KEEPOUT_NET
+        keepout = o.net in (fixes.KEEPOUT_NET, fixes.KEEPOUT_VIA_NET)
         need = 0.0 if keepout else board.rules.clearance(net, o.net)
         gap = o.distance(centre, centre) - diameter / 2
         if gap < need - tracks.EPS / 10:
