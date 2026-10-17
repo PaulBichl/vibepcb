@@ -311,6 +311,22 @@ def cmd_check(board: str) -> int:
                 drc = kicad.run_drc(pcb, reports / "drc.json")
         for change in changes:
             print(f"  post-fill: {change}")
+    if drc.unconnected:  # pour pieces cut off by tracks: a stitching via each into the plane below
+        loaded, stitched = fixes.KicadProject.load(project, board), pcb.read_bytes()
+        changes = fixes.stitch_pour_islands(loaded)
+        if changes:
+            loaded.save()
+            fewer = kicad.run_drc(pcb, reports / "drc.json")
+            if fewer.unconnected < drc.unconnected:
+                drc = fewer
+                for change in changes:
+                    print(f"  post-fill: {change}")
+            else:
+                pcb.write_bytes(stitched)
+                drc = kicad.run_drc(pcb, reports / "drc.json")
+                print(
+                    f"  post-fill: {len(changes)} stitching via(s) for pour pieces undone (no fewer unconnected items)"
+                )
     loaded = fixes.KicadProject.load(project, board)
     corners = fixes.sharp_corners(loaded)
     unpoured = fixes.unpoured_copper_layers(loaded)

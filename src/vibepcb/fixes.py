@@ -3858,6 +3858,87 @@ def stitch_unconnected_pads(project: KicadProject, pads: list[tuple[str, tracks.
     return changes
 
 
+ISLAND_VIA_STEP_MM = 0.25  # candidate grid for a stitching via inside a pour piece
+
+
+def stitch_pour_islands(project: KicadProject) -> list[str]:
+    """A via into every piece of a net's pour that has no connection to the net's pour on another layer.
+
+    Tracks cut an outer-layer GND pour into pieces; a piece without a via or a through-hole pad of its
+    net floats (KiCad: unconnected zone items) even though the plane is right below it. Standard
+    practice is a stitching via; it goes to the spot of the piece nearest its middle that lies fully in
+    the fill, keeps the clearance on every layer and lands in the net's pour on another layer. Needs
+    the filled zones (``check`` runs it after KiCad's refill).
+    """
+    copper = _copper(project.pcb, filled_zones=True)
+    clearance, edge_clearance = _design_clearances(project)
+    via_size, via_drill = _design_via(project)
+    gap = _min_hole_to_hole(project)
+    r = via_size / 2
+    others_all = copper.obstacles()
+    vias_by_net: dict[str, list[tracks.Point]] = {}
+    for _, c, _, n in copper.vias:
+        vias_by_net.setdefault(n, []).append(c)
+    tht = [o for o in copper.pads if len(o.layers) > 1]
+    all_vias = [(c, rr) for _, c, rr, _ in copper.vias]
+    changes = []
+    for (net, layer), polys in sorted(copper.zones.items()):
+        planes = [poly for (n, lay), ps in copper.zones.items() if n == net and lay != layer for poly in ps]
+        net_node = _net_node(project.pcb, net)
+        if not planes or net_node is None:
+            continue
+        others = [o for o in others_all if o.net != net]
+        for poly in polys:
+            if len(poly) < 3 or any(tracks.point_in_polygon(v, poly) for v in vias_by_net.get(net, [])):
+                continue
+            if any(o.net == net and tracks.point_in_polygon(o.centre, poly) for o in tht):
+                continue
+            ring = list(itertools.pairwise([*poly, poly[0]]))
+            xs, ys = [q[0] for q in poly], [q[1] for q in poly]
+            mid = (sum(xs) / len(xs), sum(ys) / len(ys))
+
+            def fits(
+                q: tracks.Point,
+                ring: list[tuple[tracks.Point, tracks.Point]] = ring,
+                poly: list[tracks.Point] = poly,
+                planes: list[list[tracks.Point]] = planes,
+                others: list[tracks.Obstacle] = others,
+            ) -> bool:
+                return (
+                    tracks.point_in_polygon(q, poly)
+                    and all(tracks.point_seg_distance(q, a, b) >= r for a, b in ring)  # the via's copper in the fill
+                    and any(tracks.point_in_polygon(q, pl) for pl in planes)
+                    and all(o.distance(q, q) >= r + clearance for o in others)  # every layer
+                    and all(e.distance(q, q) >= r + edge_clearance for e in copper.edges)
+                    and all(math.dist(q, c) >= rr + r + gap for c, rr in all_vias)
+                )
+
+            nx = int((max(xs) - min(xs)) / ISLAND_VIA_STEP_MM) + 1
+            ny = int((max(ys) - min(ys)) / ISLAND_VIA_STEP_MM) + 1
+            candidates = sorted(
+                (
+                    (min(xs) + i * ISLAND_VIA_STEP_MM, min(ys) + j * ISLAND_VIA_STEP_MM)
+                    for i in range(nx + 1)
+                    for j in range(ny + 1)
+                ),
+                key=lambda q: (math.dist(q, mid), q),
+            )
+            spot = next((q for q in candidates if fits(q)), None)
+            if spot is None:
+                continue
+            x, y = _mm(spot[0]), _mm(spot[1])
+            uid = uuid.uuid5(uuid.NAMESPACE_OID, f"island-via:{net}:{x},{y}")
+            via = sexpr.loads(
+                f'(via (at {x} {y}) (size {_mm(via_size)}) (drill {_mm(via_drill)}) (layers "F.Cu" "B.Cu") (uuid "{uid}"))'
+            )
+            via.insert(len(via) - 1, copy.deepcopy(net_node))
+            project.pcb.append(via)
+            vias_by_net.setdefault(net, []).append(spot)
+            all_vias.append((spot, r))
+            changes.append(f"{net} pour piece on {layer}: stitching via at ({x}, {y})")
+    return changes
+
+
 def _pad_via(
     project: KicadProject, copper: _Copper, pad: tracks.Obstacle, net: str, others: list[tracks.Obstacle]
 ) -> list[list[Node]] | None:

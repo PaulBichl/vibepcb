@@ -1114,3 +1114,21 @@ def test_apply_pours_adds_a_missing_pour_from_the_config(project: fixes.KicadPro
     zone = [z for z in sexpr.children(project.pcb, "zone") if sexpr.child(z, "keepout") is None][-1]
     assert str(sexpr.child(zone, "layer")[1]) == "B.Cu"  # type: ignore[index]
     assert fixes._zone_net(project.pcb, zone) == "VCC"
+
+
+def test_stitch_pour_islands_puts_a_via_into_a_floating_piece(project: fixes.KicadProject) -> None:
+    # a GND piece on F.Cu (top right corner, no pad / via in it) over the GND pour on B.Cu
+    project.pcb.append(sexpr.loads(
+        '(zone (net 2 "GND") (layer "F.Cu") (filled_polygon (layer "F.Cu") '
+        "(pts (xy 104 93.5) (xy 109 93.5) (xy 109 96) (xy 104 96))))"
+    ))  # fmt: skip
+    project.pcb.append(sexpr.loads(
+        '(zone (net 2 "GND") (layer "B.Cu") (filled_polygon (layer "B.Cu") '
+        "(pts (xy 91 93.5) (xy 109 93.5) (xy 109 106.5) (xy 91 106.5))))"
+    ))  # fmt: skip
+    changes = fixes.stitch_pour_islands(project)
+    # the B.Cu pour holds the header's through-hole GND pin: only the F.Cu piece floats
+    assert [c.split(":")[0] for c in changes] == ["GND pour piece on F.Cu"]
+    vias = [v[1] for v in fixes._copper(project.pcb).vias if v[3] == "GND"]
+    assert any(104 < x < 109 and 93.5 < y < 96 for x, y in vias)
+    assert fixes.stitch_pour_islands(project) == []
