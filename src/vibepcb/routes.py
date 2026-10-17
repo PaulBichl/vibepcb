@@ -73,6 +73,7 @@ class Pad:
     centre: tracks.Point
     layers: frozenset[str]
     exit: tracks.Point | None = None  # where the pad's own track or via leaves it (outside the part), None: none
+    ring: tuple[tracks.Point, ...] = ()  # the spots just outside the pad on all four sides (a plane pad's via)
 
     @property
     def label(self) -> str:
@@ -142,10 +143,11 @@ def board_pads(project: KicadProject) -> list[Pad]:
             at = sexpr.child(pad, "at")
             centre = to_board(fixes._num(at, 1), fixes._num(at, 2))
             exit_at = _exit_point(fp, pad, centre, to_board)
+            ring = _ring_points(pad, centre, to_board)
             if (esc := ends.get((ref, str(pad[1])))) is not None and esc.end_layer:
                 centre, layers = to_board(esc.end[0], -esc.end[1]), frozenset({fixes._kicad_layer(esc.end_layer)})
-                exit_at = None  # the escape track leaves the ball already
-            out.append(Pad(ref, str(pad[1]), fixes._net_of(pad, names), centre, layers, exit_at))
+                exit_at, ring = None, ()  # the escape track leaves the ball already
+            out.append(Pad(ref, str(pad[1]), fixes._net_of(pad, names), centre, layers, exit_at, ring))
     return out
 
 
@@ -170,19 +172,39 @@ def _exit_point(
     return centre[0] + ux * (half + EXIT_GAP_MM), centre[1] + uy * (half + EXIT_GAP_MM)
 
 
-def _reservations(pads: list[Pad], layers: list[str], nets: set[str]) -> dict[tuple[str, int, int], str]:
-    """Cells in front of every pad of ``nets`` (its exit), owned by the pad's net: the router charges other nets."""
+def _ring_points(pad: list[sexpr.Node], centre: tracks.Point, to_board: Any) -> tuple[tracks.Point, ...]:
+    corners = fixes._pad_corners(pad, to_board)
+    xs, ys = [p[0] for p in corners], [p[1] for p in corners]
+    hx, hy = (max(xs) - min(xs)) / 2 + EXIT_GAP_MM, (max(ys) - min(ys)) / 2 + EXIT_GAP_MM
+    return (
+        (centre[0] + hx, centre[1]),
+        (centre[0] - hx, centre[1]),
+        (centre[0], centre[1] + hy),
+        (centre[0], centre[1] - hy),
+    )
+
+
+def _reservations(
+    pads: list[Pad], layers: list[str], nets: set[str], planes: set[str]
+) -> dict[tuple[str, int, int], str]:
+    """Cells in front of every pad of ``nets`` (its exit), owned by the pad's net: the router charges other nets.
+
+    A plane net's pad needs room for a via on whichever side has it (a row of decoupling caps leaves no room
+    along their axis), so it reserves all four sides.
+    """
     out: dict[tuple[str, int, int], str] = {}
     steps = round(EXIT_RADIUS_MM * 10)
     for p in pads:
-        if p.exit is None or p.net not in nets:
+        if p.net not in nets:
             continue
-        cx, cy = round(p.exit[0] * 10), round(p.exit[1] * 10)
-        for i in range(-steps, steps + 1):
-            for j in range(-steps, steps + 1):
-                if i * i + j * j <= steps * steps:
-                    for layer in layers:
-                        out.setdefault((layer, cx + i, cy + j), p.net)
+        spots = p.ring if p.net in planes else ((p.exit,) if p.exit is not None else ())
+        for spot in spots:
+            cx, cy = round(spot[0] * 10), round(spot[1] * 10)
+            for i in range(-steps, steps + 1):
+                for j in range(-steps, steps + 1):
+                    if i * i + j * j <= steps * steps:
+                        for layer in layers:
+                            out.setdefault((layer, cx + i, cy + j), p.net)
     return out
 
 
@@ -200,7 +222,7 @@ def apply(project: KicadProject, data: dict[str, Any], *, only: str | None = Non
     connected = {n for n, k in counts.items() if n and (k > 1 or n in planes)}
     # every pad keeps the spot in front of it free for its own exit (other nets pay to pass): a routed pad
     # for its track, a plane net's pad for the via into its plane
-    defaults[RESERVED_KEY] = _reservations(pads, list(defaults.get("layers", board.layers)), connected)
+    defaults[RESERVED_KEY] = _reservations(pads, list(defaults.get("layers", board.layers)), connected, planes)
     new_nodes: list[list[sexpr.Node]] = []
     for i, entry in enumerate(data.get("route", []), 1):
         conns = [

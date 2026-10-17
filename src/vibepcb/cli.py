@@ -262,6 +262,11 @@ def cmd_inspect(
 POST_FILL_ATTEMPTS = 4
 
 
+def _pad_spots(result: kicad.CheckResult) -> set[tuple[str, tuple[float, float]]]:
+    """(net, position) of the pads KiCad reports unconnected, rounded so two runs compare."""
+    return {(net, (round(x, 3), round(y, 3))) for net, (x, y) in result.unconnected_pads()}
+
+
 def cmd_check(board: str) -> int:
     project, reports = paths.kicad_dir(board), paths.reports_dir(board)
     pcb = project / f"{board}.kicad_pcb"
@@ -274,6 +279,7 @@ def cmd_check(board: str) -> int:
     # angles; give up (restore) after a few tries
     post_fill_started = time.monotonic()
     backup, before = pcb.read_bytes(), drc.unconnected
+    before_pads = _pad_spots(drc)
     keep: list[tuple[float, float]] = []
     acute = drc.spots_of("track_angle")  # the fallback prunes only the tracks at acute angles
     for attempt in range(POST_FILL_ATTEMPTS):
@@ -288,11 +294,13 @@ def cmd_check(board: str) -> int:
             changes += fixes.restore_nets(loaded, drc.unconnected_nets())
             loaded.save()
             drc = kicad.run_drc(pcb, reports / "drc.json")
-        if drc.unconnected <= before:
+        # kept only if no pad lost its connection: the count alone can hide a new loss behind a fixed item
+        lost = _pad_spots(drc) - before_pads
+        if drc.unconnected <= before and not lost:
             for change in changes:
                 print(f"  post-fill: {change}")
             break
-        keep += drc.unconnected_spots()
+        keep += [pos for _, pos in sorted(lost)] or drc.unconnected_spots()
         pcb.write_bytes(backup)
     else:
         print(f"  post-fill: gave up after {POST_FILL_ATTEMPTS} attempts, board left as filled")
