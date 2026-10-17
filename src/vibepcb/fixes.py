@@ -16,6 +16,7 @@ import json
 import logging
 import math
 import re
+import time
 import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -3779,14 +3780,20 @@ FIXES: dict[str, Fix] = {
 TRACK_FIXES_START = "repair_zero_width_tracks"  # first geometry fix: restore_nets rolls back to before it
 
 
+SLOW_FIX_S = 5.0  # fixes slower than this get a timing line in the report
+
+
 def apply_all(project: KicadProject, skip: set[str] | None = None) -> dict[str, list[str]]:
-    """Run every registered fix (except ``skip``), save, and return the changes per fix."""
+    """Run every registered fix (except ``skip``), save, and return the changes per fix (slow ones with their time)."""
     report = {}
     for name, fix in FIXES.items():
         if name == TRACK_FIXES_START:
             project.before_track_fixes = copy.deepcopy(project.pcb)
         if name not in (skip or set()):
+            started = time.monotonic()
             report[name] = fix(project)
+            if (spent := time.monotonic() - started) > SLOW_FIX_S:
+                report[name].append(f"took {spent:.0f} s")
     project.save()
     return report
 

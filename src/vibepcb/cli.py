@@ -16,6 +16,7 @@ vibepcb docs            download tscircuit's LLM docs to docs/tscircuit-llms.txt
 from __future__ import annotations
 
 import argparse
+import contextlib
 import copy
 import hashlib
 import json
@@ -23,15 +24,19 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
+import time
 import urllib.request
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from vibepcb import board as board_model
 from vibepcb import config, fanout, fixes, inspect, kicad, paths, routes, schgen, sexpr, tscircuit
 
 if TYPE_CHECKING:
-    from pathlib import Path
+    from collections.abc import Iterator
 
 SCHEMATIC_PNG_WIDTH = 4000  # px: an A0 sheet stays readable when zoomed into a crop
 TSCIRCUIT_LLM_DOCS = "https://docs.tscircuit.com/llms.txt"
@@ -134,25 +139,36 @@ def _png(svg: Path, png: Path, width: int) -> None:
     subprocess.run(["rsvg-convert", "-w", str(width), "-b", "white", "-o", str(png), str(svg)], check=True)
 
 
+@contextlib.contextmanager
+def _phase(label: str) -> Iterator[None]:
+    """Print how long a pipeline step took (the agent sees where a run spends its minutes)."""
+    started = time.monotonic()
+    yield
+    print(f"  time: {label} {time.monotonic() - started:.0f} s")
+
+
 def cmd_fix(board: str) -> int:
     os.environ.setdefault("VIBEPCB_VERBOSE", "1")  # routing progress (routes.toml) on stderr
     raw, target = paths.raw_dir(board), paths.kicad_dir(board)
     kicad.assemble_project(raw / f"{board}.kicad.zip", target, board)
     sch, circuit = target / f"{board}.kicad_sch", raw / f"{board}.circuit.json"
     if circuit.exists():  # builds skip tscircuit's schematic (does not scale); generate it from the JSON
-        for note in schgen.write(circuit, sch, board, paths.board_source(board)):
-            print(f"  schematic: {note}")
+        with _phase("schematic"):
+            for note in schgen.write(circuit, sch, board, paths.board_source(board)):
+                print(f"  schematic: {note}")
         print(f"  schematic generated from {circuit.relative_to(paths.ROOT)}")
     project = fixes.KicadProject.load(target, board)
     project.config = config.load(board)
     project.routes = routes.load(paths.board_source(board).parent / routes.ROUTES_NAME)
-    report = fixes.apply_all(project)
+    with _phase("fixes"):
+        report = fixes.apply_all(project)
     for name, changes in report.items():
         for change in changes:
             print(f"  fix {name}: {change}")
     # safety net: nets KiCad finds broken after the track fixes go back to their routed state
     report_path = paths.reports_dir(board) / "fix-drc.json"
-    lost = kicad.unconnected_nets(project.pcb_path, report_path)
+    with _phase("KiCad connectivity check"):
+        lost = kicad.unconnected_nets(project.pcb_path, report_path)
     restored = fixes.restore_nets(project, lost)
     for change in restored:
         print(f"  fix restore_nets: {change}")
@@ -170,7 +186,8 @@ def cmd_fix(board: str) -> int:
                 for change in repairs:
                     print(f"  fix after restore: {change}")
     if kicad.find_kicad_cli():  # preview to look at: SVG for people, PNG for an agent
-        svg = kicad.export_schematic_svg(sch, paths.work_dir(board))
+        with _phase("schematic preview"):
+            svg = kicad.export_schematic_svg(sch, paths.work_dir(board))
         svg = svg.replace(paths.board_out(board) / "schematic.svg")
         if shutil.which("rsvg-convert"):
             _png(svg, paths.preview_dir(board) / "schematic.png", SCHEMATIC_PNG_WIDTH)
@@ -180,7 +197,7 @@ def cmd_fix(board: str) -> int:
     return 0
 
 
-def cmd_route(board: str, *, only: str | None = None, dry_run: bool = False) -> int:
+def cmd_route(board: str, *, only: str | None = None, dry_run: bool = False, drc: bool = False) -> int:
     """Quick loop: ``routes.toml`` onto the KiCad board as ``fix`` had it before routing, without the clean-up fixes."""
     spec = routes.load(paths.board_source(board).parent / routes.ROUTES_NAME)
     if not spec:
@@ -203,6 +220,16 @@ def cmd_route(board: str, *, only: str | None = None, dry_run: bool = False) -> 
     if not dry_run:
         sexpr.dump(project.pcb, pcb)
         print(f"saved {pcb.relative_to(paths.ROOT)}")
+    if drc:  # a quick verdict without fix + check: KiCad's DRC on a copy (no clean-up fixes, so a rough count)
+        with tempfile.TemporaryDirectory() as tmp, _phase("KiCad DRC"):
+            for f in target.glob(f"{board}.kicad_*"):
+                shutil.copy(f, tmp)
+            sexpr.dump(project.pcb, Path(tmp) / f"{board}.kicad_pcb")
+            result = kicad.run_drc(Path(tmp) / f"{board}.kicad_pcb", Path(tmp) / "drc.json")
+        counts = Counter(str(v.get("type")) for v in result.violations if v.get("severity") == "error")
+        print(f"DRC errors (before the clean-up fixes): {sum(counts.values())}")
+        for kind, n in counts.most_common():
+            print(f"  {n} x {kind}")
     return 1 if report.failed else 0
 
 
@@ -238,13 +265,14 @@ POST_FILL_ATTEMPTS = 4
 def cmd_check(board: str) -> int:
     project, reports = paths.kicad_dir(board), paths.reports_dir(board)
     pcb = project / f"{board}.kicad_pcb"
-    with ThreadPoolExecutor(max_workers=2) as pool:  # independent kicad-cli processes
+    with ThreadPoolExecutor(max_workers=2) as pool, _phase("ERC + DRC"):  # independent kicad-cli processes
         erc_job = pool.submit(kicad.run_erc, project / f"{board}.kicad_sch", reports / "erc.json")
         drc_job = pool.submit(kicad.run_drc, pcb, reports / "drc.json")
         erc, drc = erc_job.result(), drc_job.result()
     # fixes that need KiCad's zone fill; refill + DRC again. Where that loses a connection,
     # retry keeping the tracks around the reported spots, then prune only the tracks at acute
     # angles; give up (restore) after a few tries
+    post_fill_started = time.monotonic()
     backup, before = pcb.read_bytes(), drc.unconnected
     keep: list[tuple[float, float]] = []
     acute = drc.spots_of("track_angle")  # the fallback prunes only the tracks at acute angles
@@ -269,6 +297,7 @@ def cmd_check(board: str) -> int:
     else:
         print(f"  post-fill: gave up after {POST_FILL_ATTEMPTS} attempts, board left as filled")
         drc = kicad.run_drc(pcb, reports / "drc.json")
+    print(f"  time: post-fill up to here {time.monotonic() - post_fill_started:.0f} s")
     if pads := drc.unconnected_pads():  # pads their pour can't reach: a via to the net's plane
         loaded, stitched = fixes.KicadProject.load(project, board), pcb.read_bytes()
         changes = fixes.stitch_unconnected_pads(loaded, pads)
@@ -410,6 +439,9 @@ def main(argv: list[str] | None = None) -> int:
         if name == "route":
             command_parser.add_argument("--only", help="route only nets matching this pattern")
             command_parser.add_argument("--dry-run", action="store_true", help="report, don't save")
+            command_parser.add_argument(
+                "--drc", action="store_true", help="KiCad DRC on the result (rough: no clean-up)"
+            )
     sub.add_parser("list")
     sub.add_parser("docs")
     args = parser.parse_args(argv)
@@ -429,7 +461,7 @@ def main(argv: list[str] | None = None) -> int:
                 if command == "inspect":
                     return cmd_inspect(args.board, args.area, args.net, args.layer, args.scale, args.source)
                 if command == "route":
-                    return cmd_route(args.board, only=args.only, dry_run=args.dry_run)
+                    return cmd_route(args.board, only=args.only, dry_run=args.dry_run, drc=args.drc)
                 handler = {"new": cmd_new, "fix": cmd_fix, "check": cmd_check, "fab": cmd_fab, "publish": cmd_publish}
                 return handler[command](args.board)
     except (
