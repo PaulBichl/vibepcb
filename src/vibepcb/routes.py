@@ -197,9 +197,10 @@ def apply(project: KicadProject, data: dict[str, Any], *, only: str | None = Non
     counts: dict[str, int] = {}
     for p in pads:
         counts[p.net] = counts.get(p.net, 0) + 1
-    signal = {n for n, k in counts.items() if n and k > 1 and n not in planes}
-    # every routed pad keeps the spot in front of it free for its own exit (other nets pay to pass)
-    defaults[RESERVED_KEY] = _reservations(pads, list(defaults.get("layers", board.layers)), signal)
+    connected = {n for n, k in counts.items() if n and (k > 1 or n in planes)}
+    # every pad keeps the spot in front of it free for its own exit (other nets pay to pass): a routed pad
+    # for its track, a plane net's pad for the via into its plane
+    defaults[RESERVED_KEY] = _reservations(pads, list(defaults.get("layers", board.layers)), connected)
     new_nodes: list[list[sexpr.Node]] = []
     for i, entry in enumerate(data.get("route", []), 1):
         conns = [

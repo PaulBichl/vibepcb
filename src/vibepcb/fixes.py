@@ -3854,6 +3854,7 @@ def stitch_unconnected_pads(project: KicadProject, pads: list[tuple[str, tracks.
             changes.append(f"{net} pad at ({_mm(pos[0])}, {_mm(pos[1])}): no room for a stitching via")
             continue
         project.pcb += nodes
+        copper = _copper(project.pcb, filled_zones=True)  # the next via keeps its clearance to this one
         changes.append(f"{net} pad at ({_mm(pos[0])}, {_mm(pos[1])}): stitching via to its plane")
     return changes
 
@@ -3957,6 +3958,14 @@ def _pad_via(
     net_node = _net_node(project.pcb, net)
     if layer is None or not planes or net_node is None:
         return None
+    # only what a via within reach could touch (the whole board's copper made this the slowest fix)
+    reach = max(STITCH_STEPS_MM) + r + clearance + width + 0.5
+    cx, cy = pad.centre
+    others = [
+        o
+        for o in others
+        if o.box[0] <= cx + reach and o.box[2] >= cx - reach and o.box[1] <= cy + reach and o.box[3] >= cy - reach
+    ]
     on_layer = [o for o in others if layer in o.layers]
     own_pads = [o for o in copper.pads_by_net.get(net, []) if math.dist(o.centre, pad.centre) < 4]
 
