@@ -72,6 +72,7 @@ class Pad:
     net: str
     centre: tracks.Point
     layers: frozenset[str]
+    exit: tracks.Point | None = None  # where the pad's own track or via leaves it (outside the part), None: none
 
     @property
     def label(self) -> str:
@@ -140,9 +141,48 @@ def board_pads(project: KicadProject) -> list[Pad]:
                 continue
             at = sexpr.child(pad, "at")
             centre = to_board(fixes._num(at, 1), fixes._num(at, 2))
+            exit_at = _exit_point(fp, pad, centre, to_board)
             if (esc := ends.get((ref, str(pad[1])))) is not None and esc.end_layer:
                 centre, layers = to_board(esc.end[0], -esc.end[1]), frozenset({fixes._kicad_layer(esc.end_layer)})
-            out.append(Pad(ref, str(pad[1]), fixes._net_of(pad, names), centre, layers))
+                exit_at = None  # the escape track leaves the ball already
+            out.append(Pad(ref, str(pad[1]), fixes._net_of(pad, names), centre, layers, exit_at))
+    return out
+
+
+RESERVED_KEY = "_reserved"  # internal: the pad exit reservations travel with the defaults
+EXIT_GAP_MM = 0.45  # a pad's exit spot: this far beyond its outer edge (room for a via beside a 0.5 mm pitch pin)
+EXIT_RADIUS_MM = 0.45
+
+
+def _exit_point(
+    fp: list[sexpr.Node], pad: list[sexpr.Node], centre: tracks.Point, to_board: Any
+) -> tracks.Point | None:
+    """The spot just outside a pad, away from its part's centre along the pad's main axis."""
+    at = sexpr.child(fp, "at")
+    fx, fy = fixes._num(at, 1), fixes._num(at, 2)
+    dx, dy = centre[0] - fx, centre[1] - fy
+    if math.hypot(dx, dy) < 1e-6:
+        return None
+    ux, uy = (math.copysign(1.0, dx), 0.0) if abs(dx) >= abs(dy) else (0.0, math.copysign(1.0, dy))
+    corners = fixes._pad_corners(pad, to_board)
+    xs, ys = [p[0] for p in corners], [p[1] for p in corners]
+    half = (abs(ux) * (max(xs) - min(xs)) + abs(uy) * (max(ys) - min(ys))) / 2
+    return centre[0] + ux * (half + EXIT_GAP_MM), centre[1] + uy * (half + EXIT_GAP_MM)
+
+
+def _reservations(pads: list[Pad], layers: list[str], nets: set[str]) -> dict[tuple[str, int, int], str]:
+    """Cells in front of every pad of ``nets`` (its exit), owned by the pad's net: the router charges other nets."""
+    out: dict[tuple[str, int, int], str] = {}
+    steps = round(EXIT_RADIUS_MM * 10)
+    for p in pads:
+        if p.exit is None or p.net not in nets:
+            continue
+        cx, cy = round(p.exit[0] * 10), round(p.exit[1] * 10)
+        for i in range(-steps, steps + 1):
+            for j in range(-steps, steps + 1):
+                if i * i + j * j <= steps * steps:
+                    for layer in layers:
+                        out.setdefault((layer, cx + i, cy + j), p.net)
     return out
 
 
@@ -153,7 +193,13 @@ def apply(project: KicadProject, data: dict[str, Any], *, only: str | None = Non
     pads = board_pads(project)
     by_label = {p.label: p for p in pads}
     planes = set(project.config.get("planes", {}).get("nets", []))
-    defaults = data.get("defaults", {})
+    defaults = dict(data.get("defaults", {}))
+    counts: dict[str, int] = {}
+    for p in pads:
+        counts[p.net] = counts.get(p.net, 0) + 1
+    signal = {n for n, k in counts.items() if n and k > 1 and n not in planes}
+    # every routed pad keeps the spot in front of it free for its own exit (other nets pay to pass)
+    defaults[RESERVED_KEY] = _reservations(pads, list(defaults.get("layers", board.layers)), signal)
     new_nodes: list[list[sexpr.Node]] = []
     for i, entry in enumerate(data.get("route", []), 1):
         conns = [
@@ -573,6 +619,7 @@ def _route_one(
         soft=soft - {net},
         soft_cost=soft_cost,
         history=history,
+        reserved=defaults.get(RESERVED_KEY),
     )
     r = router.route(
         board,

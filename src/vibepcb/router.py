@@ -28,6 +28,7 @@ COARSE_LEVELS = ((0.4, 0.15), (0.2, 0.05))  # (grid step, extra clearance): a ro
 TUBE_MM = (1.2, 3.0)  # the fine search stays this close to the coarse path; a wider tube when that fails
 LAST_RESORT_STATES = 60_000  # the unguided fine search when no coarse level found a way
 GRID_SLACK_MM = 0.03  # grid nodes keep this much extra clearance: pieces between nodes then pass the exact check
+RESERVE_COST = 1.5  # per grid node in front of another net's pad: leave room for its exit / via
 SOFT_COST = 4.0  # per grid node through copper that may be ripped up (a crossing costs ~10-20 mm of detour)
 HEURISTIC_WEIGHT = 1.3  # >1: fewer states, routes a little longer than optimal
 LENGTH_COST = 1.0  # per mm
@@ -82,6 +83,7 @@ class Spec:
     soft: frozenset[str] = frozenset()  # nets whose routed copper may be crossed (at a cost)
     soft_cost: float = 4.0  # per grid node through soft copper (negotiation raises it round by round)
     history: dict[tuple[str, int, int], float] | None = None  # extra cost of contested spots (see history_key)
+    reserved: dict[tuple[str, int, int], str] | None = None  # cells in front of other nets' pads (their exits)
 
 
 class Tube:
@@ -327,8 +329,12 @@ def _search(
                 step += BEND_COST
             if state == 2:
                 step += spec.soft_cost
-            if spec.history:
-                step += spec.history.get(history_key(layers[li], pos(nx, ny)), 0.0)
+            if spec.history or spec.reserved:
+                key = history_key(layers[li], pos(nx, ny))
+                if spec.history:
+                    step += spec.history.get(key, 0.0)
+                if spec.reserved and spec.reserved.get(key, net) != net:
+                    step += RESERVE_COST
             ns = (nx, ny, li)
             if cost + step < g.get(ns, math.inf):
                 g[ns] = cost + step
