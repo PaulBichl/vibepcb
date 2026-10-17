@@ -221,6 +221,9 @@ def _by_angle(conns: list[tuple[str, Pad, Pad, str]]) -> list[tuple[str, Pad, Pa
     return sorted(conns, key=lambda c: (-off_axis(c), c[3]))
 
 
+RIP_UP_ROUNDS = 4  # passes over the connections that failed, each ripping up what blocks them
+
+
 def _run_sequential(
     board: board_mod.Board,
     pcb: list[sexpr.Node],
@@ -228,21 +231,81 @@ def _run_sequential(
     defaults: dict[str, Any],
     conns: list[tuple[str, Pad, Pad, str]],
 ) -> tuple[list[Result], list[list[sexpr.Node]]]:
-    """Route the connections one after the other in the given order; each sees the earlier ones as obstacles."""
-    results: list[Result] = []
-    nodes: list[list[sexpr.Node]] = []
+    """Route the connections one after the other in the given order; each sees the earlier ones as obstacles.
+
+    A connection that finds no way is tried again once everything is routed, this time allowed to cross the
+    entry's routed copper at a cost: the routes it crosses are ripped up, it is committed, and they are routed
+    again behind it. That is how a late connection gets into a pad field the earlier ones closed off.
+    """
     started = time.monotonic()
-    for i, (net, a, b, name) in enumerate(conns, 1):
+    start = board.checkpoint()
+    routed: dict[str, router.Route] = {}
+    why: dict[str, str] = {}
+    failed: list[tuple[str, Pad, Pad, str]] = []
+    for i, conn in enumerate(conns, 1):
         if i % 10 == 0 or i == len(conns):
             _log(f"  {entry.get('net', '?')}: {i}/{len(conns)} connections ({time.monotonic() - started:.0f} s)")
+        net, a, b, name = conn
         try:
             r = _route_one(board, entry, defaults, net, a, b)
         except router.RouteFailure as e:
-            results.append(Result(name, False, str(e)))
+            why[name] = str(e)
+            failed.append(conn)
             continue
         r.commit(board)
-        nodes += _nodes(pcb, r)
-        results.append(Result(name, True, f"{r.length:.2f} mm, {len(r.vias)} via(s)", r.length, len(r.vias)))
+        routed[name] = r
+    for round_no in range(RIP_UP_ROUNDS):
+        if not failed:
+            break
+        _log(
+            f"  {entry.get('net', '?')}: rip-up round {round_no + 1}, {len(failed)} to place ({time.monotonic() - started:.0f} s)"
+        )
+        still: list[tuple[str, Pad, Pad, str]] = []
+        queue = list(failed)
+        while queue:
+            conn = queue.pop(0)
+            net, a, b, name = conn
+            soft = frozenset(r.net for r in routed.values())
+            try:
+                r = _route_one(board, entry, defaults, net, a, b, soft, SOFT_COST_START)
+            except router.RouteFailure as e:
+                why[name] = str(e)
+                still.append(conn)
+                continue
+            victims = [n for n, other in routed.items() if other.net in r.crossed]
+            for n in victims:
+                del routed[n]
+            _rebuild(board, start, routed)
+            r.commit(board)
+            routed[name] = r
+            why.pop(name, None)
+            retry = [c for c in conns if c[3] in victims]
+            for c in retry:  # the ripped-up connections go again, plain
+                try:
+                    r2 = _route_one(board, entry, defaults, c[0], c[1], c[2])
+                except router.RouteFailure as e:
+                    why[c[3]] = str(e)
+                    still.append(c)
+                    continue
+                r2.commit(board)
+                routed[c[3]] = r2
+        failed = still
+    results = [
+        Result(
+            c[3],
+            True,
+            f"{routed[c[3]].length:.2f} mm, {len(routed[c[3]].vias)} via(s)",
+            routed[c[3]].length,
+            len(routed[c[3]].vias),
+        )
+        if c[3] in routed
+        else Result(c[3], False, why.get(c[3], "not routed"))
+        for c in conns
+    ]
+    nodes: list[list[sexpr.Node]] = []
+    for c in conns:
+        if c[3] in routed:
+            nodes += _nodes(pcb, routed[c[3]])
     return results, nodes
 
 
