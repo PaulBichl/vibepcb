@@ -940,8 +940,10 @@ def test_stitch_unconnected_pads(project: fixes.KicadProject) -> None:
     )
     project.pcb.append(zone)
     before = {v[1] for v in fixes._copper(project.pcb).vias}
-    changes = fixes.stitch_unconnected_pads(project, [("GND", (101.83, 102.0))])
+    # KiCad lists a pad once per unconnected pair: three entries, one via
+    changes = fixes.stitch_unconnected_pads(project, [("GND", (101.83, 102.0))] * 3)
     assert changes == ["GND pad at (101.83, 102): stitching via to its plane"]
+    assert len({v[1] for v in fixes._copper(project.pcb).vias} - before) == 1
     copper = fixes._copper(project.pcb)
     clearance, _ = fixes._design_clearances(project)
     via = next(v for v in copper.vias if v[1] not in before)

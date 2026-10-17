@@ -3836,7 +3836,8 @@ def stitch_unconnected_pads(project: KicadProject, pads: list[tuple[str, tracks.
     """
     copper = _copper(project.pcb, filled_zones=True)
     changes = []
-    for net, pos in pads:
+    # KiCad lists a pad once per unconnected pair it is in: one stitching via per pad, not per item
+    for net, pos in dict.fromkeys((net, (round(pos[0], 4), round(pos[1], 4))) for net, pos in pads):
         pad = next((o for o in copper.pads_by_net.get(net, []) if o.distance(pos, pos) <= tracks.ON_EDGE_MM), None)
         if pad is None or not any(n == net and lay not in pad.layers for n, lay in copper.zones):
             continue  # no plane of the net on another layer: nothing to stitch to
