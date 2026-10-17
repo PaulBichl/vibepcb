@@ -50,7 +50,7 @@ def test_failure_is_reported_and_leaves_no_copper(tmp_path: Path, monkeypatch: p
     before = count(project)
     report = routes.apply(project, {"route": [{"from": "P1.1", "to": "P3.1", "layers": ["F.Cu"]}]})
     assert [r.ok for r in report.results] == [False]
-    assert report.results[0].detail.startswith(("no path", "search limit"))
+    assert "no path" in report.results[0].detail or "search limit" in report.results[0].detail
     assert count(project) == before
 
 
@@ -73,3 +73,17 @@ def test_apply_twice_adds_nothing(tmp_path: Path) -> None:
     n = count(project)
     assert routes.apply(project, data).results == []
     assert count(project) == n
+
+
+def _pad(ref: str, x: float, y: float) -> routes.Pad:
+    return routes.Pad(ref, "1", "N", (x, y), frozenset({"F.Cu"}))
+
+
+def test_by_angle_orders_a_bus_outermost_first() -> None:
+    goals = [_pad("G", 20, 10 + k * 0.5) for k in range(5)]
+    starts = [_pad("S", 0, 7 + 3 * k) for k in range(5)]  # y = 7, 10, 13, 16, 19: the middle one is on the axis
+    conns = [("N", s, g, f"c{k}") for k, (s, g) in enumerate(zip(starts, goals, strict=True))]
+    ordered = [c[3] for c in routes._by_angle(conns)]
+    assert ordered[0] in ("c0", "c4")  # an outer arc first
+    assert ordered[-1] == "c2"  # the one on the axis last
+    assert routes._by_angle(conns[:3]) == conns[:3]  # a few connections keep their order

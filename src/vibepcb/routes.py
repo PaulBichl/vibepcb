@@ -17,7 +17,9 @@ the copper of the earlier ones. Format::
     width = 0.15                     # optional: else the net class width
 
     [[route]]
-    net = "SD_CLK*"                  # every net matching (not a [planes] net unless named exactly), all pads
+    net = "SD_*"                     # every net matching (not a [planes] net unless named exactly), all pads
+    order = "angle"                  # a bus: outermost arcs first, the inner ones nest (default); "length": shortest
+    method = "sequential"            #   first; "name". method: "sequential" (default, in that order) | "negotiate"
 """
 
 from __future__ import annotations
@@ -25,13 +27,17 @@ from __future__ import annotations
 import copy
 import fnmatch
 import math
+import multiprocessing
+import os
+import sys
+import time
 import tomllib
 import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from vibepcb import board as board_mod
-from vibepcb import fixes, router, sexpr, tracks
+from vibepcb import drc, fixes, router, sexpr, tracks
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -39,7 +45,7 @@ if TYPE_CHECKING:
     from vibepcb.fixes import KicadProject
 
 ROUTES_NAME = "routes.toml"
-ENTRY_KEYS = {"net", "from", "to", "layers", "via_max", "waypoints", "corridor", "width", "order"}
+ENTRY_KEYS = {"net", "from", "to", "layers", "via_max", "waypoints", "corridor", "width", "order", "method"}
 SECTIONS = {"defaults", "route"}
 PLANNED = {"bus", "pair", "tune"}
 
@@ -155,9 +161,15 @@ def apply(project: KicadProject, data: dict[str, Any], *, only: str | None = Non
             for c in _connections(entry, i, board, pads, by_label, planes)
             if not only or fnmatch.fnmatchcase(c[0], only)
         ]
-        if entry.get("order", "outside-in") == "outside-in":
+        order = entry.get("order", "angle")
+        if order == "angle":
+            conns = _by_angle(conns)
+        elif order == "outside-in":
             conns = _outside_in(conns)
-        results, nodes = _run_entry(board, project.pcb, entry, defaults, conns)
+        elif order == "length":
+            conns = sorted(conns, key=lambda c: (math.dist(c[1].centre, c[2].centre), c[3]))
+        run = _run_entry if entry.get("method", "sequential") == "negotiate" else _run_sequential
+        results, nodes = run(board, project.pcb, entry, defaults, conns)
         report.results += results
         new_nodes += nodes
     project.pcb.extend(new_nodes)
@@ -186,7 +198,55 @@ def _outside_in(conns: list[tuple[str, Pad, Pad, str]]) -> list[tuple[str, Pad, 
     return sorted(conns, key=lambda c: (-abs(lane(c)), c[3]))
 
 
-RIP_UP_BUDGET = 3  # rip-ups allowed per connection of an entry
+def _by_angle(conns: list[tuple[str, Pad, Pad, str]]) -> list[tuple[str, Pad, Pad, str]]:
+    """Order the connections of a bus by how far their start pad sits off the bus axis, seen from the goals.
+
+    Two groups of pins facing each other are paired without crossings when the outermost arcs are drawn
+    first and the inner ones nest inside (a planar order). The axis runs from the centre of the goal pads
+    to the centre of the start pads; the sideways angle of a start pad decides.
+    """
+    if len(conns) < 4:
+        return conns
+    n = len(conns)
+    gx = sum(c[2].centre[0] for c in conns) / n, sum(c[2].centre[1] for c in conns) / n
+    sx = sum(c[1].centre[0] for c in conns) / n, sum(c[1].centre[1] for c in conns) / n
+    ux, uy = sx[0] - gx[0], sx[1] - gx[1]
+    norm = math.hypot(ux, uy) or 1.0
+    ux, uy = ux / norm, uy / norm
+
+    def off_axis(c: tuple[str, Pad, Pad, str]) -> float:
+        vx, vy = c[1].centre[0] - gx[0], c[1].centre[1] - gx[1]
+        return abs(ux * vy - uy * vx) / (math.hypot(vx, vy) or 1.0)
+
+    return sorted(conns, key=lambda c: (-off_axis(c), c[3]))
+
+
+def _run_sequential(
+    board: board_mod.Board,
+    pcb: list[sexpr.Node],
+    entry: dict[str, Any],
+    defaults: dict[str, Any],
+    conns: list[tuple[str, Pad, Pad, str]],
+) -> tuple[list[Result], list[list[sexpr.Node]]]:
+    """Route the connections one after the other in the given order; each sees the earlier ones as obstacles."""
+    results: list[Result] = []
+    nodes: list[list[sexpr.Node]] = []
+    for net, a, b, name in conns:
+        try:
+            r = _route_one(board, entry, defaults, net, a, b)
+        except router.RouteFailure as e:
+            results.append(Result(name, False, str(e)))
+            continue
+        r.commit(board)
+        nodes += _nodes(pcb, r)
+        results.append(Result(name, True, f"{r.length:.2f} mm, {len(r.vias)} via(s)", r.length, len(r.vias)))
+    return results, nodes
+
+
+NEGOTIATION_ROUNDS = 40
+SOFT_COST_START = 3.0  # cost of crossing another route of the entry; grows each round
+SOFT_COST_GROWTH = 1.12
+HISTORY_STEP = 3.0  # added to the cells where routes conflicted, so the next round avoids them
 
 
 def _run_entry(
@@ -196,42 +256,157 @@ def _run_entry(
     defaults: dict[str, Any],
     conns: list[tuple[str, Pad, Pad, str]],
 ) -> tuple[list[Result], list[list[sexpr.Node]]]:
-    """Route an entry's connections in order, negotiating for space.
+    """Route an entry's connections by negotiation (PathFinder).
 
-    A connection that can't get through may cross the entry's routed copper at a cost (the router counts
-    that as soft); the nets it crosses are ripped up and queued again behind it. The greedy order alone
-    decides who gets a channel, and ripping up the blockers is how a human re-does the first lane.
+    Every connection may run through the others' copper at a cost; where routes conflict afterwards,
+    the contested spots get a history cost, the crossing gets dearer, and the conflicting connections
+    are routed again. The first connection no longer wins the channel just by being first. Whatever
+    still conflicts after the last round is dropped (reported as failed), worst offender first.
     """
+    started = time.monotonic()
     start = board.checkpoint()
-    committed: dict[str, tuple[tuple[str, Pad, Pad, str], router.Route]] = {}
-    results: dict[str, Result] = {}
-    queue = list(conns)
-    budget = RIP_UP_BUDGET * len(conns)
-    while queue:
-        conn = queue.pop(0)
-        net, a, b, name = conn
-        soft = frozenset(c[0] for c, _ in committed.values()) if budget > 0 else frozenset()
-        try:
-            r = _route_one(board, entry, defaults, net, a, b, soft)
-        except router.RouteFailure as e:
-            results[name] = Result(name, False, str(e))
-            continue
-        victims = [n for n, (c, _) in committed.items() if c[0] in r.crossed]
-        if victims:
-            budget -= len(victims)
-            board.rollback(start)
-            for n in victims:
-                queue.append(committed.pop(n)[0])
-                results.pop(n, None)
-            for _, kept in committed.values():
-                kept.commit(board)
-        r.commit(board)
-        committed[name] = (conn, r)
-        results[name] = Result(name, True, f"{r.length:.2f} mm, {len(r.vias)} via(s)", r.length, len(r.vias))
+    routed: dict[str, router.Route] = {}
+    failures: dict[str, str] = {}
+    history: dict[tuple[str, int, int], float] = {}
+    nets = frozenset(c[0] for c in conns)
+    todo = list(conns)
+    cost = SOFT_COST_START
+    jobs = _jobs(defaults)
+    for round_no in range(NEGOTIATION_ROUNDS):
+        _rebuild(board, start, routed)  # every connection of the round sees the same board: independent searches
+        outcome = _search_round(board, entry, defaults, conns, todo, nets, cost, history, jobs)
+        for conn, r, why in outcome:
+            name = conn[3]
+            routed.pop(name, None)
+            if r is None:
+                failures[name] = why
+                continue
+            failures.pop(name, None)
+            routed[name] = r
+        _rebuild(board, start, routed)
+        graph = _conflicts(board, routed)
+        conflicts = {n: len(adj) for n, adj in graph.items()}
+        _log(
+            f"  negotiation round {round_no + 1}: {len(routed)} routed, {len(failures)} failed, {len(conflicts)} in conflict ({time.monotonic() - started:.0f} s)"
+        )
+        for name, why in list(failures.items())[:4]:
+            _log(f"    failed {name}: {why[:400]}")
+        if not conflicts:
+            break
+        for name in conflicts:
+            for layer, p0, p1 in routed[name].pieces:
+                n = max(1, round(math.dist(p0, p1) / 0.1))
+                for k in range(n + 1):
+                    p = (p0[0] + (p1[0] - p0[0]) * k / n, p0[1] + (p1[1] - p0[1]) * k / n)
+                    key = router.history_key(layer, p)
+                    history[key] = history.get(key, 0.0) + HISTORY_STEP
+        cost *= SOFT_COST_GROWTH
+        # only an independent set of the conflicting connections moves (in parallel); the ones they conflict
+        # with hold still, so a pair does not swap channels forever (that is what routing them in sequence gives)
+        movers: set[str] = set()
+        for name in sorted(conflicts, key=lambda n: (-conflicts[n], n)):
+            if not graph[name] & movers:
+                movers.add(name)
+        todo = [c for c in conns if c[3] in movers or c[3] in failures]
+    keep = bool(os.environ.get("VIBEPCB_KEEP_CONFLICTS"))  # debugging: show the conflicting routes
+    while not keep and (
+        conflicts := {n: len(adj) for n, adj in _conflicts(board, routed).items()}
+    ):  # out of rounds: drop the worst
+        worst = max(conflicts, key=lambda n: (conflicts[n], n))
+        routed.pop(worst)
+        failures[worst] = "conflicts with other routes of the entry after negotiation"
+        _rebuild(board, start, routed)
+    results = [
+        Result(
+            c[3],
+            True,
+            f"{routed[c[3]].length:.2f} mm, {len(routed[c[3]].vias)} via(s)",
+            routed[c[3]].length,
+            len(routed[c[3]].vias),
+        )
+        if c[3] in routed
+        else Result(c[3], False, failures.get(c[3], "not routed"))
+        for c in conns
+    ]
     nodes: list[list[sexpr.Node]] = []
-    for _, r in committed.values():
+    for r in routed.values():
         nodes += _nodes(pcb, r)
-    return [results[c[3]] for c in conns if c[3] in results], nodes
+    return results, nodes
+
+
+def _log(text: str) -> None:
+    """Progress of a long negotiation on stderr (``VIBEPCB_VERBOSE=1``)."""
+    if os.environ.get("VIBEPCB_VERBOSE"):
+        print(text, file=sys.stderr, flush=True)
+
+
+_WORK: tuple[Any, ...] = ()  # what the worker processes of a round inherit by fork
+
+
+def _jobs(defaults: dict[str, Any]) -> int:
+    """Worker processes: ``[defaults] jobs`` or $VIBEPCB_JOBS, else the cores minus 4 (an editor stays usable), at most 12."""
+    wanted = os.environ.get("VIBEPCB_JOBS") or defaults.get("jobs")
+    if wanted:
+        return max(1, int(wanted))
+    return max(1, min(12, (os.cpu_count() or 4) - 4))
+
+
+def _route_task(i: int) -> tuple[int, router.Route | None, str]:
+    board, entry, defaults, todo, nets, cost, history = _WORK
+    net, a, b, _ = todo[i]
+    try:
+        return i, _route_one(board, entry, defaults, net, a, b, nets, cost, history), ""
+    except router.RouteFailure as e:
+        return i, None, str(e)
+
+
+def _search_round(
+    board: board_mod.Board,
+    entry: dict[str, Any],
+    defaults: dict[str, Any],
+    conns: list[tuple[str, Pad, Pad, str]],
+    todo: list[tuple[str, Pad, Pad, str]],
+    nets: frozenset[str],
+    cost: float,
+    history: dict[tuple[str, int, int], float],
+    jobs: int,
+) -> list[tuple[tuple[str, Pad, Pad, str], router.Route | None, str]]:
+    """Route the ``todo`` connections against the board as it is, in parallel (fork: the board is shared copy-on-write)."""
+    global _WORK  # noqa: PLW0603 - handed to the forked workers
+    _WORK = (board, entry, defaults, todo, nets, cost, history)
+    try:
+        if jobs <= 1 or len(todo) < 3:
+            results = [_route_task(i) for i in range(len(todo))]
+        else:
+            with multiprocessing.get_context("fork").Pool(min(jobs, len(todo))) as pool:
+                results = pool.map(_route_task, range(len(todo)), chunksize=1)
+    finally:
+        _WORK = ()
+    return [(todo[i], r, why) for i, r, why in sorted(results, key=lambda t: t[0])]
+
+
+def _rebuild(board: board_mod.Board, start: tuple[int, int, int, int], routed: dict[str, router.Route]) -> None:
+    """Board = what it was at ``start`` plus these routes."""
+    board.rollback(start)
+    for r in routed.values():
+        r.commit(board)
+
+
+def _conflicts(board: board_mod.Board, routed: dict[str, router.Route]) -> dict[str, set[str]]:
+    """Conflict graph: connection name -> the connections whose routed copper it violates clearance to."""
+    by_net: dict[str, list[str]] = {}
+    for name, r in routed.items():
+        by_net.setdefault(r.net, []).append(name)
+    graph: dict[str, set[str]] = {}
+    for name, r in routed.items():
+        nets = {b.net for layer, a, c in r.pieces for b in drc.scan_track(board, r.net, layer, a, c, r.width)}
+        nets |= {b.net for v in r.vias for b in drc.scan_via(board, r.net, v, *r.via_size)}
+        others = {other for n in nets for other in by_net.get(n, ())}
+        if others:
+            graph.setdefault(name, set()).update(others)
+            for other in others:
+                graph.setdefault(other, set()).add(name)
+    return graph
 
 
 def _connections(
@@ -318,6 +493,8 @@ def _route_one(
     a: Pad,
     b: Pad,
     soft: frozenset[str] = frozenset(),
+    soft_cost: float = 4.0,
+    history: dict[tuple[str, int, int], float] | None = None,
 ) -> router.Route:
     cls = board.rules.class_of(net)
     layers = list(entry.get("layers", defaults.get("layers", board.layers)))
@@ -328,6 +505,8 @@ def _route_one(
         None if via_max == 0 else (cls.via_diameter, cls.via_drill),
         corridor=tuple(float(v) for v in entry["corridor"]) if "corridor" in entry else None,  # type: ignore[arg-type]
         soft=soft - {net},
+        soft_cost=soft_cost,
+        history=history,
     )
     r = router.route(
         board,

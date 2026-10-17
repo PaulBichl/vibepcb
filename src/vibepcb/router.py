@@ -22,18 +22,23 @@ if TYPE_CHECKING:
 
     from vibepcb.board import Board
 
-STEPS_MM = (0.1, 0.05)  # grid steps tried in turn: coarse first (4x fewer states), fine when it fails
+STEPS_MM = (0.1, 0.05)  # fine grid steps (the tube of a coarse path / the unguided search try 0.1 first)
+TUBE_STATES = 100_000  # the fine search inside a tube gives up after this many states
+COARSE_LEVELS = ((0.4, 0.15), (0.2, 0.05))  # (grid step, extra clearance): a rough path first, 16x / 4x fewer states
+TUBE_MM = (1.2, 3.0)  # the fine search stays this close to the coarse path; a wider tube when that fails
+LAST_RESORT_STATES = 60_000  # the unguided fine search when no coarse level found a way
 GRID_SLACK_MM = 0.03  # grid nodes keep this much extra clearance: pieces between nodes then pass the exact check
 SOFT_COST = 4.0  # per grid node through copper that may be ripped up (a crossing costs ~10-20 mm of detour)
 HEURISTIC_WEIGHT = 1.3  # >1: fewer states, routes a little longer than optimal
 LENGTH_COST = 1.0  # per mm
-BEND_COST = 0.2  # per 45 degrees
-VIA_COST = 2.0
+BEND_COST = 0.5  # per 45 degrees
+VIA_COST = 8.0
 OFF_LAYER_COST = 0.5  # per mm on a layer other than the preferred one
 CORRIDOR_MARGINS_MM = (5.0, 15.0)  # around the endpoints, grown on failure
 MAX_STATES = 200_000
 HEADINGS = [(1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1), (0, -1), (1, -1)]
 NO_HEADING = 8
+type Node = tuple[int, int, int]  # grid x, y, layer index
 
 
 class RouteFailure(Exception):  # noqa: N818 - reads as a result, not an error class
@@ -75,6 +80,35 @@ class Spec:
     preferred: str | None = None
     corridor: tracks.Box | None = None  # x0, y0, x1, y1
     soft: frozenset[str] = frozenset()  # nets whose routed copper may be crossed (at a cost)
+    soft_cost: float = 4.0  # per grid node through soft copper (negotiation raises it round by round)
+    history: dict[tuple[str, int, int], float] | None = None  # extra cost of contested spots (see history_key)
+
+
+class Tube:
+    """The points within ``radius`` of a polyline: the area a fine search may use around a coarse path."""
+
+    def __init__(self, pieces: list[tuple[str, tracks.Point, tracks.Point]], radius: float) -> None:
+        self.radius = radius
+        self.cells: dict[tuple[int, int], list[tracks.Point]] = {}
+        for _, a, b in pieces:
+            n = max(1, math.ceil(math.dist(a, b) / (radius / 2)))
+            for k in range(n + 1):
+                p = (a[0] + (b[0] - a[0]) * k / n, a[1] + (b[1] - a[1]) * k / n)
+                self.cells.setdefault((math.floor(p[0] / radius), math.floor(p[1] / radius)), []).append(p)
+
+    def near(self, p: tracks.Point) -> bool:
+        cx, cy = math.floor(p[0] / self.radius), math.floor(p[1] / self.radius)
+        return any(
+            math.dist(p, q) <= self.radius
+            for dx in (-1, 0, 1)
+            for dy in (-1, 0, 1)
+            for q in self.cells.get((cx + dx, cy + dy), ())
+        )
+
+
+def history_key(layer: str, p: tracks.Point) -> tuple[str, int, int]:
+    """Key of the 0.1 mm cell of ``p`` in a negotiation history."""
+    return layer, round(p[0] * 10), round(p[1] * 10)
 
 
 def _octile(dx: int, dy: int, step: float) -> float:
@@ -123,21 +157,74 @@ def _leg(
     heading: int,
 ) -> tuple[Route, int, str]:
     last_failure: RouteFailure | None = None
-    for step, margin in itertools.product(STEPS_MM, CORRIDOR_MARGINS_MM):
-        box = spec.corridor or (
+    stages: list[str] = []
+
+    def area(margin: float) -> tracks.Box:
+        return spec.corridor or (
             min(start[0], goal[0]) - margin,
             min(start[1], goal[1]) - margin,
             max(start[0], goal[0]) + margin,
             max(start[1], goal[1]) + margin,
         )
+
+    ends = goal_layers or spec.layers
+    found_rough = False
+    for margin in CORRIDOR_MARGINS_MM:
+        box = area(margin)
+        for coarse_step, slack in COARSE_LEVELS:  # a rough path (or the proof there is none) is cheap
+            try:
+                rough, _, _ = _search(
+                    board, net, start, goal, spec, start_layers, ends, heading, box, coarse_step, slack, None
+                )
+            except RouteFailure as e:
+                last_failure = e
+                stages.append(f"coarse {coarse_step}: {e.reason[:60]}")
+                continue
+            found_rough = True
+            for radius in TUBE_MM:  # the fine search stays in a tube around the rough path
+                try:
+                    return _search(
+                        board,
+                        net,
+                        start,
+                        goal,
+                        spec,
+                        start_layers,
+                        ends,
+                        heading,
+                        box,
+                        STEPS_MM[0],
+                        GRID_SLACK_MM,
+                        Tube(rough.pieces, radius),
+                        max_states=TUBE_STATES,
+                    )
+                except RouteFailure as e:
+                    last_failure = e
+                    stages.append(f"fine {STEPS_MM[0]} in {radius} mm tube: {e.reason[:50]}")
+        if spec.corridor is not None:
+            break
+    if not found_rough:  # no coarse level found a way (a tight spot between nodes): fine search, on a short leash
         try:
-            return _search(board, net, start, goal, spec, start_layers, goal_layers or spec.layers, heading, box, step)
+            return _search(
+                board,
+                net,
+                start,
+                goal,
+                spec,
+                start_layers,
+                ends,
+                heading,
+                area(CORRIDOR_MARGINS_MM[0]),
+                STEPS_MM[0],
+                GRID_SLACK_MM,
+                None,
+                max_states=LAST_RESORT_STATES,
+            )
         except RouteFailure as e:
             last_failure = e
-            if spec.corridor is not None:
-                break
+            stages.append(f"unguided {STEPS_MM[0]}: {e.reason[:60]}")
     assert last_failure is not None
-    raise last_failure
+    raise RouteFailure("; ".join(stages), last_failure.blocker)
 
 
 def _search(
@@ -151,6 +238,9 @@ def _search(
     heading0: int,
     box: tracks.Box,
     step_mm: float,
+    slack: float,
+    tube: Tube | None,
+    max_states: int | None = None,
 ) -> tuple[Route, int, str]:
     layers = spec.layers
     x0, y0, x1, y1 = box
@@ -167,8 +257,9 @@ def _search(
         key = (li, ix, iy)
         if key not in blocked:
             p = pos(ix, iy)
-            w = spec.width + 2 * GRID_SLACK_MM
-            if not (x0 <= p[0] <= x1 and y0 <= p[1] <= y1) or drc.blocking_track(board, net, layers[li], p, p, w, soft):
+            w = spec.width + 2 * slack
+            outside = not (x0 <= p[0] <= x1 and y0 <= p[1] <= y1) or (tube is not None and not tube.near(p))
+            if outside or drc.blocking_track(board, net, layers[li], p, p, w, soft):
                 blocked[key] = 1
             else:
                 blocked[key] = 2 if soft and drc.blocking_track(board, net, layers[li], p, p, w) else 0
@@ -182,27 +273,32 @@ def _search(
             return None  # no via in a pad of its own net
         if drc.blocking_via(board, net, c, *spec.via, soft) is not None:
             return None
-        return SOFT_COST if soft and drc.blocking_via(board, net, c, *spec.via) is not None else 0.0
+        return spec.soft_cost if soft and drc.blocking_via(board, net, c, *spec.via) is not None else 0.0
 
     gx, gy = round((goal[0] - start[0]) / step_mm), round((goal[1] - start[1]) / step_mm)
     goal_li = {layers.index(layer) for layer in goal_layers if layer in layers}
     pref = layers.index(spec.preferred) if spec.preferred in layers else -1
     counter = itertools.count()
-    heap: list[tuple[float, int, float, tuple[int, int, int, int]]] = []
-    g: dict[tuple[int, int, int, int], float] = {}
-    parent: dict[tuple[int, int, int, int], tuple[int, int, int, int] | None] = {}
+    # a state is a grid node (x, y, layer); the heading it was reached with (for the bend rule and cost)
+    # is kept beside it, not in it: 8x fewer states than (x, y, layer, heading)
+    heap: list[tuple[float, int, float, Node]] = []
+    g: dict[Node, float] = {}
+    parent: dict[Node, Node | None] = {}
+    heading: dict[Node, int] = {}
     for layer in start_layers:
         if layer in layers:
-            s = (0, 0, layers.index(layer), heading0)
+            s = (0, 0, layers.index(layer))
             g[s] = 0.0
             parent[s] = None
+            heading[s] = heading0
             heapq.heappush(heap, (_octile(gx, gy, step_mm), next(counter), 0.0, s))
-    end: tuple[int, int, int, int] | None = None
+    end: Node | None = None
     states = 0
     best: tuple[float, tracks.Point] = (math.inf, start)
     while heap:
         _, _, cost, cur = heapq.heappop(heap)
-        ix, iy, li, h = cur
+        ix, iy, li = cur
+        h = heading[cur]
         if cost > g[cur]:
             continue  # stale heap entry
         d_goal = math.dist(pos(ix, iy), goal)
@@ -216,8 +312,8 @@ def _search(
             end = cur
             break
         states += 1
-        if states > MAX_STATES:
-            msg = f"search limit ({MAX_STATES} states) reached"
+        if states > (max_states or MAX_STATES):
+            msg = f"search limit ({max_states or MAX_STATES} states) reached"
             raise RouteFailure(msg)
         for nh in range(8) if h == NO_HEADING else ((h - 1) % 8, h, (h + 1) % 8):
             dx, dy = HEADINGS[nh]
@@ -230,22 +326,26 @@ def _search(
             if h != NO_HEADING and nh != h:
                 step += BEND_COST
             if state == 2:
-                step += SOFT_COST
-            ns = (nx, ny, li, nh)
+                step += spec.soft_cost
+            if spec.history:
+                step += spec.history.get(history_key(layers[li], pos(nx, ny)), 0.0)
+            ns = (nx, ny, li)
             if cost + step < g.get(ns, math.inf):
                 g[ns] = cost + step
                 parent[ns] = cur
+                heading[ns] = nh
                 heapq.heappush(heap, (cost + step + _octile(gx - nx, gy - ny, step_mm), next(counter), cost + step, ns))
         extra = via_cost(ix, iy) if spec.via is not None else None
         if extra is not None:
             for lj in range(len(layers)):
                 if lj == li or cell(lj, ix, iy) == 1:
                     continue
-                add = VIA_COST + extra + (SOFT_COST if cell(lj, ix, iy) == 2 else 0.0)
-                ns = (ix, iy, lj, NO_HEADING)
+                add = VIA_COST + extra + (spec.soft_cost if cell(lj, ix, iy) == 2 else 0.0)
+                ns = (ix, iy, lj)
                 if cost + add < g.get(ns, math.inf):
                     g[ns] = cost + add
                     parent[ns] = cur
+                    heading[ns] = NO_HEADING
                     heapq.heappush(
                         heap, (cost + add + _octile(gx - ix, gy - iy, step_mm), next(counter), cost + add, ns)
                     )
@@ -253,7 +353,7 @@ def _search(
         blocker = drc.blocking_track(board, net, layers[0], best[1], goal, spec.width)
         msg = f"no path (got within {best[0]:.2f} mm of the target)"
         raise RouteFailure(msg, blocker)
-    return _rebuild(net, spec, layers, parent, end, pos, goal)
+    return _rebuild(net, spec, layers, parent, end, heading[end], pos, goal)
 
 
 def _closing_ok(
@@ -266,13 +366,14 @@ def _rebuild(
     net: str,
     spec: Spec,
     layers: list[str],
-    parent: dict[tuple[int, int, int, int], tuple[int, int, int, int] | None],
-    end: tuple[int, int, int, int],
+    parent: dict[Node, Node | None],
+    end: Node,
+    end_heading: int,
     pos: Callable[[int, int], tracks.Point],
     goal: tracks.Point,
 ) -> tuple[Route, int, str]:
-    chain = []
-    cur: tuple[int, int, int, int] | None = end
+    chain: list[Node] = []
+    cur: Node | None = end
     while cur is not None:
         chain.append(cur)
         cur = parent[cur]
@@ -292,7 +393,7 @@ def _rebuild(
     if run[-1] != goal:
         run.append(goal)
     result.pieces += _pieces(run_layer, run)
-    return result, end[3], run_layer
+    return result, end_heading, run_layer
 
 
 def _pieces(layer: str, points: list[tracks.Point]) -> list[tuple[str, tracks.Point, tracks.Point]]:
