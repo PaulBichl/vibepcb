@@ -1094,3 +1094,21 @@ def test_keepout_config_is_validated() -> None:
     with pytest.raises(config.ConfigError, match="block takes"):
         config.validate({"keepout": {"a": {"ref": "U1", "block": ["copper"]}}})
     config.validate({"keepout": {"a": {"ref": "U1", "block": ["pour", "vias"]}, "b": {"area": [0, 0, 1, 1]}}})
+
+
+def test_apply_pours_adds_a_missing_pour_from_the_config(project: fixes.KicadProject) -> None:
+    project.config = {
+        "pour": {
+            "supply": {"net": "VCC", "layers": ["B.Cu"], "margin": 1.0},
+            "none": {"net": "NOPE", "layers": ["F.Cu"]},
+        }
+    }
+    before = len(list(sexpr.children(project.pcb, "zone")))
+    changes = fixes.apply_pours(project)
+    assert "supply: VCC pour on B.Cu" in changes
+    assert "none: net NOPE not on the board, pour skipped" in changes
+    assert len(list(sexpr.children(project.pcb, "zone"))) == before + 1
+    assert fixes.apply_pours(project) == ["none: net NOPE not on the board, pour skipped"]  # idempotent
+    zone = [z for z in sexpr.children(project.pcb, "zone") if sexpr.child(z, "keepout") is None][-1]
+    assert str(sexpr.child(zone, "layer")[1]) == "B.Cu"  # type: ignore[index]
+    assert fixes._zone_net(project.pcb, zone) == "VCC"

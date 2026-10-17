@@ -19,6 +19,10 @@ these from the board's config file into the KiCad project (:func:`fixes.apply_bo
     [planes]                       # nets with a plane: each SMD pad gets its own via to it,
     nets = ["GND", "V3V3"]         #   the router's tracks of the net go (fixes.plane_pad_vias)
 
+    [pour.v3v3]                    # a pour the build lacks (manual routing: tscircuit emits pours with its routes):
+    net = "V3V3"                   #   copy of the board's pour settings over the outline, inset by margin (default 0.5)
+    layers = ["In2.Cu"]
+
     [keepout.antenna]              # rule area (KiCad enforces it: pour fill + DRC; the router keeps out of tracks / vias)
     ref = "U3"                     #   over this part's pads + courtyard (or: area = [x0, y0, x1, y1] board mm)
     margin = 1.0                   #   mm around it (default 0)
@@ -71,7 +75,7 @@ def load(board: str) -> dict[str, Any]:
 
 
 def validate(data: dict[str, Any], where: str = CONFIG_NAME) -> None:
-    known = {"netclass", "length_group", "diff_pair", "planes", "escape", "routing", "keepout"}
+    known = {"netclass", "length_group", "diff_pair", "planes", "escape", "routing", "keepout", "pour"}
     if unknown := set(data) - known:
         msg = f"{where}: unknown section(s) {sorted(unknown)} (known: {sorted(known)})"
         raise ConfigError(msg)
@@ -85,6 +89,13 @@ def validate(data: dict[str, Any], where: str = CONFIG_NAME) -> None:
     if data.get("routing", {}).get("mode", "auto") not in ("auto", "manual"):
         msg = f'{where}: [routing] mode must be "auto" (tscircuit routes) or "manual" (routes.toml)'
         raise ConfigError(msg)
+    for name, k in data.get("pour", {}).items():
+        if "net" not in k or not k.get("layers"):
+            msg = f'{where}: pour {name!r} needs net = "NAME" and layers = ["In2.Cu", ...]'
+            raise ConfigError(msg)
+        if bad := set(k) - {"net", "layers", "margin"}:
+            msg = f"{where}: pour {name!r}: unknown key(s) {sorted(bad)} (known: layers, margin, net)"
+            raise ConfigError(msg)
     for name, k in data.get("keepout", {}).items():
         if ("ref" in k) == ("area" in k):
             msg = f'{where}: keepout {name!r} needs either ref = "U1" (the part) or area = [x0, y0, x1, y1]'

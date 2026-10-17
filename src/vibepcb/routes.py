@@ -231,7 +231,10 @@ def _run_sequential(
     """Route the connections one after the other in the given order; each sees the earlier ones as obstacles."""
     results: list[Result] = []
     nodes: list[list[sexpr.Node]] = []
-    for net, a, b, name in conns:
+    started = time.monotonic()
+    for i, (net, a, b, name) in enumerate(conns, 1):
+        if i % 10 == 0 or i == len(conns):
+            _log(f"  {entry.get('net', '?')}: {i}/{len(conns)} connections ({time.monotonic() - started:.0f} s)")
         try:
             r = _route_one(board, entry, defaults, net, a, b)
         except router.RouteFailure as e:

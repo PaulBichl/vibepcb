@@ -3644,6 +3644,72 @@ def apply_keepouts(project: KicadProject) -> list[str]:
     return changes
 
 
+POUR_ZONE_PREFIX = "vibepcb:pour:"
+
+
+def apply_pours(project: KicadProject) -> list[str]:
+    """Copper pours from the board config (``[pour.<name>]``, see ``vibepcb.config``).
+
+    tscircuit only emits a pour once routing happened, so the placement-only build of a board with
+    ``[routing] mode = "manual"`` has none on a plane layer of a supply (a ``<copperpour>`` on an inner
+    layer). A pour for a net and layer the board has no zone for yet is added here, as a copy of the
+    board's existing pour settings (else KiCad's usual ones), over the board outline inset by ``margin``.
+    """
+    cfg = project.config.get("pour", {})
+    zones = [z for z in sexpr.children(project.pcb, "zone") if sexpr.child(z, "keepout") is None]
+    have = {(_zone_net(project.pcb, z), lay) for z in zones for lay in _copper_layers(z)}
+    template = next((z for z in zones if sexpr.child(z, "fill") is not None), None) or sexpr.loads(
+        '(zone (net 0) (layer "F.Cu") (uuid "00000000-0000-0000-0000-000000000000") (hatch edge 0.5) '
+        "(connect_pads (clearance 0.2)) (min_thickness 0.25) "
+        "(fill yes (thermal_gap 0.3) (thermal_bridge_width 0.3) (island_removal_mode 0)))"
+    )
+    edge_points = [
+        pt
+        for g in project.pcb
+        if isinstance(g, list)
+        and sexpr.head(g) in ("gr_line", "gr_rect", "gr_arc", "gr_poly")
+        and _layer(g) == "Edge.Cuts"
+        for pt in _graphic_points(g)
+    ]
+    changes = []
+    for name, entry in cfg.items():
+        net, margin = str(entry["net"]), float(entry.get("margin", 0.5))
+        declared = _declared_net(project.pcb, net)
+        if declared is None:
+            changes.append(f"{name}: net {net} not on the board, pour skipped")
+            continue
+        if not edge_points:
+            changes.append(f"{name}: no board outline, pour skipped")
+            continue
+        x0, y0, x1, y1 = _bbox(edge_points, -margin)
+        for layer in entry["layers"]:
+            if (net, layer) in have:
+                continue
+            zone = copy.deepcopy(template)
+            for key in ("net", "net_name", "layer", "layers", "filled_polygon", "polygon"):
+                for old in list(sexpr.children(zone, key)):
+                    zone.remove(old)
+            uid = uuid.uuid5(uuid.NAMESPACE_OID, f"pour:{name}:{layer}")
+            head = [copy.deepcopy(declared), [Sym("layer"), layer]]
+            if len(declared) > 2:  # (net <id> "<name>") on a pad: a zone writes (net <id>) (net_name "<name>")
+                head = [[Sym("net"), declared[1]], [Sym("net_name"), net], [Sym("layer"), layer]]
+            outline = sexpr.loads(
+                f"(polygon (pts (xy {_mm(x0)} {_mm(y0)}) (xy {_mm(x1)} {_mm(y0)}) (xy {_mm(x1)} {_mm(y1)}) (xy {_mm(x0)} {_mm(y1)})))"
+            )
+            uid_node = sexpr.child(zone, "uuid")
+            if uid_node is not None:
+                uid_node[1] = str(uid)
+            zone[1:1] = head
+            zone.append(outline)
+            project.pcb.append(zone)
+            changes.append(f"{name}: {net} pour on {layer}")
+    return changes
+
+
+def _zone_net(pcb: list[Node], zone: list[Node]) -> str:
+    return _net_of(zone, _net_names(pcb))
+
+
 def _is_keepout_zone(zone: list[Node]) -> bool:
     name = sexpr.child(zone, "name")
     return name is not None and len(name) > 1 and str(name[1]).startswith(KEEPOUT_ZONE_PREFIX)
@@ -3673,6 +3739,7 @@ FIXES: dict[str, Fix] = {
     "rename_auto_nets": rename_auto_nets,
     "propagate_split_pad_nets": propagate_split_pad_nets,
     "apply_escapes": apply_escapes,
+    "apply_pours": apply_pours,
     "apply_keepouts": apply_keepouts,
     "apply_routes": apply_routes,
     "repair_zero_width_tracks": repair_zero_width_tracks,

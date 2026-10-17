@@ -19,6 +19,7 @@ import argparse
 import copy
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -134,6 +135,7 @@ def _png(svg: Path, png: Path, width: int) -> None:
 
 
 def cmd_fix(board: str) -> int:
+    os.environ.setdefault("VIBEPCB_VERBOSE", "1")  # routing progress (routes.toml) on stderr
     raw, target = paths.raw_dir(board), paths.kicad_dir(board)
     kicad.assemble_project(raw / f"{board}.kicad.zip", target, board)
     sch, circuit = target / f"{board}.kicad_sch", raw / f"{board}.circuit.json"
