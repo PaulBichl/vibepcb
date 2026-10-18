@@ -26,7 +26,7 @@ STEPS_MM = (0.1, 0.05)  # fine grid steps (the tube of a coarse path / the ungui
 TUBE_STATES = 100_000  # the fine search inside a tube gives up after this many states
 COARSE_LEVELS = ((0.4, 0.15), (0.2, 0.05))  # (grid step, extra clearance): a rough path first, 16x / 4x fewer states
 TUBE_MM = (1.2, 3.0)  # the fine search stays this close to the coarse path; a wider tube when that fails
-LAST_RESORT_STATES = 60_000  # the unguided fine search when no coarse level found a way
+LAST_RESORT_STATES = 300_000  # the unguided fine search when the guided ones failed
 GRID_SLACK_MM = 0.03  # grid nodes keep this much extra clearance: pieces between nodes then pass the exact check
 RESERVE_COST = 1.5  # per grid node in front of another net's pad: leave room for its exit / via
 SOFT_COST = 4.0  # per grid node through copper that may be ripped up (a crossing costs ~10-20 mm of detour)
@@ -170,7 +170,6 @@ def _leg(
         )
 
     ends = goal_layers or spec.layers
-    found_rough = False
     for margin in CORRIDOR_MARGINS_MM:
         box = area(margin)
         for coarse_step, slack in COARSE_LEVELS:  # a rough path (or the proof there is none) is cheap
@@ -182,7 +181,6 @@ def _leg(
                 last_failure = e
                 stages.append(f"coarse {coarse_step}: {e.reason[:60]}")
                 continue
-            found_rough = True
             for radius in TUBE_MM:  # the fine search stays in a tube around the rough path
                 try:
                     return _search(
@@ -205,26 +203,27 @@ def _leg(
                     stages.append(f"fine {STEPS_MM[0]} in {radius} mm tube: {e.reason[:50]}")
         if spec.corridor is not None:
             break
-    if not found_rough:  # no coarse level found a way (a tight spot between nodes): fine search, on a short leash
-        try:
-            return _search(
-                board,
-                net,
-                start,
-                goal,
-                spec,
-                start_layers,
-                ends,
-                heading,
-                area(CORRIDOR_MARGINS_MM[0]),
-                STEPS_MM[0],
-                GRID_SLACK_MM,
-                None,
-                max_states=LAST_RESORT_STATES,
-            )
-        except RouteFailure as e:
-            last_failure = e
-            stages.append(f"unguided {STEPS_MM[0]}: {e.reason[:60]}")
+    # no coarse level found a way, or the fine search could not follow it (the coarse path came in from a side
+    # that is closed at fine resolution): the unguided fine search, on a leash
+    try:
+        return _search(
+            board,
+            net,
+            start,
+            goal,
+            spec,
+            start_layers,
+            ends,
+            heading,
+            area(CORRIDOR_MARGINS_MM[0]),
+            STEPS_MM[0],
+            GRID_SLACK_MM,
+            None,
+            max_states=LAST_RESORT_STATES,
+        )
+    except RouteFailure as e:
+        last_failure = e
+        stages.append(f"unguided {STEPS_MM[0]}: {e.reason[:60]}")
     assert last_failure is not None
     raise RouteFailure("; ".join(stages), last_failure.blocker)
 
