@@ -108,6 +108,11 @@ class Tube:
         )
 
 
+def heading_of(d: tracks.Point) -> int:
+    """The grid heading (index into HEADINGS) nearest to direction d."""
+    return max(range(8), key=lambda h: (HEADINGS[h][0] * d[0] + HEADINGS[h][1] * d[1]) / math.hypot(*HEADINGS[h]))
+
+
 def history_key(layer: str, p: tracks.Point) -> tuple[str, int, int]:
     """Key of the 0.1 mm cell of ``p`` in a negotiation history."""
     return layer, round(p[0] * 10), round(p[1] * 10)
@@ -128,19 +133,32 @@ def route(
     start_layers: list[str] | None = None,
     goal_layers: list[str] | None = None,
     waypoints: list[tracks.Point] | None = None,
+    start_dir: tracks.Point | None = None,
+    goal_dir: tracks.Point | None = None,
 ) -> Route:
-    """Route ``net`` from ``start`` to ``goal`` (pad centres or any points) through the waypoints."""
+    """Route ``net`` from ``start`` to ``goal`` (pad centres or any points) through the waypoints.
+
+    ``start_dir`` / ``goal_dir``: the direction a track already leaves the start / goal in (a BGA escape,
+    ball to end): the route continues it (first move within 45 degrees) and arrives the same way (its last
+    move within 45 degrees of running into it), so the joint is no sharper than a 45 degree bend.
+    """
     for layer in spec.layers:
         if layer not in board.layers:
             msg = f"layer {layer} is not a copper layer of the board"
             raise RouteFailure(msg)
     points = [start, *(waypoints or []), goal]
     result = Route(net, spec.width, via_size=spec.via or (0.0, 0.0))
-    heading = NO_HEADING
+    heading = NO_HEADING if start_dir is None else heading_of(start_dir)
+    arrive = None
+    if goal_dir is not None:
+        h = heading_of((-goal_dir[0], -goal_dir[1]))
+        arrive = frozenset({(h - 1) % 8, h, (h + 1) % 8, NO_HEADING})
     layers_in = start_layers or spec.layers
     for i, (a, b) in enumerate(itertools.pairwise(points)):
         last = i == len(points) - 2
-        leg, heading, layer = _leg(board, net, a, b, spec, layers_in, goal_layers if last else None, heading)
+        leg, heading, layer = _leg(
+            board, net, a, b, spec, layers_in, goal_layers if last else None, heading, arrive if last else None
+        )
         result.pieces += leg.pieces
         result.vias += leg.vias
         layers_in = [layer]
@@ -157,6 +175,7 @@ def _leg(
     start_layers: list[str],
     goal_layers: list[str] | None,
     heading: int,
+    arrive: frozenset[int] | None = None,
 ) -> tuple[Route, int, str]:
     last_failure: RouteFailure | None = None
     stages: list[str] = []
@@ -175,7 +194,19 @@ def _leg(
         for coarse_step, slack in COARSE_LEVELS:  # a rough path (or the proof there is none) is cheap
             try:
                 rough, _, _ = _search(
-                    board, net, start, goal, spec, start_layers, ends, heading, box, coarse_step, slack, None
+                    board,
+                    net,
+                    start,
+                    goal,
+                    spec,
+                    start_layers,
+                    ends,
+                    heading,
+                    box,
+                    coarse_step,
+                    slack,
+                    None,
+                    arrive=arrive,
                 )
             except RouteFailure as e:
                 last_failure = e
@@ -197,6 +228,7 @@ def _leg(
                         GRID_SLACK_MM,
                         Tube(rough.pieces, radius),
                         max_states=TUBE_STATES,
+                        arrive=arrive,
                     )
                 except RouteFailure as e:
                     last_failure = e
@@ -220,6 +252,7 @@ def _leg(
             GRID_SLACK_MM,
             None,
             max_states=LAST_RESORT_STATES,
+            arrive=arrive,
         )
     except RouteFailure as e:
         last_failure = e
@@ -242,6 +275,7 @@ def _search(
     slack: float,
     tube: Tube | None,
     max_states: int | None = None,
+    arrive: frozenset[int] | None = None,
 ) -> tuple[Route, int, str]:
     layers = spec.layers
     x0, y0, x1, y1 = box
@@ -308,6 +342,7 @@ def _search(
         if (
             li in goal_li
             and d_goal <= snap
+            and (arrive is None or h in arrive)
             and _closing_ok(board, net, layers[li], pos(ix, iy), goal, spec.width, soft)
         ):
             end = cur

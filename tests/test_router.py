@@ -89,3 +89,14 @@ def test_deterministic(tmp_path: Path) -> None:
     a = router.route(board, "A", (10, 10), (14, 10), spec())
     b = router.route(board, "A", (10, 10), (14, 10), spec())
     assert a.pieces == b.pieces
+
+
+def test_start_and_goal_directions_continue_an_escape(tmp_path: Path) -> None:
+    board = board_mod.Board.from_project(write(tmp_path))
+    # a track already leaves the start going +y and arrives at the goal going -y (it continues to a ball below)
+    r = router.route(board, "A", (10, 10), (14, 10), spec(), start_dir=(0.0, 1.0), goal_dir=(0.0, 1.0))
+    (_, a0, b0), (_, a1, b1) = r.pieces[0], r.pieces[-1]
+    first = ((b0[0] - a0[0]) / math.dist(a0, b0), (b0[1] - a0[1]) / math.dist(a0, b0))
+    last = ((b1[0] - a1[0]) / math.dist(a1, b1), (b1[1] - a1[1]) / math.dist(a1, b1))
+    assert first[1] >= math.cos(math.radians(45)) - 1e-6  # within 45 deg of +y
+    assert last[1] <= -math.cos(math.radians(45)) + 1e-6  # runs into the goal against +y: within 45 deg of -y

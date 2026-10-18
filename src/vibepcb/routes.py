@@ -75,6 +75,7 @@ class Pad:
     layers: frozenset[str]
     exit: tracks.Point | None = None  # where the pad's own track or via leaves it (outside the part), None: none
     ring: tuple[tracks.Point, ...] = ()  # the spots just outside the pad on all four sides (a plane pad's via)
+    escape_dir: tracks.Point | None = None  # an escape end: the direction its escape track runs in, ball to end
 
     @property
     def label(self) -> str:
@@ -151,12 +152,18 @@ def board_pads(project: KicadProject) -> list[Pad]:
             centre = to_board(fixes._num(at, 1), fixes._num(at, 2))
             exit_at = _exit_point(fp, pad, centre, to_board)
             ring = _ring_points(pad, centre, to_board)
+            escape_dir = None
             if (found := ends.get((ref, str(pad[1])))) is not None and found[0].end_layer:
                 esc, (dx, dy) = found
                 centre = to_board(esc.end[0] + dx, -esc.end[1] + dy)
                 layers = frozenset({fixes._kicad_layer(esc.end_layer)})
+                last = [q for _, pts in esc.tracks for q in pts][-2:]
+                if len(last) == 2:
+                    a, b = (to_board(x + dx, -y + dy) for x, y in last)
+                    if (n := math.dist(a, b)) > 1e-6:
+                        escape_dir = ((b[0] - a[0]) / n, (b[1] - a[1]) / n)
                 exit_at, ring = None, ()  # the escape track leaves the ball already
-            out.append(Pad(ref, str(pad[1]), fixes._net_of(pad, names), centre, layers, exit_at, ring))
+            out.append(Pad(ref, str(pad[1]), fixes._net_of(pad, names), centre, layers, exit_at, ring, escape_dir))
     return out
 
 
@@ -667,6 +674,8 @@ def _route_one(
         start_layers=[layer for layer in layers if layer in a.layers],
         goal_layers=[layer for layer in layers if layer in b.layers],
         waypoints=[(float(x), float(y)) for x, y in entry.get("waypoints", [])],
+        start_dir=a.escape_dir,
+        goal_dir=b.escape_dir,
     )
     if via_max is not None and len(r.vias) > via_max:
         msg = f"needs {len(r.vias)} via(s), via_max is {via_max}"
