@@ -1,9 +1,21 @@
 # TODO
 
-- **Config wizard** (`vibepcb new`): ask for the board's design rules and stack-up up front and
-  write them into the board source - layer count and stack-up (which layer carries which plane:
-  GND / supply), fab and its limits (clearance, min track/via, board thickness), net classes
-  (power widths, high voltage), edge clearance. Defaults = common practice for the chosen fab.
+- **Design / manufacturing rule profiles** (replaces the "config wizard" idea): rules depend on the
+  fab, its process tier and the application, so they live in TOML profiles and VibePCB converts them.
+  - Profiles in `rules/<name>.toml` (versioned with the tool): fab capability sets (e.g. `jlcpcb-2l`,
+    `jlcpcb-4l`, `jlcpcb-6l-hdi`: min track / clearance / via drill + annular ring / hole-to-hole /
+    copper-to-edge / silk width / board thickness and stack-up with dielectric + er) and application
+    layers on top (`ipc-class2`, `ipc-class3`, `hv-60v` creepage per net class, `rf` impedance targets).
+  - A board picks them in `vibepcb.toml`: `[rules] profiles = ["jlcpcb-4l", "ipc-class2"]` plus local
+    overrides (`[rules.override] min_clearance = 0.15`); later profiles and overrides win, each value
+    reports which profile set it (`pcb rules <board>` prints the merged table).
+  - One source, every consumer: `fix` writes `.kicad_pro` design settings + net-class defaults and
+    `.kicad_dru` rules (KiCad DRC enforces them), the router/`drc.py` read the same numbers, the build
+    derives tscircuit's board props (`minTraceWidth`, clearances, via sizes) so the autorouter targets
+    the fab too, `stackup.py` (routing plan phase 6) takes the stack-up for impedance widths.
+  - Checks: a profile value below the fab's capability is an error, not a silent override; `fab`
+    stamps the profile names into the fab notes.
+  - `vibepcb new` asks which profiles to use (the old wizard idea), defaults = common practice.
 - **Route cache replay**: tscircuit saves route paths only for boards without custom-symbol
   imports (see CLAUDE.md); wire `<autoroutingphase pcbTracePaths>` so unchanged placements
   skip the routing pass.
