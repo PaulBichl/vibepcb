@@ -135,6 +135,10 @@ class Board:
         del self.items[cp[0] :], self.copper.segs[cp[1] :], self.copper.vias[cp[2] :], self.holes[cp[3] :]
         self._index = None
 
+    def segs_by_net_now(self, net: str) -> list[tracks.Seg]:
+        """The net's tracks as they are now (``copper.segs_by_net`` is cached at load, before any route)."""
+        return [s for s in self.copper.segs if s.net == net]
+
     def add_track(self, net: str, layer: str, a: tracks.Point, b: tracks.Point, width: float) -> None:
         s = tracks.Seg(a, b, width, layer, net)
         self.copper.segs.append(s)

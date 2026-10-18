@@ -637,6 +637,21 @@ def _chain(board: board_mod.Board, net: str, members: list[Pad]) -> list[tuple[P
     return out
 
 
+def _escape(p: Pad) -> list[tracks.Point]:
+    """At an escape end: the escape's direction (ball to end), which a route leaving the end continues."""
+    return [p.escape_dir] if p.escape_dir is not None else []
+
+
+def _tracks_at(board: board_mod.Board, net: str, p: Pad) -> list[tracks.Point]:
+    """Directions (away from the pad) of the net's tracks that already end at the pad's centre."""
+    out = []
+    for s in board.segs_by_net_now(net):
+        for end, far in ((s.a, s.b), (s.b, s.a)):
+            if math.dist(end, p.centre) <= tracks.EPS and (n := math.dist(end, far)) > tracks.EPS:
+                out.append(((far[0] - end[0]) / n, (far[1] - end[1]) / n))
+    return out
+
+
 def _dist(a: Pad, b: Pad) -> float:
     return math.dist(a.centre, b.centre)
 
@@ -674,8 +689,8 @@ def _route_one(
         start_layers=[layer for layer in layers if layer in a.layers],
         goal_layers=[layer for layer in layers if layer in b.layers],
         waypoints=[(float(x), float(y)) for x, y in entry.get("waypoints", [])],
-        start_dir=a.escape_dir,
-        goal_dir=b.escape_dir,
+        start_heads=router.headings(_escape(a), _tracks_at(board, net, a)),
+        arrive_heads=router.headings(_tracks_at(board, net, b), _escape(b)),
     )
     if via_max is not None and len(r.vias) > via_max:
         msg = f"needs {len(r.vias)} via(s), via_max is {via_max}"

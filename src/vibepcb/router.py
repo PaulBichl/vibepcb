@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING
 from vibepcb import drc, tracks
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterable
 
     from vibepcb.board import Board
 
@@ -108,9 +108,20 @@ class Tube:
         )
 
 
-def heading_of(d: tracks.Point) -> int:
-    """The grid heading (index into HEADINGS) nearest to direction d."""
-    return max(range(8), key=lambda h: (HEADINGS[h][0] * d[0] + HEADINGS[h][1] * d[1]) / math.hypot(*HEADINGS[h]))
+def headings(along: list[tracks.Point], against: list[tracks.Point]) -> frozenset[int] | None:
+    """The grid headings h with h . a >= 0 for every a in ``along`` and h . b <= 0 for every b in ``against``
+    (within 90 degrees of / at least 90 degrees away from those directions); None: no constraint, or none fits."""
+    if not along and not against:
+        return None
+    eps = 1e-9
+
+    def dot(h: int, d: tracks.Point) -> float:
+        return (HEADINGS[h][0] * d[0] + HEADINGS[h][1] * d[1]) / math.hypot(*HEADINGS[h])
+
+    found = frozenset(
+        h for h in range(8) if all(dot(h, a) >= -eps for a in along) and all(dot(h, b) <= eps for b in against)
+    )
+    return found or None
 
 
 def history_key(layer: str, p: tracks.Point) -> tuple[str, int, int]:
@@ -133,14 +144,13 @@ def route(
     start_layers: list[str] | None = None,
     goal_layers: list[str] | None = None,
     waypoints: list[tracks.Point] | None = None,
-    start_dir: tracks.Point | None = None,
-    goal_dir: tracks.Point | None = None,
+    start_heads: frozenset[int] | None = None,
+    arrive_heads: frozenset[int] | None = None,
 ) -> Route:
     """Route ``net`` from ``start`` to ``goal`` (pad centres or any points) through the waypoints.
 
-    ``start_dir`` / ``goal_dir``: the direction a track already leaves the start / goal in (a BGA escape,
-    ball to end): the route continues it (first move within 45 degrees) and arrives the same way (its last
-    move within 45 degrees of running into it), so the joint is no sharper than a 45 degree bend.
+    ``start_heads`` / ``arrive_heads``: the grid headings the route may leave the start in / run into the goal
+    with (see :func:`headings`): where tracks already meet the start or goal, no joint sharper than 90 degrees.
     """
     for layer in spec.layers:
         if layer not in board.layers:
@@ -148,16 +158,22 @@ def route(
             raise RouteFailure(msg)
     points = [start, *(waypoints or []), goal]
     result = Route(net, spec.width, via_size=spec.via or (0.0, 0.0))
-    heading = NO_HEADING if start_dir is None else heading_of(start_dir)
-    arrive = None
-    if goal_dir is not None:
-        h = heading_of((-goal_dir[0], -goal_dir[1]))
-        arrive = frozenset({(h - 1) % 8, h, (h + 1) % 8, NO_HEADING})
+    heading = NO_HEADING
+    arrive = None if arrive_heads is None else arrive_heads | {NO_HEADING}
     layers_in = start_layers or spec.layers
     for i, (a, b) in enumerate(itertools.pairwise(points)):
         last = i == len(points) - 2
         leg, heading, layer = _leg(
-            board, net, a, b, spec, layers_in, goal_layers if last else None, heading, arrive if last else None
+            board,
+            net,
+            a,
+            b,
+            spec,
+            layers_in,
+            goal_layers if last else None,
+            heading,
+            arrive if last else None,
+            start_heads if i == 0 else None,
         )
         result.pieces += leg.pieces
         result.vias += leg.vias
@@ -176,6 +192,7 @@ def _leg(
     goal_layers: list[str] | None,
     heading: int,
     arrive: frozenset[int] | None = None,
+    leave: frozenset[int] | None = None,
 ) -> tuple[Route, int, str]:
     last_failure: RouteFailure | None = None
     stages: list[str] = []
@@ -207,6 +224,7 @@ def _leg(
                     slack,
                     None,
                     arrive=arrive,
+                    leave=leave,
                 )
             except RouteFailure as e:
                 last_failure = e
@@ -229,6 +247,7 @@ def _leg(
                         Tube(rough.pieces, radius),
                         max_states=TUBE_STATES,
                         arrive=arrive,
+                        leave=leave,
                     )
                 except RouteFailure as e:
                     last_failure = e
@@ -253,6 +272,7 @@ def _leg(
             None,
             max_states=LAST_RESORT_STATES,
             arrive=arrive,
+            leave=leave,
         )
     except RouteFailure as e:
         last_failure = e
@@ -276,6 +296,7 @@ def _search(
     tube: Tube | None,
     max_states: int | None = None,
     arrive: frozenset[int] | None = None,
+    leave: frozenset[int] | None = None,
 ) -> tuple[Route, int, str]:
     layers = spec.layers
     x0, y0, x1, y1 = box
@@ -351,7 +372,11 @@ def _search(
         if states > (max_states or MAX_STATES):
             msg = f"search limit ({max_states or MAX_STATES} states) reached"
             raise RouteFailure(msg)
-        for nh in range(8) if h == NO_HEADING else ((h - 1) % 8, h, (h + 1) % 8):
+        if parent[cur] is None and leave is not None:
+            moves: Iterable[int] = sorted(leave)  # the start: only the headings that keep its joints open
+        else:
+            moves = range(8) if h == NO_HEADING else ((h - 1) % 8, h, (h + 1) % 8)
+        for nh in moves:
             dx, dy = HEADINGS[nh]
             nx, ny = ix + dx, iy + dy
             state = cell(li, nx, ny)
