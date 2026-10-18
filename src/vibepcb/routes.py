@@ -20,6 +20,7 @@ the copper of the earlier ones. Format::
     net = "SD_*"                     # every net matching (not a [planes] net unless named exactly), all pads
     order = "angle"                  # a bus: outermost arcs first, the inner ones nest (default); "length": shortest
     method = "sequential"            #   first; "name". method: "sequential" (default, in that order) | "negotiate"
+    parts = ["J1"]                   # optional: only the connections that touch one of these parts (a bus per header)
 """
 
 from __future__ import annotations
@@ -45,7 +46,7 @@ if TYPE_CHECKING:
     from vibepcb.fixes import KicadProject
 
 ROUTES_NAME = "routes.toml"
-ENTRY_KEYS = {"net", "from", "to", "layers", "via_max", "waypoints", "corridor", "width", "order", "method"}
+ENTRY_KEYS = {"net", "from", "to", "layers", "via_max", "waypoints", "corridor", "width", "order", "method", "parts"}
 SECTIONS = {"defaults", "route"}
 PLANNED = {"bus", "pair", "tune"}
 
@@ -225,10 +226,11 @@ def apply(project: KicadProject, data: dict[str, Any], *, only: str | None = Non
     defaults[RESERVED_KEY] = _reservations(pads, list(defaults.get("layers", board.layers)), connected, planes)
     new_nodes: list[list[sexpr.Node]] = []
     for i, entry in enumerate(data.get("route", []), 1):
+        parts = set(entry.get("parts", []))
         conns = [
             c
             for c in _connections(entry, i, board, pads, by_label, planes)
-            if not only or fnmatch.fnmatchcase(c[0], only)
+            if (not only or fnmatch.fnmatchcase(c[0], only)) and (not parts or {c[1].ref, c[2].ref} & parts)
         ]
         order = entry.get("order", "angle")
         if order == "angle":

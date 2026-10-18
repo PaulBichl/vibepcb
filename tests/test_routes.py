@@ -87,3 +87,12 @@ def test_by_angle_orders_a_bus_outermost_first() -> None:
     assert ordered[0] in ("c0", "c4")  # an outer arc first
     assert ordered[-1] == "c2"  # the one on the axis last
     assert routes._by_angle(conns[:3]) == conns[:3]  # a few connections keep their order
+
+
+def test_parts_filter_keeps_connections_touching_the_part(tmp_path: Path) -> None:
+    project = write(tmp_path)
+    assert routes.apply(project, {"route": [{"net": "A", "parts": ["P9"]}]}).results == []
+    other = write(tmp_path / "b")
+    assert [r.entry for r in routes.apply(other, {"route": [{"net": "A", "parts": ["P3"]}]}).results] == [
+        "P1.1 -> P3.1 (A)"
+    ]
