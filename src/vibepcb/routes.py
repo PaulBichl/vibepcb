@@ -270,26 +270,27 @@ def _outside_in(conns: list[tuple[str, Pad, Pad, str]]) -> list[tuple[str, Pad, 
 
 
 def _by_angle(conns: list[tuple[str, Pad, Pad, str]]) -> list[tuple[str, Pad, Pad, str]]:
-    """Order the connections of a bus by how far their start pad sits off the bus axis, seen from the goals.
+    """Order the connections of a bus so the outermost arcs go first and the inner ones nest inside.
 
-    Two groups of pins facing each other are paired without crossings when the outermost arcs are drawn
-    first and the inner ones nest inside (a planar order). The axis runs from the centre of the goal pads
-    to the centre of the start pads; the sideways angle of a start pad decides.
+    Seen from the centre of the start pads, the direction to the goal pads is "ahead"; a start pad behind
+    or beside the group (a ball on the far side or on a side facing away, it escapes and comes round) makes
+    the widest arc. So: by the angle of the start pad off "ahead", largest first.
     """
     if len(conns) < 4:
         return conns
     n = len(conns)
     gx = sum(c[2].centre[0] for c in conns) / n, sum(c[2].centre[1] for c in conns) / n
     sx = sum(c[1].centre[0] for c in conns) / n, sum(c[1].centre[1] for c in conns) / n
-    ux, uy = sx[0] - gx[0], sx[1] - gx[1]
+    ux, uy = gx[0] - sx[0], gx[1] - sx[1]
     norm = math.hypot(ux, uy) or 1.0
     ux, uy = ux / norm, uy / norm
 
-    def off_axis(c: tuple[str, Pad, Pad, str]) -> float:
-        vx, vy = c[1].centre[0] - gx[0], c[1].centre[1] - gx[1]
-        return abs(ux * vy - uy * vx) / (math.hypot(vx, vy) or 1.0)
+    def outer(c: tuple[str, Pad, Pad, str]) -> tuple[float, float]:
+        """The angle off "ahead" (2 decimals, so pads in one line count as level), then the distance."""
+        vx, vy = c[1].centre[0] - sx[0], c[1].centre[1] - sx[1]
+        return round(abs(math.atan2(ux * vy - uy * vx, ux * vx + uy * vy)), 2), math.hypot(vx, vy)
 
-    return sorted(conns, key=lambda c: (-off_axis(c), c[3]))
+    return sorted(conns, key=lambda c: (-outer(c)[0], -outer(c)[1], c[3]))
 
 
 RIP_UP_ROUNDS = 4  # passes over the connections that failed, each ripping up what blocks them
