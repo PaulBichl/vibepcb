@@ -9,6 +9,7 @@ vibepcb check <board>   KiCad DRC + ERC -> out/<board>/reports (after refill: dr
 vibepcb all <board>     [--fast] build + fix + check
 vibepcb fab <board>     part availability check, gerbers/drill zip, BOM, pick-and-place, schematic PDF, 3D renders
 vibepcb publish <board> boards/<board>/hardware/: schematic + layout PDF/PNG, renders, BOM, KiCad project (no fab files)
+vibepcb padtable <board> REF..  boards/<board>/pads.ts: pad positions from the placement build (pin plans)
 vibepcb list            list the boards under boards/
 vibepcb docs            download tscircuit's LLM docs to docs/tscircuit-llms.txt
 """
@@ -33,7 +34,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from vibepcb import board as board_model
-from vibepcb import config, fanout, fixes, inspect, kicad, paths, routes, schgen, sexpr, tscircuit
+from vibepcb import config, fanout, fixes, inspect, kicad, padtable, paths, routes, schgen, sexpr, tscircuit
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -231,6 +232,19 @@ def cmd_route(board: str, *, only: str | None = None, dry_run: bool = False, drc
         for kind, n in counts.most_common():
             print(f"  {n} x {kind}")
     return 1 if report.failed else 0
+
+
+def cmd_padtable(board: str, refs: list[str]) -> int:
+    """``boards/<board>/pads.ts``: board positions of the parts' pads from the last placement build (pin plans)."""
+    circuit = paths.raw_dir(board) / f"{board}.unrouted.circuit.json"
+    if not circuit.exists():
+        print(f"{circuit.relative_to(paths.ROOT)} missing - run `pcb build {board}` first", file=sys.stderr)
+        return 1
+    pads, centres = padtable.pad_positions(circuit, refs)
+    target = paths.board_source(board).parent / "pads.ts"
+    target.write_text(padtable.to_typescript(pads, centres), encoding="utf-8")
+    print(f"wrote {target.relative_to(paths.ROOT)}: " + ", ".join(f"{r} ({len(pads[r])} pads)" for r in refs))
+    return 0
 
 
 def cmd_inspect(
@@ -466,6 +480,9 @@ def main(argv: list[str] | None = None) -> int:
             command_parser.add_argument(
                 "--drc", action="store_true", help="KiCad DRC on the result (rough: no clean-up)"
             )
+    padtable_parser = sub.add_parser("padtable")
+    padtable_parser.add_argument("board")
+    padtable_parser.add_argument("refs", nargs="+", help="parts whose pad positions go into boards/<board>/pads.ts")
     sub.add_parser("list")
     sub.add_parser("docs")
     args = parser.parse_args(argv)
@@ -477,6 +494,8 @@ def main(argv: list[str] | None = None) -> int:
                 return 0
             case "docs":
                 return cmd_docs()
+            case "padtable":
+                return cmd_padtable(args.board, args.refs)
             case "all":
                 return cmd_build(args.board, fast=args.fast) or cmd_fix(args.board) or cmd_check(args.board)
             case command:
