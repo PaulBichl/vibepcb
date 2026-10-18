@@ -361,6 +361,9 @@ def _run_sequential(
                     continue
                 r2.commit(board)
                 routed[c[3]] = r2
+        if {c[3] for c in still} == {c[3] for c in failed}:
+            failed = still
+            break  # nothing moved this round: another round would repeat it
         failed = still
     results = [
         Result(

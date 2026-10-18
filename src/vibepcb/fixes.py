@@ -2272,16 +2272,27 @@ def relocate_vias(project: KicadProject) -> list[str]:
 
     todo = [node for node, centre, radius, net in copper.vias if crowded(centre, radius, net)]
     changes = []
+    dirty = False
     for via in todo:
-        copper = _copper(project.pcb)  # earlier moves changed the copper
-        obstacles = copper.obstacles()
+        if dirty:  # an earlier move changed the copper
+            copper, dirty = _copper(project.pcb), False
+            obstacles = copper.obstacles()
         node, centre, radius, net = next(v for v in copper.vias if v[0] is via)
-        others = [o for o in obstacles if o.net != net]
         ends = [  # (segment, index of its end at the via, far end)
             (s, k, (s.b if k == 0 else s.a))
             for s in copper.segs_by_net.get(net, [])
             for k, e in enumerate((s.a, s.b))
             if math.dist(e, centre) <= radius
+        ]
+        # only copper the moved via or its moved tracks could reach (the whole board made this a slow fix)
+        reach = max(VIA_MOVE_STEPS_MM) + radius + clearance + 0.5
+        xs = [centre[0] - reach, centre[0] + reach, *(far[0] for _, _, far in ends)]
+        ys = [centre[1] - reach, centre[1] + reach, *(far[1] for _, _, far in ends)]
+        bx0, by0, bx1, by1 = min(xs) - 1, min(ys) - 1, max(xs) + 1, max(ys) + 1
+        others = [
+            o
+            for o in obstacles
+            if o.net != net and o.box[0] <= bx1 and o.box[2] >= bx0 and o.box[1] <= by1 and o.box[3] >= by0
         ]
 
         def fits(
@@ -2325,6 +2336,7 @@ def relocate_vias(project: KicadProject) -> list[str]:
         if target is None:
             moved_to = _relocate_via_rerouting(project, copper, node, centre, radius, net, clearance, edge_clearance)
             if moved_to is not None:
+                dirty = True
                 changes.append(
                     f"via {net} at ({_mm(centre[0])}, {_mm(centre[1])}) -> ({_mm(moved_to[0])}, {_mm(moved_to[1])}):"
                     " clearance, its tracks rerouted"
@@ -2337,6 +2349,7 @@ def relocate_vias(project: KicadProject) -> list[str]:
         at = sexpr.child(node, "at")
         assert at is not None
         at[1:3] = [Sym(_mm(target[0])), Sym(_mm(target[1]))]
+        dirty = True
         for s, k, _ in ends:
             end = sexpr.child(_source(s), "start" if k == 0 else "end")
             assert end is not None
