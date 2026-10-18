@@ -10,6 +10,7 @@ vibepcb all <board>     [--fast] build + fix + check
 vibepcb fab <board>     part availability check, gerbers/drill zip, BOM, pick-and-place, schematic PDF, 3D renders
 vibepcb publish <board> boards/<board>/hardware/: schematic + layout PDF/PNG, renders, BOM, KiCad project (no fab files)
 vibepcb padtable <board> REF..  boards/<board>/pads.ts: pad positions from the placement build (pin plans)
+vibepcb clone <board> <new>  copy a board and its build (variants to compare, no rebuild)
 vibepcb list            list the boards under boards/
 vibepcb docs            download tscircuit's LLM docs to docs/tscircuit-llms.txt
 """
@@ -232,6 +233,28 @@ def cmd_route(board: str, *, only: str | None = None, dry_run: bool = False, drc
         for kind, n in counts.most_common():
             print(f"  {n} x {kind}")
     return 1 if report.failed else 0
+
+
+def cmd_clone(board: str, new: str) -> int:
+    """A copy of a board (source and, if there is one, its build) to try a variant: e.g. other routes.toml
+    settings, run in parallel with `pcb fix <new>` + `pcb check <new>`, no rebuild."""
+    source, target = paths.board_source(board).parent, paths.board_source(new).parent
+    if target.exists():
+        print(f"{target.relative_to(paths.ROOT)} exists already", file=sys.stderr)
+        return 1
+    shutil.copytree(source, target)
+    raw = paths.raw_dir(board)
+    if raw.is_dir():
+        new_raw = paths.raw_dir(new)
+        new_raw.mkdir(parents=True, exist_ok=True)
+        for f in raw.iterdir():
+            if f.is_file():
+                name = new + f.name.removeprefix(board) if f.name.startswith(board + ".") else f.name
+                shutil.copy(f, new_raw / name)
+        print(f"cloned {board} -> {new} (source and build: `pcb fix {new}` next)")
+    else:
+        print(f"cloned {board} -> {new} (source only: `pcb build {new}` next)")
+    return 0
 
 
 def cmd_padtable(board: str, refs: list[str]) -> int:
@@ -480,6 +503,9 @@ def main(argv: list[str] | None = None) -> int:
             command_parser.add_argument(
                 "--drc", action="store_true", help="KiCad DRC on the result (rough: no clean-up)"
             )
+    clone_parser = sub.add_parser("clone")
+    clone_parser.add_argument("board")
+    clone_parser.add_argument("new", help="name of the copy (boards/<new>, out/<new>)")
     padtable_parser = sub.add_parser("padtable")
     padtable_parser.add_argument("board")
     padtable_parser.add_argument("refs", nargs="+", help="parts whose pad positions go into boards/<board>/pads.ts")
@@ -494,6 +520,8 @@ def main(argv: list[str] | None = None) -> int:
                 return 0
             case "docs":
                 return cmd_docs()
+            case "clone":
+                return cmd_clone(args.board, args.new)
             case "padtable":
                 return cmd_padtable(args.board, args.refs)
             case "all":

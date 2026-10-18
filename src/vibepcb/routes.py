@@ -21,10 +21,14 @@ the copper of the earlier ones. Format::
     order = "angle"                  # a bus: outermost arcs first, the inner ones nest (default); "length": shortest
     method = "sequential"            #   first; "name". method: "sequential" (default, in that order) | "negotiate"
     parts = ["J1"]                   # optional: only the connections that touch one of these parts (a bus per header)
+
+    [router]                         # optional router settings for this board (variants of a board for experiments)
+    via_cost = 8.0                   #   keys: see ROUTER_KEYS (costs, search limits, rip_up_rounds, joints = false ...)
 """
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import fnmatch
 import math
@@ -41,13 +45,14 @@ from vibepcb import board as board_mod
 from vibepcb import drc, fixes, router, sexpr, tracks
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
 
     from vibepcb.fixes import KicadProject
 
 ROUTES_NAME = "routes.toml"
 ENTRY_KEYS = {"net", "from", "to", "layers", "via_max", "waypoints", "corridor", "width", "order", "method", "parts"}
-SECTIONS = {"defaults", "route"}
+SECTIONS = {"defaults", "route", "router"}
 PLANNED = {"bus", "pair", "tune"}
 
 
@@ -106,6 +111,9 @@ def validate(data: dict[str, Any], where: str = ROUTES_NAME) -> None:
         raise RoutesError(msg)
     if unknown := set(data) - SECTIONS:
         msg = f"{where}: unknown section(s) {sorted(unknown)} (known: {sorted(SECTIONS)})"
+        raise RoutesError(msg)
+    if bad := set(data.get("router", {})) - set(ROUTER_KEYS):
+        msg = f"{where}: [router]: unknown key(s) {sorted(bad)} (known: {sorted(ROUTER_KEYS)})"
         raise RoutesError(msg)
     for i, entry in enumerate(data.get("route", []), 1):
         label = f"{where}: [[route]] #{i}"
@@ -167,6 +175,42 @@ def board_pads(project: KicadProject) -> list[Pad]:
     return out
 
 
+JOINTS = True  # routes keep their joints with tracks already at their ends at 90 degrees or more
+# [router] in routes.toml: router settings for this board (experiments: variants of a board differ only there)
+ROUTER_KEYS = {
+    "via_cost": (router, "VIA_COST"),
+    "bend_cost": (router, "BEND_COST"),
+    "length_cost": (router, "LENGTH_COST"),
+    "reserve_cost": (router, "RESERVE_COST"),
+    "soft_cost": (router, "SOFT_COST"),
+    "off_layer_cost": (router, "OFF_LAYER_COST"),
+    "heuristic_weight": (router, "HEURISTIC_WEIGHT"),
+    "grid_slack_mm": (router, "GRID_SLACK_MM"),
+    "max_states": (router, "MAX_STATES"),
+    "tube_states": (router, "TUBE_STATES"),
+    "last_resort_states": (router, "LAST_RESORT_STATES"),
+    "rip_up_rounds": (sys.modules[__name__], "RIP_UP_ROUNDS"),
+    "exit_gap_mm": (sys.modules[__name__], "EXIT_GAP_MM"),
+    "exit_radius_mm": (sys.modules[__name__], "EXIT_RADIUS_MM"),
+    "joints": (sys.modules[__name__], "JOINTS"),
+}
+
+
+@contextlib.contextmanager
+def _router_settings(settings: dict[str, Any]) -> Iterator[None]:
+    """The [router] values for the duration of one apply(), the module defaults again afterwards."""
+    saved = {key: getattr(*ROUTER_KEYS[key]) for key in settings}
+    try:
+        for key, value in settings.items():
+            module, name = ROUTER_KEYS[key]
+            setattr(module, name, type(getattr(module, name))(value))
+        yield
+    finally:
+        for key, value in saved.items():
+            module, name = ROUTER_KEYS[key]
+            setattr(module, name, value)
+
+
 RESERVED_KEY = "_reserved"  # internal: the pad exit reservations travel with the defaults
 EXIT_GAP_MM = 0.45  # a pad's exit spot: this far beyond its outer edge (room for a via beside a 0.5 mm pitch pin)
 EXIT_RADIUS_MM = 0.45
@@ -226,6 +270,11 @@ def _reservations(
 
 def apply(project: KicadProject, data: dict[str, Any], *, only: str | None = None) -> Report:
     """Route every entry onto ``project.pcb``; report per connection. Failed entries leave no copper."""
+    with _router_settings(data.get("router", {})):
+        return _apply(project, data, only)
+
+
+def _apply(project: KicadProject, data: dict[str, Any], only: str | None) -> Report:
     report = Report()
     board = board_mod.Board.from_project(project)
     pads = board_pads(project)
@@ -689,8 +738,8 @@ def _route_one(
         start_layers=[layer for layer in layers if layer in a.layers],
         goal_layers=[layer for layer in layers if layer in b.layers],
         waypoints=[(float(x), float(y)) for x, y in entry.get("waypoints", [])],
-        start_heads=router.headings(_escape(a), _tracks_at(board, net, a)),
-        arrive_heads=router.headings(_tracks_at(board, net, b), _escape(b)),
+        start_heads=router.headings(_escape(a), _tracks_at(board, net, a)) if JOINTS else None,
+        arrive_heads=router.headings(_tracks_at(board, net, b), _escape(b)) if JOINTS else None,
     )
     if via_max is not None and len(r.vias) > via_max:
         msg = f"needs {len(r.vias)} via(s), via_max is {via_max}"
