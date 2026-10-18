@@ -3161,6 +3161,48 @@ def _line_angle(s: tracks.Seg, t: tracks.Seg) -> float:
     return math.degrees(math.acos(min(1.0, abs(u[0] * v[0] + u[1] * v[1]) / (nu * nv))))
 
 
+def _trim_stubs_past_pads(copper: _Copper, connected: Callable[[tracks.Point, tracks.Seg], bool]) -> int:
+    """Cut a track end that runs past a pad of its net (loose there, the pad centre on the track) back to the pad.
+
+    A route that starts beyond its pad (at an escape end the clean-up then removed as redundant) crosses
+    the pad and leaves a stub; dropping the whole segment would cut the pad off, it is its only link.
+    """
+    trimmed = 0
+    for seg in copper.segs:
+        mates = [t for t in copper.segs_by_net.get(seg.net, []) if t is not seg and t.layer == seg.layer]
+
+        def free(p: tracks.Point, seg: tracks.Seg = seg, mates: list[tracks.Seg] = mates) -> bool:
+            return not connected(p, seg) and not any(
+                tracks.point_seg_distance(p, t.a, t.b) <= t.width / 2
+                or min(math.dist(p, t.a), math.dist(p, t.b)) <= seg.width / 2
+                for t in mates
+            )
+
+        loose = [p for p in (seg.a, seg.b) if free(p)]
+        if len(loose) != 1:
+            continue
+        pad = next(
+            (
+                o
+                for o in copper.pads_by_net.get(seg.net, [])
+                if seg.layer in o.layers and tracks.on_track_body(o.centre, seg.a, seg.b, seg.width / 2)
+            ),
+            None,
+        )
+        other = seg.b if loose[0] == seg.a else seg.a
+        if pad is None or math.dist(pad.centre, loose[0]) <= tracks.EPS or math.dist(pad.centre, other) <= tracks.EPS:
+            continue
+        node = sexpr.child(_source(seg), "start" if loose[0] == seg.a else "end")
+        assert node is not None
+        node[1:3] = [Sym(_mm(pad.centre[0])), Sym(_mm(pad.centre[1]))]
+        if loose[0] == seg.a:
+            seg.a = pad.centre
+        else:
+            seg.b = pad.centre
+        trimmed += 1
+    return trimmed
+
+
 def remove_antennas(project: KicadProject, *, filled_zones: bool = False) -> list[str]:
     """Delete track stubs with a loose end and vias that connect fewer than two layers.
 
@@ -3172,6 +3214,7 @@ def remove_antennas(project: KicadProject, *, filled_zones: bool = False) -> lis
     def connected(p: tracks.Point, s: tracks.Seg) -> bool:
         return copper.attached(p, s) or copper.in_zone(p, s.net, s.layer)
 
+    trimmed = _trim_stubs_past_pads(copper, connected)
     removed_segs = [copper.segs[i] for i in tracks.dangling(copper.segs, connected)]
     # islands: tracks/vias joined to no pad of their net (and, on a poured net, not to its pour)
     island_vias: set[int] = set()
@@ -3203,6 +3246,8 @@ def remove_antennas(project: KicadProject, *, filled_zones: bool = False) -> lis
             project.pcb.remove(node)
             removed_vias += 1
     changes = []
+    if trimmed:
+        changes.append(f"antennas: cut {trimmed} track end(s) running past their pad back to the pad centre")
     if removed_segs:
         changes.append(f"antennas: removed {len(removed_segs)} dangling track segment(s)")
     if removed_vias:

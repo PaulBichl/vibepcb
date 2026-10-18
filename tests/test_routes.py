@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 import pytest
 from synth import seg, write
 
-from vibepcb import router, routes, sexpr
+from vibepcb import fixes, router, routes, sexpr
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -96,3 +96,18 @@ def test_parts_filter_keeps_connections_touching_the_part(tmp_path: Path) -> Non
     assert [r.entry for r in routes.apply(other, {"route": [{"net": "A", "parts": ["P3"]}]}).results] == [
         "P1.1 -> P3.1 (A)"
     ]
+
+
+def test_remove_antennas_cuts_a_stub_back_to_the_pad_it_runs_over(tmp_path: Path) -> None:
+    # A: from (8.5, 10) over P1's centre (10, 10) to (12, 10), then down to P3 (10, 17): the first piece sticks out
+    extra = (
+        '(segment (start 8.5 10) (end 12 10) (width 0.2) (layer "F.Cu") (net 1) (uuid "a1"))'
+        '(segment (start 12 10) (end 12 17) (width 0.2) (layer "F.Cu") (net 1) (uuid "a2"))'
+        '(segment (start 12 17) (end 10 17) (width 0.2) (layer "F.Cu") (net 1) (uuid "a3"))'
+    )
+    project = write(tmp_path, extra)
+    changes = fixes.remove_antennas(project)
+    assert changes == ["antennas: cut 1 track end(s) running past their pad back to the pad centre"]
+    starts = [sexpr.child(s, "start") for s in sexpr.children(project.pcb, "segment")]
+    assert ["start", sexpr.Sym("10"), sexpr.Sym("10")] in starts
+    assert fixes.remove_antennas(project) == []
