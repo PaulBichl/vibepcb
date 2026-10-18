@@ -186,3 +186,23 @@ def test_channel_escapes_end_staggered_with_a_strip_stand_in() -> None:
     pad = fanout._standin_pad(plan, far)
     assert 'width="0.2mm"' in pad
     assert 'height="0.2mm"' not in pad  # a strip from the keepout edge out to the end
+
+
+def test_escape_offset_measures_the_part_centre_in_the_footprint_frame() -> None:
+    # escape ends asymmetric: tscircuit puts the stand-in's origin mid-pads, 0.4 mm off the part centre
+    plan = fanout.Plan(
+        "U2",
+        fanout.Rules(),
+        [fanout.Ball("pin1", 0.0, 0.0, 0.18, "a"), fanout.Ball("pin2", 0.8, 0.0, 0.18, "b")],
+        [
+            fanout.Escape("pin1", "a", "W", (-1.0, 0.0), "top"),
+            fanout.Escape("pin2", "b", "E", (1.6, 0.4), "top"),
+        ],
+        (-1.2, -1.2, 1.8, 1.2),
+    )
+    fp = sexpr.loads(
+        '(footprint "x" (at 10 10 0) '
+        '(pad "1" smd rect (at -1.4 0) (size 0.2 0.2) (layers "F.Cu")) '
+        '(pad "2" smd rect (at 1.2 -0.4) (size 0.2 0.2) (layers "F.Cu")))'
+    )
+    assert fixes.escape_offset(fp, plan) == pytest.approx((-0.4, 0.0))

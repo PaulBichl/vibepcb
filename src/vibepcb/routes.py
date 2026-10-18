@@ -130,8 +130,14 @@ def board_pads(project: KicadProject) -> list[Pad]:
     where the escape track stops and the router takes over.
     """
     names = fixes._net_names(project.pcb)
+    refs = fixes._footprints_by_ref(project.pcb)
     ends = {
-        (plan.ref, esc.pin.removeprefix("pin")): esc for plan in fixes._escape_plans(project) for esc in plan.escapes
+        (plan.ref, esc.pin.removeprefix("pin")): (
+            esc,
+            fixes.escape_offset(refs[plan.ref], plan) if plan.ref in refs else (0.0, 0.0),
+        )
+        for plan in fixes._escape_plans(project)
+        for esc in plan.escapes
     }
     out = []
     for fp in sexpr.children(project.pcb, "footprint"):
@@ -145,8 +151,10 @@ def board_pads(project: KicadProject) -> list[Pad]:
             centre = to_board(fixes._num(at, 1), fixes._num(at, 2))
             exit_at = _exit_point(fp, pad, centre, to_board)
             ring = _ring_points(pad, centre, to_board)
-            if (esc := ends.get((ref, str(pad[1])))) is not None and esc.end_layer:
-                centre, layers = to_board(esc.end[0], -esc.end[1]), frozenset({fixes._kicad_layer(esc.end_layer)})
+            if (found := ends.get((ref, str(pad[1])))) is not None and found[0].end_layer:
+                esc, (dx, dy) = found
+                centre = to_board(esc.end[0] + dx, -esc.end[1] + dy)
+                layers = frozenset({fixes._kicad_layer(esc.end_layer)})
                 exit_at, ring = None, ()  # the escape track leaves the ball already
             out.append(Pad(ref, str(pad[1]), fixes._net_of(pad, names), centre, layers, exit_at, ring))
     return out

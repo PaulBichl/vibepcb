@@ -107,8 +107,9 @@ def _escape_boxes(project: KicadProject) -> list[Box]:
         if fp is None:
             continue
         to_board = _fp_to_board(fp)
+        dx, dy = escape_offset(fp, plan)
         ends = [e.end for e in plan.escapes] + [(b.x, b.y) for b in plan.balls]
-        boxes.append(_bbox([to_board(x, -y) for x, y in ends], grow=plan.rules.via_diameter))
+        boxes.append(_bbox([to_board(x + dx, -y + dy) for x, y in ends], grow=plan.rules.via_diameter))
     return boxes
 
 
@@ -131,6 +132,34 @@ def _declared_net(pcb: list[Node], name: str) -> list[Node] | None:
         if len(n) == 2 and str(n[1]) == name:
             return [Sym("net"), name]
     return None
+
+
+def escape_offset(fp: list[Node], plan: fanout.Plan) -> tuple[float, float]:
+    """Where the plan's part frame sits in the footprint's own frame (KiCad units, y down).
+
+    The plan is relative to the part centre; tscircuit puts a footprint's origin at the middle of its
+    pads, which for the stand-in (escape ends, asymmetric when the escapes are) is not the part centre.
+    Measured from the pads that are known: square stand-in pads (an escape end) or real balls.
+    """
+    standin = round(fanout.STANDIN_PAD_MM, 4)
+    ends = {e.pin.removeprefix("pin"): e.end for e in plan.escapes}
+    balls = {b.pin.removeprefix("pin"): (b.x, b.y) for b in plan.balls}
+    deltas = []
+    for pad in sexpr.children(fp, "pad"):
+        at, size = sexpr.child(pad, "at"), sexpr.child(pad, "size")
+        number = str(pad[1])
+        px, py = _num(at, 1), _num(at, 2)
+        w, h = _num(size, 1), _num(size, 2)
+        if abs(w - standin) <= 1e-4 and abs(h - standin) <= 1e-4 and number in ends:
+            ex, ey = ends[number]
+        elif str(pad[3]) == "circle" and number in balls:
+            ex, ey = balls[number]
+        else:
+            continue
+        deltas.append((px - ex, py + ey))
+    if not deltas:
+        return 0.0, 0.0
+    return sum(d[0] for d in deltas) / len(deltas), sum(d[1] for d in deltas) / len(deltas)
 
 
 def apply_escapes(project: KicadProject) -> list[str]:
@@ -158,7 +187,18 @@ def apply_escapes(project: KicadProject) -> list[str]:
 
         if not pads or not all(standin_size(p) for p in pads):
             continue  # real balls already (or not a stand-in)
-        to_board = _fp_to_board(fp)
+        dx, dy = escape_offset(fp, plan)  # the part centre in the footprint frame (not its origin, see there)
+        fp_to_board = _fp_to_board(fp)
+
+        def to_board(
+            x: float,
+            y: float,
+            dx: float = dx,
+            dy: float = dy,
+            fp_to_board: Callable[..., tuple[float, float]] = fp_to_board,
+        ) -> tuple[float, float]:
+            return fp_to_board(x + dx, y + dy)
+
         net_of_pin = {str(p[1]): sexpr.child(p, "net") for p in pads}
         template = copy.deepcopy(pads[0])
         for p in pads:
@@ -171,7 +211,7 @@ def apply_escapes(project: KicadProject) -> list[str]:
             pad[3] = Sym("circle")
             at = sexpr.child(pad, "at")
             if at is not None:
-                at[1:3] = [Sym(_mm(ball.x)), Sym(_mm(-ball.y))]
+                at[1:3] = [Sym(_mm(ball.x + dx)), Sym(_mm(-ball.y + dy))]
             size = sexpr.child(pad, "size")
             if size is not None:
                 size[1:] = [Sym(_mm(2 * ball.radius)), Sym(_mm(2 * ball.radius))]
@@ -202,7 +242,7 @@ def apply_escapes(project: KicadProject) -> list[str]:
             for k, (a, b) in enumerate(itertools.pairwise(ring)):
                 line_uuid = uuid.uuid5(uuid.NAMESPACE_OID, f"courtyard:{plan.ref}:{k}")
                 fp.append(sexpr.loads(
-                    f"(fp_line (start {_mm(a[0])} {_mm(-a[1])}) (end {_mm(b[0])} {_mm(-b[1])}) "
+                    f"(fp_line (start {_mm(a[0] + dx)} {_mm(-a[1] + dy)}) (end {_mm(b[0] + dx)} {_mm(-b[1] + dy)}) "
                     f'(stroke (width 0.05) (type solid)) (layer "F.CrtYd") (uuid "{line_uuid}"))'
                 ))  # fmt: skip
         r = plan.rules
