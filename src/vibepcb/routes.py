@@ -765,7 +765,10 @@ def _escape(p: Pad) -> list[tracks.Point]:
 
 
 def _tracks_at(board: board_mod.Board, net: str, p: Pad) -> list[tracks.Point]:
-    """Directions (away from the pad) of the net's tracks that already end at the pad's centre."""
+    """Directions (away from the pad) of the net's tracks that already end at the pad's centre (not at an escape
+    end: its escape track ends there, that joint is the escape rule's, ``JOINTS``)."""
+    if p.escape_dir is not None:
+        return []
     out = []
     for s in board.segs_by_net_now(net):
         for end, far in ((s.a, s.b), (s.b, s.a)):
