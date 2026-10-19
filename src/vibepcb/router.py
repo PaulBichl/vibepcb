@@ -29,7 +29,8 @@ TUBE_MM = (1.2, 3.0)  # the fine search stays this close to the coarse path; a w
 LAST_RESORT_STATES = 300_000  # the unguided fine search when the guided ones failed
 GRID_SLACK_MM = 0.03  # grid nodes keep this much extra clearance: pieces between nodes then pass the exact check
 RESERVE_COST = 1.5  # per grid node in front of another net's pad: leave room for its exit / via
-AVOID_OWN = False  # true: a route keeps off its net's routed tracks except near its ends (they meet at pads)
+AVOID_OWN = True  # a route keeps off its net's routed tracks except near its ends (they meet at pads; overlapping
+# routes left random-angle Y junctions after the clean-up, la-ecp5 V5)
 OWN_FREE_MM = 0.8  # how near its start / goal a route may run on its net's tracks
 SOFT_COST = 4.0  # per grid node through copper that may be ripped up (a crossing costs ~10-20 mm of detour)
 HEURISTIC_WEIGHT = 1.3  # >1: fewer states, routes a little longer than optimal
