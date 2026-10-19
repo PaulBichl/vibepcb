@@ -22,6 +22,9 @@ the copper of the earlier ones. Format::
     method = "sequential"            #   first; "name". method: "sequential" (default, in that order) | "negotiate"
     parts = ["J1"]                   # optional: only the connections that touch one of these parts (a bus per header)
 
+    [[pair]]                         # a differential pair, routed coupled before the [[route]] entries
+    nets = ["USB_P", "USB_N"]        #   width / gap: the net class's diff_pair_width / _gap (vibepcb.pairs)
+
     [router]                         # optional router settings for this board (variants of a board for experiments)
     via_cost = 8.0                   #   keys: see ROUTER_KEYS (costs, search limits, rip_up_rounds, joints = false ...)
 """
@@ -42,7 +45,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from vibepcb import board as board_mod
-from vibepcb import drc, fixes, router, sexpr, tracks
+from vibepcb import drc, fixes, pairs, router, sexpr, tracks
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -52,8 +55,8 @@ if TYPE_CHECKING:
 
 ROUTES_NAME = "routes.toml"
 ENTRY_KEYS = {"net", "from", "to", "layers", "via_max", "waypoints", "corridor", "width", "order", "method", "parts"}
-SECTIONS = {"defaults", "route", "router"}
-PLANNED = {"bus", "pair", "tune"}
+SECTIONS = {"defaults", "route", "router", "pair"}
+PLANNED = {"bus", "tune"}
 
 
 class RoutesError(ValueError):
@@ -112,6 +115,14 @@ def validate(data: dict[str, Any], where: str = ROUTES_NAME) -> None:
     if unknown := set(data) - SECTIONS:
         msg = f"{where}: unknown section(s) {sorted(unknown)} (known: {sorted(SECTIONS)})"
         raise RoutesError(msg)
+    for i, entry in enumerate(data.get("pair", []), 1):
+        nets = entry.get("nets")
+        if not (isinstance(nets, list) and len(nets) == 2 and all(isinstance(n, str) for n in nets)):
+            msg = f'{where}: [[pair]] #{i}: nets = ["<P>", "<N>"] (two net names)'
+            raise RoutesError(msg)
+        if bad := set(entry) - {"nets", "layers"}:
+            msg = f"{where}: [[pair]] #{i}: unknown key(s) {sorted(bad)} (known: layers, nets)"
+            raise RoutesError(msg)
     if bad := set(data.get("router", {})) - set(ROUTER_KEYS):
         msg = f"{where}: [router]: unknown key(s) {sorted(bad)} (known: {sorted(ROUTER_KEYS)})"
         raise RoutesError(msg)
@@ -291,6 +302,10 @@ def _apply(project: KicadProject, data: dict[str, Any], only: str | None) -> Rep
     # for its track, a plane net's pad for the via into its plane
     defaults[RESERVED_KEY] = _reservations(pads, list(defaults.get("layers", board.layers)), connected, planes)
     new_nodes: list[list[sexpr.Node]] = []
+    for i, entry in enumerate(data.get("pair", []), 1):  # pairs first: the most constrained connections
+        result, nodes = _run_pair(board, project.pcb, entry, i, defaults, pads)
+        report.results.append(result)
+        new_nodes += nodes
     for i, entry in enumerate(data.get("route", []), 1):
         parts = set(entry.get("parts", []))
         conns = [
@@ -619,6 +634,48 @@ def _conflicts(board: board_mod.Board, routed: dict[str, router.Route]) -> dict[
             for other in others:
                 graph.setdefault(other, set()).add(name)
     return graph
+
+
+def _run_pair(
+    board: board_mod.Board,
+    pcb: list[sexpr.Node],
+    entry: dict[str, Any],
+    index: int,
+    defaults: dict[str, Any],
+    pads: list[Pad],
+) -> tuple[Result, list[list[sexpr.Node]]]:
+    """A [[pair]] entry: the two nets routed coupled (vibepcb.pairs); on failure nothing stays on the board."""
+    p_net, n_net = entry["nets"]
+    name = f"pair {p_net} / {n_net}"
+    ends = {}
+    for net in (p_net, n_net):
+        members = [p for p in pads if p.net == net]
+        if len(members) != 2:
+            msg = f"{ROUTES_NAME}: [[pair]] #{index}: net {net} has {len(members)} pads (a pair connects two)"
+            raise RoutesError(msg)
+        ends[net] = members
+    p_a, p_b = ends[p_net]
+    n_a, n_b = sorted(ends[n_net], key=lambda q: (q.ref != p_a.ref, math.dist(q.centre, p_a.centre)))
+    cls = board.rules.class_of(p_net)
+    width = cls.diff_pair_width or cls.track_width
+    gap = cls.diff_pair_gap or cls.clearance
+
+    def end(p: Pad) -> pairs.End:
+        return pairs.End(p.centre, p.layers, p.exit or p.centre)
+
+    checkpoint = board.checkpoint()
+    layers = list(entry.get("layers", defaults.get("layers", board.layers)))
+    try:
+        done = pairs.route_pair(board, (p_net, n_net), (end(p_a), end(n_a)), (end(p_b), end(n_b)), width, gap, layers)
+    except router.RouteFailure as e:
+        board.rollback(checkpoint)
+        return Result(name, False, str(e)), []
+    nodes: list[list[sexpr.Node]] = []
+    for r in done.routes:
+        nodes += _nodes(pcb, r)
+    coupled = done.routes[0].length
+    detail = f"{coupled:.2f} mm coupled, {done.uncoupled:.2f} mm uncoupled, skew {done.skew:+.2f} mm"
+    return Result(name, True, detail, coupled + done.uncoupled, 0), nodes
 
 
 def _connections(

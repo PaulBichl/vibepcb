@@ -26,10 +26,13 @@ def pad(ref: str, x: float, y: float, net: int, name: str) -> str:
     )
 
 
-def write(tmp_path: Path, extra: str = "") -> fixes.KicadProject:
+def write(tmp_path: Path, extra: str = "", *, nets: str = NETS, parts: str | None = None) -> fixes.KicadProject:
+    """The board: ``parts`` replaces the default pads (P1 / P3 on A, P2 on B), ``nets`` the net list."""
+    if parts is None:
+        parts = f"{pad('P1', 10, 10, 1, 'A')} {pad('P2', 20, 10, 2, 'B')} {pad('P3', 10, 17, 1, 'A')}"
     text = (
         f"(kicad_pcb (version 20241229) (generator t) (general (thickness 1.6)) (paper A4) {LAYERS} "
-        f"{NETS} {OUTLINE} {pad('P1', 10, 10, 1, 'A')} {pad('P2', 20, 10, 2, 'B')} {pad('P3', 10, 17, 1, 'A')} {extra})"
+        f"{nets} {OUTLINE} {parts} {extra})"
     )
     directory = tmp_path / "kicad"
     directory.mkdir(parents=True)

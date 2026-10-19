@@ -30,6 +30,8 @@ class NetClass:
     clearance: float = fixes.DEFAULT_CLEARANCE_MM
     via_diameter: float = DEFAULT_VIA_DIAMETER_MM
     via_drill: float = DEFAULT_VIA_DRILL_MM
+    diff_pair_width: float = 0.0  # 0: not set (the class's track width)
+    diff_pair_gap: float = 0.0  # 0: not set (the class's clearance)
 
 
 @dataclass
@@ -55,6 +57,8 @@ class Rules:
                 float(c.get("clearance", d.clearance)),
                 float(c.get("via_diameter", d.via_diameter)),
                 float(c.get("via_drill", d.via_drill)),
+                float(c.get("diff_pair_width", 0.0) or 0.0),
+                float(c.get("diff_pair_gap", 0.0) or 0.0),
             )
 
         settings = data.get("net_settings", {})
@@ -97,6 +101,8 @@ class Board:
         self.holes = holes
         self.layers = copper_layers(pcb)
         self.items: list[tracks.Obstacle] = []  # everything that blocks a track of another net
+        # nets that count as one: while a differential pair's centre line is routed as P, N is not in its way
+        self.aliases: dict[str, frozenset[str]] = {}
         self.edges = list(copper.edges)
         self._index: tracks.BoxIndex | None = None
         self.add_items(copper.obstacles())
