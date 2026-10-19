@@ -191,6 +191,7 @@ ROUTER_KEYS = {
     "tube_states": (router, "TUBE_STATES"),
     "last_resort_states": (router, "LAST_RESORT_STATES"),
     "rip_up_rounds": (sys.modules[__name__], "RIP_UP_ROUNDS"),
+    "rip_up_seconds": (sys.modules[__name__], "RIP_UP_SECONDS"),
     "exit_gap_mm": (sys.modules[__name__], "EXIT_GAP_MM"),
     "exit_radius_mm": (sys.modules[__name__], "EXIT_RADIUS_MM"),
     "joints": (sys.modules[__name__], "JOINTS"),
@@ -359,6 +360,7 @@ def _by_angle(conns: list[tuple[str, Pad, Pad, str]]) -> list[tuple[str, Pad, Pa
 
 
 RIP_UP_ROUNDS = 4  # passes over the connections that failed, each ripping up what blocks them
+RIP_UP_SECONDS = 600.0  # and no longer than this per entry: what is still open then is reported as failed
 
 
 def _run_sequential(
@@ -391,6 +393,7 @@ def _run_sequential(
             continue
         r.commit(board)
         routed[name] = r
+    routed_by = time.monotonic() - started  # the rip-up budget counts from here
     for round_no in range(RIP_UP_ROUNDS):
         if not failed:
             break
@@ -400,6 +403,9 @@ def _run_sequential(
         still: list[tuple[str, Pad, Pad, str]] = []
         queue = list(failed)
         while queue:
+            if time.monotonic() - started > RIP_UP_SECONDS + routed_by:
+                still += queue
+                break
             conn = queue.pop(0)
             net, a, b, name = conn
             soft = frozenset(r.net for r in routed.values())
