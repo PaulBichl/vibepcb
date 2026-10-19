@@ -35,7 +35,10 @@ CHAMFER_MM = 0.15  # the 45-degree cut at each corner of a bump
 MIN_HEIGHT_MM = 0.5  # lower bumps are not worth their corners
 MAX_HEIGHT_MM = 2.0
 END_MARGIN_MM = 0.6  # bumps keep away from a piece's ends (pads, vias, bends)
-DEFAULT_SPREAD = 0.9  # without tune_to: violators are brought to this share of max_skew
+DEFAULT_SPREAD = 0.9
+LENGTH_TOLERANCE_MM = (
+    0.01  # lengths closer than this count as equal  # without tune_to: violators are brought to this share of max_skew
+)
 
 
 @dataclass
@@ -117,11 +120,11 @@ def tune(project: KicadProject) -> list[str]:
             continue
         longest = max(lengths[n] for n in members)
         spread = float(group.get("tune_to", float(group["max_skew"]) * DEFAULT_SPREAD))
-        if longest - min(lengths[n] for n in members) <= spread:
+        if longest - min(lengths[n] for n in members) <= spread + LENGTH_TOLERANCE_MM:
             continue  # inside the target already
         for net in members:
             need = longest - spread - lengths[net]
-            if need <= 0:
+            if need <= LENGTH_TOLERANCE_MM:
                 continue
             added = _tune_net(project, model, net, need)
             if added >= need - 0.01:
