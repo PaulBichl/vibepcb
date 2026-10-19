@@ -5,6 +5,8 @@ vibepcb build <board>   [--fast] tscircuit -> out/<board>/raw (KiCad zip, netlis
 vibepcb fix <board>     raw -> out/<board>/kicad, apply post-processing fixes
 vibepcb route <board>   [--only NET] [--dry-run] routes.toml -> tracks on the KiCad board (seconds, no rebuild)
 vibepcb inspect <board> [--area x0 y0 x1 y1] [--net PAT] [--layer L] [--scale PX/MM] [--source unrouted]  PNG of the board
+vibepcb ratsnest <board> [--source unrouted]  unrouted links (longest first), crossings, worst 10 mm cells
+vibepcb place-score <board>..  total ratsnest length and crossings per board (compare `clone` variants)
 vibepcb check <board>   KiCad DRC + ERC -> out/<board>/reports (after refill: drop tracks the GND pour provides)
 vibepcb all <board>     [--fast] build + fix + check
 vibepcb fab <board>     part availability check, gerbers/drill zip, BOM, pick-and-place, schematic PDF, 3D renders
@@ -35,7 +37,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from vibepcb import board as board_model
-from vibepcb import config, fanout, fixes, inspect, kicad, padtable, paths, routes, schgen, sexpr, tscircuit
+from vibepcb import config, fanout, fixes, inspect, kicad, padtable, paths, ratsnest, routes, schgen, sexpr, tscircuit
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -296,6 +298,42 @@ def cmd_inspect(
     return 0
 
 
+def _load_project(board: str, source: str = "current") -> fixes.KicadProject:
+    """The board's KiCad project with its config; ``source="unrouted"``: the board before ``routes.toml``."""
+    project = fixes.KicadProject.load(paths.kicad_dir(board), board)
+    if source == "unrouted":
+        project.pcb = sexpr.load(paths.work_dir(board) / fixes.UNROUTED_NAME)
+    project.config = config.load(board)
+    return project
+
+
+RATSNEST_TOP = 40
+
+
+def cmd_ratsnest(board: str, source: str) -> int:
+    """The unrouted links, longest first, with totals and the cells where links cross most."""
+    links = ratsnest.unrouted(_load_project(board, source))
+    for k in sorted(links, key=lambda k: (-k.length, k.net, k.a, k.b))[:RATSNEST_TOP]:
+        print(f"  {k.length:7.2f} mm  {k.net}: {k.a} -> {k.b}")
+    if len(links) > RATSNEST_TOP:
+        print(f"  ... {len(links) - RATSNEST_TOP} more")
+    cells = ratsnest.cell_crossings(links)
+    total = sum(k.length for k in links)
+    print(f"{len(links)} unrouted link(s), {total:.1f} mm, {sum(cells.values())} crossing(s)")
+    size = ratsnest.CELL_MM
+    for (cx, cy), n in cells.most_common(5):
+        print(f"  cell ({cx * size:g},{cy * size:g})-({(cx + 1) * size:g},{(cy + 1) * size:g}) mm: {n} crossing(s)")
+    return 0
+
+
+def cmd_place_score(boards: list[str], source: str) -> int:
+    """One line per board: ratsnest length and crossings (placement variants side by side)."""
+    for board in boards:
+        s = ratsnest.score(_load_project(board, source))
+        print(f"{board}: {s['links']} link(s), {s['length']:.1f} mm, {s['crossings']} crossing(s)")
+    return 0
+
+
 POST_FILL_ATTEMPTS = 4
 
 
@@ -509,6 +547,12 @@ def main(argv: list[str] | None = None) -> int:
     padtable_parser = sub.add_parser("padtable")
     padtable_parser.add_argument("board")
     padtable_parser.add_argument("refs", nargs="+", help="parts whose pad positions go into boards/<board>/pads.ts")
+    ratsnest_parser = sub.add_parser("ratsnest")
+    ratsnest_parser.add_argument("board")
+    score_parser = sub.add_parser("place-score")
+    score_parser.add_argument("boards", nargs="+", help="boards to compare (e.g. `clone` variants)")
+    for p in (ratsnest_parser, score_parser):
+        p.add_argument("--source", choices=["current", "unrouted"], default="current")
     sub.add_parser("list")
     sub.add_parser("docs")
     args = parser.parse_args(argv)
@@ -524,6 +568,10 @@ def main(argv: list[str] | None = None) -> int:
                 return cmd_clone(args.board, args.new)
             case "padtable":
                 return cmd_padtable(args.board, args.refs)
+            case "ratsnest":
+                return cmd_ratsnest(args.board, args.source)
+            case "place-score":
+                return cmd_place_score(args.boards, args.source)
             case "all":
                 return cmd_build(args.board, fast=args.fast) or cmd_fix(args.board) or cmd_check(args.board)
             case command:

@@ -1,6 +1,7 @@
 # Routing plan: agent-directed ("manual") routing
 
-Status (2026-10-19): phase 5 (length tuning, `tune.py`, fix `tune_lengths`) and phase 6 coupled pairs (`pairs.py`, `[[pair]]`; no stack-up impedance yet) in. Earlier status (2026-10-16): phase 1 done; phase 2 partly (router, `routes.toml` `[[route]]` pad-to-pad / net,
+Status (2026-10-19): phase 3 item 3 `pcb ratsnest` and phase 8 item 2 `pcb place-score` in (`ratsnest.py`;
+nets with a pour are skipped like `[planes]` nets, the pour joins them). Phase 5 (length tuning, `tune.py`, fix `tune_lengths`) and phase 6 coupled pairs (`pairs.py`, `[[pair]]`; no stack-up impedance yet) in. Earlier status (2026-10-16): phase 1 done; phase 2 partly (router, `routes.toml` `[[route]]` pad-to-pad / net,
 `pcb route`; manual-mode pipeline and the la-main-manual acceptance still open).
 Deviations so far: `board.py` wraps `fixes._copper` instead of moving it (no refactor of `fixes` yet);
 the router's grid search runs coarse (0.1 mm) then fine (0.05 mm) with a weighted heuristic; multi-pad nets
@@ -168,7 +169,7 @@ reasons the agent can act on. Route time for la-main under 5 min.
    net's copper recoloured (edit the SVG: KiCad SVGs group by layer, not net - so instead draw
    the highlighted net's tracks/pads ourselves as an overlay `<g>` from the board model).
 2. Text summary per net: length per layer, via count, connected yes/no, nearest clearance.
-3. `pcb ratsnest`: unrouted pad pairs (from the model's connectivity, `tracks.pad_groups`),
+3. (done) `pcb ratsnest`: unrouted pad pairs (from the model's connectivity, `tracks.pad_groups`),
    lengths, and a crossings count (segment intersections of the straight ratsnest lines) overall
    and per 10 mm cell.
 4. Tests: crop maths (viewBox), ratsnest on a fixture.
@@ -245,7 +246,7 @@ fallback, passes `check`.
    balls/pins are interchangeable), assign nets to pins by angle as seen from the partner part
    (the geometric pairing done by hand for la-main / la-bga54), written back as a generated TSX
    constant file the board imports (`boards/<b>/pinmap.ts`), so the netlist stays the source.
-2. Ratsnest crossing count (phase 3) as the placement score; `pcb place-score <b>` compares
+2. (done) Ratsnest crossing count (phase 3) as the placement score; `pcb place-score <b>` compares
    board copies.
 3. Orientation hints: for each 2-terminal part, the rotation that minimises its ratsnest length.
 

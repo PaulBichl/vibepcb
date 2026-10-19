@@ -91,6 +91,8 @@ docstring of `cli.py` doubles as `--help` text.
 | `all <board>` | `build`, then `fix`, then `check`, short-circuiting on a non-zero result | all of the above | first non-zero, else `check`'s result |
 | `fab <board>` | part availability check once (parts engine, placement-only evaluation), then `kicad.export_fab` on `out/<board>/kicad/<board>.kicad_pcb`: one file per purpose (gerbers zip, JLCPCB BOM with MPN, CPL, schematic PDF, top/bottom renders); intermediates in `.work/fab/` | `out/<board>/fab/` | 0 |
 | `publish <board>` | only if the last `check` passed on the current board (`.work/reports/check.json`, board hash): KiCad project without 3D models, BOM, schematic PDF, renders (`kicad.export_docs`), layout PDF (a page per copper layer) + front/back SVGs (`kicad.export_layout`) | `boards/<board>/hardware/` (committed) | 0 |
+| `ratsnest <board> [--source current\|unrouted]` | `ratsnest.unrouted`: per net (not `[planes]` nets, not nets with a pour), the pads its tracks/vias do not join yet, linked by a minimum spanning tree over pad centres between the joined groups; prints the 40 longest links, totals (links, mm, crossings of straight links of different nets) and the 5 10 mm cells with the most crossings; `unrouted` reads `.work/unrouted.kicad_pcb` (manual mode) | none | 0 |
+| `place-score <board>.. [--source ...]` | `ratsnest.score` per board: one line with link count, total ratsnest length, crossings - the placement metric to compare `clone` variants | none | 0 |
 | `list` | prints board names (folders with `index.circuit.tsx` under `boards/`) | none | 0 |
 | `docs` | downloads `https://docs.tscircuit.com/llms.txt` to `docs/tscircuit-llms.txt` (60 s timeout) | `docs/` | 0 |
 
