@@ -25,8 +25,8 @@ def test_offset_keeps_the_distance_round_a_45_degree_corner() -> None:
 
 def test_pair_routes_coupled_and_reports_uncoupled_and_skew(tmp_path: Path) -> None:
     parts = " ".join([
-        pad("A1", 8, 9, 1, "D_P"), pad("A2", 8, 11, 2, "D_N"),
-        pad("B1", 22, 9, 1, "D_P"), pad("B2", 22, 11, 2, "D_N"),
+        pad("A1", 8, 8.5, 1, "D_P"), pad("A2", 8, 11.5, 2, "D_N"),
+        pad("B1", 22, 8.5, 1, "D_P"), pad("B2", 22, 11.5, 2, "D_N"),
         pad("Q1", 15, 6, 3, "X"),
     ])  # fmt: skip
     project = write(tmp_path, nets=PAIR_NETS, parts=parts)
