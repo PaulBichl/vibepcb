@@ -12,6 +12,7 @@ vibepcb all <board>     [--fast] build + fix + check
 vibepcb fab <board>     part availability check, gerbers/drill zip, BOM, pick-and-place, schematic PDF, 3D renders
 vibepcb publish <board> boards/<board>/hardware/: schematic + layout PDF/PNG, renders, BOM, KiCad project (no fab files)
 vibepcb padtable <board> REF..  boards/<board>/pads.ts: pad positions from the placement build (pin plans)
+vibepcb rules <board>   the merged design / manufacturing rule profiles ([rules] in vibepcb.toml), each value with its source
 vibepcb clone <board> <new>  copy a board and its build (variants to compare, no rebuild)
 vibepcb list            list the boards under boards/
 vibepcb docs            download tscircuit's LLM docs to docs/tscircuit-llms.txt
@@ -37,7 +38,21 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from vibepcb import board as board_model
-from vibepcb import config, fanout, fixes, inspect, kicad, padtable, paths, ratsnest, routes, schgen, sexpr, tscircuit
+from vibepcb import (
+    config,
+    fanout,
+    fixes,
+    inspect,
+    kicad,
+    padtable,
+    paths,
+    ratsnest,
+    routes,
+    rules,
+    schgen,
+    sexpr,
+    tscircuit,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -521,6 +536,18 @@ def cmd_docs() -> int:
     return 0
 
 
+def cmd_rules(board: str) -> int:
+    if not paths.board_source(board).exists():
+        print(f"error: no board {board!r} (boards/{board}/index.circuit.tsx)", file=sys.stderr)
+        return 1
+    ruleset = rules.merge(config.load(board))
+    if ruleset is None:
+        print(f"{board}: no [rules] in vibepcb.toml (available profiles: {', '.join(rules.available())})")
+        return 0
+    print("\n".join(rules.table(ruleset)))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="vibepcb", description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -553,6 +580,7 @@ def main(argv: list[str] | None = None) -> int:
     score_parser.add_argument("boards", nargs="+", help="boards to compare (e.g. `clone` variants)")
     for p in (ratsnest_parser, score_parser):
         p.add_argument("--source", choices=["current", "unrouted"], default="current")
+    sub.add_parser("rules").add_argument("board")
     sub.add_parser("list")
     sub.add_parser("docs")
     args = parser.parse_args(argv)
@@ -564,6 +592,8 @@ def main(argv: list[str] | None = None) -> int:
                 return 0
             case "docs":
                 return cmd_docs()
+            case "rules":
+                return cmd_rules(args.board)
             case "clone":
                 return cmd_clone(args.board, args.new)
             case "padtable":

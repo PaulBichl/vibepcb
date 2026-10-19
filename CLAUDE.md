@@ -82,7 +82,7 @@ Extra tscircuit checks: `hatch run tsci check netlist|placement|shorts <file>`
 
 ## Board config (`boards/<name>/vibepcb.toml`)
 
-What the TSX can't say: KiCad net classes (track width, clearance, diff-pair width/gap by net-name
+What the TSX can't say: rule profiles (`[rules] profiles = ["jlcpcb-4l", "ipc-class2"]` from `rules/*.toml`, `[rules.override]`; fab minimums, Default net class, board thickness; `src/vibepcb/rules.py`), KiCad net classes (track width, clearance, diff-pair width/gap by net-name
 pattern), length groups (max skew, e.g. an SDRAM bus), diff-pair rules, plane nets (`[planes]`: a via per
 pad), keepout areas (`[keepout.<name>]`: no pour / tracks / vias under a part or in a box, per layer) and BGA escapes (`[escape.<ref>]`: VibePCB escapes the ball grid, tscircuit routes from the escape ends;
 `src/vibepcb/fanout.py`). `fix` writes them into the
@@ -175,6 +175,7 @@ test in `tests/test_fixes.py` against the fixtures in `tests/data/`.
 | `hatch run pcb new <name>` | Scaffold `boards/<name>/index.circuit.tsx` |
 | `hatch run pcb all <name>` | build + fix + check |
 | `hatch run pcb publish <name>` | review set for GitHub in `boards/<name>/hardware/` (needs a passing `check`; no fab files) |
+| `hatch run pcb rules <name>` | Merged design / manufacturing rule profiles of a board, each value's source |
 | `hatch run pcb list` | List boards |
 | `hatch run tsci <args>` | tscircuit CLI |
 | `hatch run test` / `style` / `type` | pytest / ruff / mypy |

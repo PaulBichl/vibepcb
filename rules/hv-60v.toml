@@ -1,0 +1,10 @@
+# Nets up to 60 V: clearance per IPC-2221B table 6-1, column B2 (external conductors, uncoated,
+# sea level to 3050 m), 51-100 V row: 0.6 mm. B2 rather than B4 (solder-mask coated) because pads
+# and other exposed copper are not under the mask.
+# Name such nets HV_*, or redefine the patterns in the board: [netclass.HV60] nets = [...].
+kind = "application"
+description = "nets up to 60 V: 0.6 mm clearance (net class HV60)"
+
+[netclass.HV60]
+nets = ["HV_*"]
+clearance = 0.6
