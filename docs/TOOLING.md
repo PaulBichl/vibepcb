@@ -91,6 +91,10 @@ docstring of `cli.py` doubles as `--help` text.
 | `all <board>` | `build`, then `fix`, then `check`, short-circuiting on a non-zero result | all of the above | first non-zero, else `check`'s result |
 | `fab <board>` | part availability check once (parts engine, placement-only evaluation), then `kicad.export_fab` on `out/<board>/kicad/<board>.kicad_pcb`: one file per purpose (gerbers zip, JLCPCB BOM with MPN, CPL, schematic PDF, top/bottom renders); intermediates in `.work/fab/` | `out/<board>/fab/` | 0 |
 | `publish <board>` | only if the last `check` passed on the current board (`.work/reports/check.json`, board hash): KiCad project without 3D models, BOM, schematic PDF, renders (`kicad.export_docs`), layout PDF (a page per copper layer) + front/back SVGs (`kicad.export_layout`) | `boards/<board>/hardware/` (committed) | 0 |
+| `route <board> [--only NET] [--dry-run] [--drc]` | manual routing quick loop: `routes.toml` onto `.work/unrouted.kicad_pcb` (written by `fix`), no clean-up; `--drc` runs KiCad's DRC on the result | `out/<board>/kicad/<board>.kicad_pcb` | 1 if a connection failed |
+| `inspect <board> [--area x0 y0 x1 y1] [--net PAT] [--layer L] [--scale PX/MM] [--source unrouted]` | PNG of the board with a mm grid (KiCad coordinates), pad labels, one net pattern highlighted; text list of the pads in the area | `.work/preview/inspect.png` | 0 |
+| `padtable <board> REF...` | pad positions of the parts from the placement build as `boards/<board>/pads.ts` (pin plans by geometry in the board source) | `boards/<board>/pads.ts` | 1 without a build |
+| `clone <board> <new>` | copy of a board and its build (variants, e.g. other `[router]` settings, run in parallel without rebuilding) | `boards/<new>/`, `out/<new>/.work/raw/` | 1 if `<new>` exists |
 | `list` | prints board names (folders with `index.circuit.tsx` under `boards/`) | none | 0 |
 | `docs` | downloads `https://docs.tscircuit.com/llms.txt` to `docs/tscircuit-llms.txt` (60 s timeout) | `docs/` | 0 |
 

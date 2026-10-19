@@ -1,11 +1,22 @@
 # Routing plan: agent-directed ("manual") routing
 
-Status (2026-10-19): phase 5 (length tuning, `tune.py`, fix `tune_lengths`) and phase 6 coupled pairs (`pairs.py`, `[[pair]]`; no stack-up impedance yet) in. Earlier status (2026-10-16): phase 1 done; phase 2 partly (router, `routes.toml` `[[route]]` pad-to-pad / net,
-`pcb route`; manual-mode pipeline and the la-main-manual acceptance still open).
-Deviations so far: `board.py` wraps `fixes._copper` instead of moving it (no refactor of `fixes` yet);
-the router's grid search runs coarse (0.1 mm) then fine (0.05 mm) with a weighted heuristic; multi-pad nets
-are chained pad to pad (no T-junction to track copper yet); `REF.pinlabel` pad names not resolved yet;
-the search area is not limited to the outline (edge clearance only).
+Status (2026-10-19): phases 1-6 in, used on three BGA boards that pass `check` (la-bga54m, la-ecp5m,
+la-ecp5: ECP5 + BGA SDRAM, 6 layers, coupled USB pair). Phase 3 partly (`pcb inspect`; no `pcb ratsnest`),
+phase 4 (bus) is done differently, phase 7 (fallback autorouter) and 8 (placement helpers) open.
+What changed from the plan, in short:
+- `board.py` wraps `fixes._copper` (no refactor of `fixes`); `drc.py` adds rip-up (`ignore`) and pair aliases.
+- Router: A* over (x, y, layer) with the heading beside the state (not in it), coarse 0.4 / 0.2 mm search
+  first, the fine 0.1 mm search in a tube around it, unguided fine search last; vias; pad exit reservations
+  (cost in front of other nets' pads); `avoid_own` (routes of a net meet at pads, not on each other).
+- Buses: no lane geometry. `order = "angle"` routes the outermost arcs first (largest angle off the direction to
+  the goals, seen from the starts) so the inner ones nest; a pin plan made the same way in the board source
+  (sweep around both parts, `pcb padtable` for the pad positions) keeps them planar. Sequential + rip-up
+  (time-boxed) beat negotiated congestion (PathFinder, still `method = "negotiate"`), which wandered.
+- Length tuning (`tune.py`): 45-degree bumps on the longest straight pieces, to 90 % of `max_skew` or `tune_to`.
+- Pairs (`pairs.py`, `[[pair]]`): wide centre line split into P / N; refused when P / N swap sides between the
+  ends (swap pins at a symmetric part instead). No stack-up impedance yet.
+- Experiments: `[router]` settings per board, `pcb clone` for variants run in parallel.
+- Joint rules at escape ends / pads (`joints`, `pad_joints`) exist but are off: they blocked routes.
 Original text: Implement phase by phase; each phase ends with its
 acceptance test green and `hatch run test` / `style` / `type` passing. Keep this file up to date as
 phases land (what was done, what changed from the plan).
