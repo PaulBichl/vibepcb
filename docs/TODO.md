@@ -1,5 +1,8 @@
 # TODO
 
+- **`doNotPlace` ignored** (found on the Open Theremin): `schgen` marks every part fitted, so unfitted pads (ISP header,
+  antenna / touch pads) land in the BOM without LCSC numbers. Carry tscircuit's `doNotPlace` into the schematic
+  symbols (`(in_bom no)` / DNP) and leave them out of `fab`'s BOM and CPL.
 - ~~**Design / manufacturing rule profiles**~~ done: `rules/*.toml` (jlcpcb-2l/4l/6l, ipc-class2/3, hv-60v),
   `[rules]` in `vibepcb.toml`, `src/vibepcb/rules.py`, fix `apply_rule_profiles`, `pcb rules <board>`
   (TOOLING.md sections 3 and 5.2). Still open from the plan: stack-up (dielectric + er) and `rf`
