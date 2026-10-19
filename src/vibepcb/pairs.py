@@ -57,6 +57,13 @@ def offset(points: list[tracks.Point], d: float) -> list[tracks.Point]:
     return out
 
 
+def _left_of(a: tracks.Point, b: tracks.Point, p: tracks.Point) -> float:
+    """How far p lies to the left of the direction a -> b (the side :func:`offset` calls positive)."""
+    ux, uy = b[0] - a[0], b[1] - a[1]
+    n = math.hypot(ux, uy)
+    return (-uy * (p[0] - a[0]) + ux * (p[1] - a[1])) / n
+
+
 def _octilinear(a: tracks.Point, b: tracks.Point) -> bool:
     """a-b runs in one of the 8 grid directions (horizontal, vertical, 45 degrees)."""
     dx, dy = abs(b[0] - a[0]), abs(b[1] - a[1])
@@ -93,18 +100,17 @@ def route_pair(
         line.pop()
     half = (width + gap) / 2
     left, right = offset(line, half), offset(line, -half)
-    cost_left = math.dist(left[0], starts[0].centre) + math.dist(left[-1], goals[0].centre)
-    cost_right = math.dist(right[0], starts[0].centre) + math.dist(right[-1], goals[0].centre)
-    p_line, n_line = (left, right) if cost_left <= cost_right else (right, left)
-    # P on the same side of the centre line at both ends, else the pair has to cross over on the way
-    p_start_left = math.dist(left[0], starts[0].centre) <= math.dist(right[0], starts[0].centre)
-    p_goal_left = math.dist(left[-1], goals[0].centre) <= math.dist(right[-1], goals[0].centre)
+    # which side of the centre line P is on, at each end: P's pad further to the left (of the direction of
+    # travel there) than N's pad. Distances to the offset points mislead after a diagonal last piece
+    p_start_left = _left_of(line[0], line[1], starts[0].centre) > _left_of(line[0], line[1], starts[1].centre)
+    p_goal_left = _left_of(line[-2], line[-1], goals[0].centre) > _left_of(line[-2], line[-1], goals[1].centre)
     if p_start_left != p_goal_left:
         msg = (
             "P and N swap sides between the ends: swap the pins at one end (a part with symmetric channels, a "
             "connector) or the pair has to cross over"
         )
         raise router.RouteFailure(msg)
+    p_line, n_line = (left, right) if p_start_left else (right, left)
     result = PairRoute()
     for net, pts in ((p_net, p_line), (n_net, n_line)):
         r = router.Route(net, width, [(layer, a, b) for a, b in itertools.pairwise(pts)])
