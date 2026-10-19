@@ -3814,6 +3814,12 @@ def _is_keepout_zone(zone: list[Node]) -> bool:
     return name is not None and len(name) > 1 and str(name[1]).startswith(KEEPOUT_ZONE_PREFIX)
 
 
+def tune_lengths(project: KicadProject) -> list[str]:
+    """Meanders for the length groups of the board config (``vibepcb.tune``): KiCad checks the skew, this makes it."""
+    tune = importlib.import_module("vibepcb.tune")  # tune imports this module: no import at the top
+    return list(tune.tune(project))
+
+
 UNROUTED_NAME = "unrouted.kicad_pcb"
 
 
@@ -3853,6 +3859,7 @@ FIXES: dict[str, Fix] = {
     "push_tracks_clear": push_tracks_clear,
     "reroute_tracks": reroute_tracks,
     "remove_antennas": remove_antennas,
+    "tune_lengths": tune_lengths,
     "drop_npth_edge_cuts": drop_npth_edge_cuts,
     "allow_footprints_in_keepouts": allow_footprints_in_keepouts,
     "standard_board_thickness": standard_board_thickness,
