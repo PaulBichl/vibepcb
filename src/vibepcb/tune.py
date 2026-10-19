@@ -10,7 +10,7 @@ track pieces until it is long enough:
 
 Each new piece keeps the board clearance to other nets' copper (:mod:`vibepcb.drc`); a bump that does not fit
 goes to the other side, then lower bumps, then the next straight piece. Target: ``tune_to`` (mm, the spread
-the group is tuned to) or, without it, only the nets that break ``max_skew`` are brought to 90 % of it.
+the group is tuned to) or 90 % of ``max_skew`` (the margin covers what the clean-up after the fill changes).
 """
 
 from __future__ import annotations
@@ -117,8 +117,8 @@ def tune(project: KicadProject) -> list[str]:
             continue
         longest = max(lengths[n] for n in members)
         spread = float(group.get("tune_to", float(group["max_skew"]) * DEFAULT_SPREAD))
-        if "tune_to" not in group and longest - min(lengths[n] for n in members) <= float(group["max_skew"]):
-            continue  # inside the rule: nothing to do
+        if longest - min(lengths[n] for n in members) <= spread:
+            continue  # inside the target already
         for net in members:
             need = longest - spread - lengths[net]
             if need <= 0:

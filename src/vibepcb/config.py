@@ -12,8 +12,8 @@ these from the board's config file into the KiCad project (:func:`fixes.apply_bo
     [length_group.SDRAM_DQ]        # nets routed to matching lengths
     nets = ["SD_DQ*"]
     max_skew = 2.0                 # mm, longest - shortest
-    tune_to = 1.0                  # optional: meanders bring the group to this spread (vibepcb.tune); without
-                                   #   it only nets that break max_skew are tuned
+    tune_to = 1.0                  # optional: meanders bring the group to this spread (vibepcb.tune);
+                                   #   default 90 % of max_skew
 
     [diff_pair]                    # pairs = nets named <base>_P/_N or <base>+/-
     max_uncoupled = 5.0            # mm of the pair routed apart
