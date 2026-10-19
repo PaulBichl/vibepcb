@@ -8,6 +8,13 @@ these from the board's config file into the KiCad project (:func:`fixes.apply_bo
     track_width = 0.2              # mm; optional: clearance, via_diameter, via_drill,
     diff_pair_width = 0.2          #     diff_pair_width, diff_pair_gap
     diff_pair_gap = 0.15
+    impedance = 50                 # optional, ohm: track_width solved from the [stackup] (vibepcb.stackup)
+    impedance_diff = 90            # optional, ohm: diff_pair_width / _gap solved (a given gap stays fixed)
+    layer = "F.Cu"                 # optional: routing layer the impedance is solved for (default F.Cu)
+
+    [stackup]                      # for impedance: a preset (vibepcb.stackup.PRESETS, JLCPCB's), or
+    preset = "jlc04161h-7628"      #   layers = [{name = "F.Cu", copper = 0.035}, {dielectric = 0.2104, er = 4.4}, ...]
+                                   #   closed-form, a few % off a field solver: the fab's calculator is final
 
     [length_group.SDRAM_DQ]        # nets routed to matching lengths
     nets = ["SD_DQ*"]
@@ -47,7 +54,7 @@ from __future__ import annotations
 import tomllib
 from typing import TYPE_CHECKING, Any
 
-from vibepcb import paths
+from vibepcb import paths, stackup
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -56,6 +63,7 @@ CONFIG_NAME = "vibepcb.toml"
 ESCAPE_KEYS = ("track_width", "clearance", "via_diameter", "via_drill", "layers")
 KEEPOUT_KEYS = {"ref", "area", "margin", "layers", "block"}
 NETCLASS_KEYS = ("track_width", "clearance", "via_diameter", "via_drill", "diff_pair_width", "diff_pair_gap")
+IMPEDANCE_KEYS = ("impedance", "impedance_diff", "layer")  # solved into NETCLASS_KEYS (vibepcb.stackup)
 
 
 class ConfigError(ValueError):
@@ -77,17 +85,37 @@ def load(board: str) -> dict[str, Any]:
 
 
 def validate(data: dict[str, Any], where: str = CONFIG_NAME) -> None:
-    known = {"netclass", "length_group", "diff_pair", "planes", "escape", "routing", "keepout", "pour"}
+    known = {"netclass", "length_group", "diff_pair", "planes", "escape", "routing", "keepout", "pour", "stackup"}
     if unknown := set(data) - known:
         msg = f"{where}: unknown section(s) {sorted(unknown)} (known: {sorted(known)})"
         raise ConfigError(msg)
+    stack = None
+    if "stackup" in data:
+        try:
+            stack = stackup.from_config(data["stackup"])
+        except stackup.StackupError as e:
+            msg = f"{where}: {e}"
+            raise ConfigError(msg) from e
     for name, cls in data.get("netclass", {}).items():
         if not cls.get("nets"):
             msg = f"{where}: netclass {name!r} needs nets = [...]"
             raise ConfigError(msg)
-        if bad := set(cls) - {"nets", *NETCLASS_KEYS}:
+        if bad := set(cls) - {"nets", *NETCLASS_KEYS, *IMPEDANCE_KEYS}:
             msg = f"{where}: netclass {name!r}: unknown key(s) {sorted(bad)}"
             raise ConfigError(msg)
+        if not {"impedance", "impedance_diff"} & set(cls):
+            if "layer" in cls:
+                msg = f"{where}: netclass {name!r}: layer only goes with impedance / impedance_diff"
+                raise ConfigError(msg)
+            continue
+        if stack is None:
+            msg = f"{where}: netclass {name!r}: impedance needs a [stackup] (preset or layers)"
+            raise ConfigError(msg)
+        try:
+            stackup.netclass_widths(stack, cls)
+        except stackup.StackupError as e:
+            msg = f"{where}: netclass {name!r}: {e}"
+            raise ConfigError(msg) from e
     if data.get("routing", {}).get("mode", "auto") not in ("auto", "manual"):
         msg = f'{where}: [routing] mode must be "auto" (tscircuit routes) or "manual" (routes.toml)'
         raise ConfigError(msg)

@@ -1,6 +1,10 @@
 # Routing plan: agent-directed ("manual") routing
 
-Status (2026-10-19): phase 5 (length tuning, `tune.py`, fix `tune_lengths`) and phase 6 coupled pairs (`pairs.py`, `[[pair]]`; no stack-up impedance yet) in. Earlier status (2026-10-16): phase 1 done; phase 2 partly (router, `routes.toml` `[[route]]` pad-to-pad / net,
+Status (2026-10-19): phase 5 (length tuning, `tune.py`, fix `tune_lengths`) and phase 6 coupled pairs (`pairs.py`, `[[pair]]`) and phase 6 impedance (`stackup.py`: `[stackup]` presets jlc04161h-7628 / jlc06161h-7628 /
+jlc06161h-3313 or explicit layers; `[netclass.*] impedance` / `impedance_diff` / `layer` solved into the class widths by
+`apply_board_config`; Hammerstad-Jensen microstrip, Wheeler stripline, IPC-2141A coupling; formulas checked against
+Pozar's examples and Cohn's exact stripline, the "within 5 % of JLC's calculator" acceptance not verified yet: the
+calculator could not be run here, solder mask not modelled) in. Earlier status (2026-10-16): phase 1 done; phase 2 partly (router, `routes.toml` `[[route]]` pad-to-pad / net,
 `pcb route`; manual-mode pipeline and the la-main-manual acceptance still open).
 Deviations so far: `board.py` wraps `fixes._copper` instead of moving it (no refactor of `fixes` yet);
 the router's grid search runs coarse (0.1 mm) then fine (0.05 mm) with a weighted heuristic; multi-pad nets

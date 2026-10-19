@@ -21,7 +21,8 @@ import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from vibepcb import fanout, schgen, sexpr, tracks
+from vibepcb import fanout, schgen, sexpr, stackup, tracks
+from vibepcb.config import NETCLASS_KEYS
 from vibepcb.sexpr import Sym
 
 if TYPE_CHECKING:
@@ -3321,7 +3322,10 @@ def apply_board_config(project: KicadProject) -> list[str]:
     tscircuit has no net classes or KiCad length rules: classes (widths, clearance, diff-pair
     width / gap) and their net-name patterns go into the .kicad_pro; each length group becomes a
     ``skew`` rule and the diff-pair settings a ``diff_pair_uncoupled`` rule in the .kicad_dru, so
-    KiCad's DRC (and ``check``) fails on them. Rewritten from the config on every run.
+    KiCad's DRC (and ``check``) fails on them. Rewritten from the config on every run. A class with
+    ``impedance`` / ``impedance_diff`` gets its track_width / diff_pair_width / diff_pair_gap solved
+    from the ``[stackup]`` (:mod:`vibepcb.stackup`, closed-form: confirm with the fab's calculator),
+    replacing any width given in the class; a change line names the layer and stack-up.
     """
     cfg = project.config
     if not cfg:
@@ -3333,10 +3337,15 @@ def apply_board_config(project: KicadProject) -> list[str]:
         settings = data.setdefault("net_settings", {})
         classes = [c for c in settings.get("classes", []) if c.get("name") == "Default"]
         default = classes[0] if classes else {}
-        patterns = []
+        patterns, notes = [], []
+        stack = stackup.from_config(cfg["stackup"]) if "stackup" in cfg else None
         for name, cls in cfg["netclass"].items():
             entry = {**default, "name": name}
-            entry.update({k: float(v) for k, v in cls.items() if k != "nets"})
+            entry.update({k: float(v) for k, v in cls.items() if k in NETCLASS_KEYS})
+            if stack is not None and (solved := stackup.netclass_widths(stack, cls))[0]:
+                entry.update(solved[0])
+                values = ", ".join(f"{k} {v:g}" for k, v in solved[0].items())
+                notes.append(f"{pro.name}: net class {name}: {values} mm ({solved[1]})")
             classes.append(entry)
             patterns += [{"netclass": name, "pattern": str(p)} for p in cls["nets"]]
         if settings.get("classes") != classes or settings.get("netclass_patterns") != patterns:
@@ -3344,6 +3353,7 @@ def apply_board_config(project: KicadProject) -> list[str]:
             settings["netclass_patterns"] = patterns
             pro.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
             changes.append(f"{pro.name}: net classes {', '.join(cfg['netclass'])}")
+            changes += notes
     rules = []
     for name, group in cfg.get("length_group", {}).items():
         condition = " || ".join(f"A.NetName == '{p}'" for p in group["nets"])
