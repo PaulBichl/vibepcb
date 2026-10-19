@@ -175,7 +175,8 @@ def board_pads(project: KicadProject) -> list[Pad]:
     return out
 
 
-JOINTS = True  # routes keep their joints with tracks already at their ends at 90 degrees or more
+JOINTS = False  # true: routes keep their joints with tracks already at their ends at 90 degrees or more (off: the
+# clean-up does it better, la-ecp5: the hard rule left crowded escape ends unreachable)
 # [router] in routes.toml: router settings for this board (experiments: variants of a board differ only there)
 ROUTER_KEYS = {
     "via_cost": (router, "VIA_COST"),
