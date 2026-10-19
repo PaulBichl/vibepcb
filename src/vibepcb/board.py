@@ -47,23 +47,35 @@ class Rules:
 
     @classmethod
     def from_pro(cls, data: dict) -> Rules:
-        """Rules from the parsed .kicad_pro (``net_settings`` classes + patterns, ``rules`` limits)."""
+        """Rules from the parsed .kicad_pro (``net_settings`` classes + patterns, ``rules`` limits).
+
+        Class values below the design-setting minimums (``fixes.apply_rule_profiles`` writes the
+        fab's) are raised to them: KiCad's DRC would flag them anyway.
+        """
+        rules = data.get("board", {}).get("design_settings", {}).get("rules", {})
+
+        def floor(key: str) -> float:
+            return float(rules.get(key, 0.0) or 0.0)
 
         def net_class(c: dict) -> NetClass:
             d = NetClass("")
+            drill = max(float(c.get("via_drill", d.via_drill)), floor("min_through_hole_diameter"))
             return NetClass(
                 str(c.get("name", "")),
-                float(c.get("track_width", d.track_width)),
-                float(c.get("clearance", d.clearance)),
-                float(c.get("via_diameter", d.via_diameter)),
-                float(c.get("via_drill", d.via_drill)),
+                max(float(c.get("track_width", d.track_width)), floor("min_track_width")),
+                max(float(c.get("clearance", d.clearance)), floor("min_clearance")),
+                max(
+                    float(c.get("via_diameter", d.via_diameter)),
+                    floor("min_via_diameter"),
+                    round(drill + 2 * floor("min_via_annular_width"), 6),
+                ),
+                drill,
                 float(c.get("diff_pair_width", 0.0) or 0.0),
                 float(c.get("diff_pair_gap", 0.0) or 0.0),
             )
 
         settings = data.get("net_settings", {})
         classes = {c["name"]: net_class(c) for c in settings.get("classes", []) if "name" in c}
-        rules = data.get("board", {}).get("design_settings", {}).get("rules", {})
         return cls(
             default=classes.get("Default", NetClass("Default")),
             classes=classes,

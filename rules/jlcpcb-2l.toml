@@ -1,0 +1,20 @@
+# JLCPCB standard 1-2 layer FR-4 capabilities (1 oz copper).
+# Source: https://jlcpcb.com/capabilities/pcb-capabilities (read 2026-10-19).
+# The published minimums the fab builds: every board value must stay at or above them
+# (`pcb rules <board>` shows the merged set). All lengths in mm.
+kind = "fab"
+description = "JLCPCB 1-2 layer, standard process"
+
+min_track_width = 0.10            # 4 mil trace
+min_clearance = 0.10              # 4 mil spacing
+min_via_drill = 0.15              # via hole (0.1 only on boards <= 1.0 mm; holes < 0.3 mm may cost extra)
+min_via_diameter = 0.25           # via pad
+min_via_annular_ring = 0.05       # "via diameter >= hole + 0.1 mm" (0.15 preferred)
+min_hole_to_hole = 0.20           # via hole to via hole
+min_pad_hole_to_hole = 0.45       # PTH pad hole to PTH pad hole (KiCad custom rule)
+min_pth_annular_ring = 0.18       # PTH pad ring, absolute minimum (0.25 recommended)
+min_copper_edge_clearance = 0.20  # routed edge (V-cut needs 0.4: override it)
+min_silk_width = 0.15             # silkscreen stroke
+board_thickness = 1.6             # FR-4 options 0.4-2.0 mm; 1.6 = the common default
+# Not set (not published as a single number): pad hole to copper (JLCPCB: PTH to track 0.28 mm,
+# vias excluded), silkscreen clearance. Text height: JLCPCB asks >= 1.0 mm.

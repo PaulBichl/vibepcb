@@ -21,7 +21,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from vibepcb import fanout, schgen, sexpr, tracks
+from vibepcb import fanout, rules, schgen, sexpr, tracks
 from vibepcb.sexpr import Sym
 
 if TYPE_CHECKING:
@@ -689,14 +689,15 @@ def allow_footprints_in_keepouts(project: KicadProject) -> list[str]:
 
 
 def standard_board_thickness(project: KicadProject) -> list[str]:
-    """tscircuit exports 1.4 mm; most fabs default to 1.6 mm."""
+    """tscircuit exports 1.4 mm; most fabs default to 1.6 mm (or the rule profiles' ``board_thickness``)."""
+    target = rules.board_thickness(project.config) or STANDARD_BOARD_THICKNESS_MM
     general = sexpr.child(project.pcb, "general")
     thickness = None if general is None else sexpr.child(general, "thickness")
-    if thickness is None or float(str(thickness[1])) == STANDARD_BOARD_THICKNESS_MM:
+    if thickness is None or float(str(thickness[1])) == target:
         return []
     old = thickness[1]
-    thickness[1] = Sym(str(STANDARD_BOARD_THICKNESS_MM))
-    return [f"board thickness {old} mm -> {STANDARD_BOARD_THICKNESS_MM} mm"]
+    thickness[1] = Sym(f"{target:g}")
+    return [f"board thickness {old} mm -> {target:g} mm"]
 
 
 def fill_schematic_footprints(project: KicadProject) -> list[str]:
@@ -3328,13 +3329,14 @@ def apply_board_config(project: KicadProject) -> list[str]:
         return []
     changes = []
     pro = project.pcb_path.with_suffix(".kicad_pro")
-    if pro.exists() and cfg.get("netclass"):
+    netclasses = rules.netclasses(cfg)  # the board's [netclass] plus those of its rule profiles
+    if pro.exists() and netclasses:
         data = json.loads(pro.read_text(encoding="utf-8"))
         settings = data.setdefault("net_settings", {})
         classes = [c for c in settings.get("classes", []) if c.get("name") == "Default"]
         default = classes[0] if classes else {}
         patterns = []
-        for name, cls in cfg["netclass"].items():
+        for name, cls in netclasses.items():
             entry = {**default, "name": name}
             entry.update({k: float(v) for k, v in cls.items() if k != "nets"})
             classes.append(entry)
@@ -3343,27 +3345,68 @@ def apply_board_config(project: KicadProject) -> list[str]:
             settings["classes"] = classes
             settings["netclass_patterns"] = patterns
             pro.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-            changes.append(f"{pro.name}: net classes {', '.join(cfg['netclass'])}")
-    rules = []
+            changes.append(f"{pro.name}: net classes {', '.join(netclasses)}")
+    dru_forms = []
     for name, group in cfg.get("length_group", {}).items():
         condition = " || ".join(f"A.NetName == '{p}'" for p in group["nets"])
-        rules.append(
+        dru_forms.append(
             f'(rule "{BOARD_CONFIG_RULE}: length group {name}"\n  (condition "{condition}")\n'
             f"  (constraint skew (max {_mm(float(group['max_skew']))}mm)))\n"
         )
     if (uncoupled := cfg.get("diff_pair", {}).get("max_uncoupled")) is not None:
-        rules.append(
+        dru_forms.append(
             f'(rule "{BOARD_CONFIG_RULE}: diff pairs"\n  (condition "A.inDiffPair(\'*\')")\n'
             f"  (constraint diff_pair_uncoupled (max {_mm(float(uncoupled))}mm)))\n"
         )
-    if rules:
+    if dru_forms:
         dru = project.pcb_path.with_suffix(".kicad_dru")
         text = dru.read_text(encoding="utf-8") if dru.exists() else "(version 1)\n"
         kept = [r for r in _dru_rules(text) if f'(rule "{BOARD_CONFIG_RULE}' not in r]
-        new_text = "".join(kept) + "".join(rules)
+        new_text = "".join(kept) + "".join(dru_forms)
         if new_text != text:
             dru.write_text(new_text, encoding="utf-8")
-            changes.append(f"{dru.name}: {len(rules)} rule(s) from the board config")
+            changes.append(f"{dru.name}: {len(dru_forms)} rule(s) from the board config")
+    return changes
+
+
+def apply_rule_profiles(project: KicadProject) -> list[str]:
+    """Design / manufacturing rule profiles (``[rules]`` in ``vibepcb.toml``, see ``vibepcb.rules``).
+
+    The merged minimums go into the .kicad_pro design settings (KiCad's DRC and the router read
+    them there), the Default net class takes the profile values (else its own, raised to the
+    minimums), and pad-hole rules KiCad has no setting for become .kicad_dru rules. Runs before the
+    routing fixes so ``Board.from_project`` sees the profile.
+    """
+    rs = rules.merge(project.config)
+    if rs is None:
+        return []
+    changes = []
+    pro = project.pcb_path.with_suffix(".kicad_pro")
+    if pro.exists():
+        data = json.loads(pro.read_text(encoding="utf-8"))
+        design = data.setdefault("board", {}).setdefault("design_settings", {}).setdefault("rules", {})
+        new_rules = {k: v for k, v in rules.pro_rules(rs).items() if design.get(k) != v}
+        design.update(new_rules)
+        classes = data.setdefault("net_settings", {}).setdefault("classes", [])
+        index = next((i for i, c in enumerate(classes) if c.get("name") == "Default"), None)
+        if index is None:
+            classes.insert(0, {"name": "Default"})
+            index = 0
+        default = rules.default_class(rs, classes[index])
+        new_default = {k: v for k, v in default.items() if classes[index].get(k) != v}
+        classes[index] = default
+        if new_rules or new_default:
+            pro.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+            changes += [f"{pro.name}: {k} = {v:g} mm" for k, v in {**new_rules, **new_default}.items()]
+    dru = project.pcb_path.with_suffix(".kicad_dru")
+    text = dru.read_text(encoding="utf-8") if dru.exists() else "(version 1)\n"
+    added = rules.dru_rules(rs)
+    forms = _dru_rules(text)
+    kept = [r for r in forms if f'(rule "{rules.DRU_RULE_PREFIX}' not in r]
+    new_text = "".join(kept) + "".join(added)
+    if new_text != "".join(forms):
+        dru.write_text(new_text, encoding="utf-8")
+        changes.append(f"{dru.name}: {len(added)} rule(s) from the rule profiles")
     return changes
 
 
@@ -3843,6 +3886,7 @@ def apply_routes(project: KicadProject) -> list[str]:
 FIXES: dict[str, Fix] = {
     "rename_auto_nets": rename_auto_nets,
     "propagate_split_pad_nets": propagate_split_pad_nets,
+    "apply_rule_profiles": apply_rule_profiles,
     "apply_escapes": apply_escapes,
     "apply_pours": apply_pours,
     "apply_keepouts": apply_keepouts,

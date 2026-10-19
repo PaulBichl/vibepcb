@@ -1,0 +1,13 @@
+# IPC class 3 (high reliability) design margins, on top of a fab profile.
+# Basis: IPC-6012 class 3 requires a 0.050 mm external annular ring after fabrication (no breakout);
+# IPC-2221B adds a fabrication allowance for drill wander. The ring values are conservative design
+# figures, not quoted from the standard's tables.
+# An application layer only tightens: each min_* takes the larger of the value so far and its own.
+kind = "application"
+description = "IPC class 3 design margins"
+
+min_clearance = 0.13              # IPC-2221B table 6-1, A6 (external component leads, uncoated), 0-30 V
+min_track_width = 0.10
+min_via_annular_ring = 0.125
+min_pth_annular_ring = 0.20
+min_hole_to_hole = 0.25

@@ -908,6 +908,49 @@ def test_apply_board_config(project: fixes.KicadProject) -> None:
     assert dru.count("length group SDRAM_DQ") == 1  # replaced, not appended
 
 
+def test_apply_rule_profiles(project: fixes.KicadProject) -> None:
+    assert fixes.apply_rule_profiles(project) == []  # no [rules]
+    pro = project.pcb_path.with_suffix(".kicad_pro")
+    default = {"name": "Default", "track_width": 0.1, "clearance": 0.1, "via_diameter": 0.3, "via_drill": 0.2}
+    pro.write_text(json.dumps({"net_settings": {"classes": [default]}}), encoding="utf-8")
+    project.config = {
+        "rules": {"profiles": ["jlcpcb-2l", "ipc-class2", "hv-60v"], "override": {"track_width": 0.2}},
+        "netclass": {"USB": {"nets": ["USB_D*"], "track_width": 0.2}},
+    }
+    assert fixes.apply_rule_profiles(project)
+    data = json.loads(pro.read_text(encoding="utf-8"))
+    design = data["board"]["design_settings"]["rules"]
+    assert design["min_track_width"] == 0.1
+    assert design["min_clearance"] == 0.1
+    assert design["min_through_hole_diameter"] == 0.15
+    assert design["min_via_diameter"] == 0.25
+    assert design["min_via_annular_width"] == 0.1  # ipc-class2 tightens jlcpcb's 0.05
+    assert design["min_hole_to_hole"] == 0.2
+    assert design["min_copper_edge_clearance"] == 0.2
+    assert design["min_text_thickness"] == 0.15
+    cls = data["net_settings"]["classes"][0]
+    # profile value for the track width, via raised to the 0.1 mm ring, clearance already at the minimum
+    assert cls == {"name": "Default", "track_width": 0.2, "clearance": 0.1, "via_diameter": 0.4, "via_drill": 0.2}
+    dru = project.pcb_path.with_suffix(".kicad_dru").read_text(encoding="utf-8")
+    assert "(constraint hole_to_hole (min 0.45mm))" in dru
+    assert "(constraint annular_width (min 0.18mm))" in dru
+    assert fixes.apply_rule_profiles(project) == []  # idempotent
+    # the profile's net class and the board's go in together; the Default stays first
+    assert fixes.apply_board_config(project)
+    settings = json.loads(pro.read_text(encoding="utf-8"))["net_settings"]
+    assert [c["name"] for c in settings["classes"]] == ["Default", "HV60", "USB"]
+    assert next(c for c in settings["classes"] if c["name"] == "HV60")["clearance"] == 0.6
+    assert {"netclass": "HV60", "pattern": "HV_*"} in settings["netclass_patterns"]
+    project.config["rules"]["override"]["board_thickness"] = 0.8
+    assert fixes.standard_board_thickness(project) == ["board thickness 1.4 mm -> 0.8 mm"]
+    general = sexpr.child(project.pcb, "general")
+    assert general is not None
+    assert sexpr.child(general, "thickness") == ["thickness", "0.8"]
+    project.config["rules"]["override"]["min_clearance"] = 0.05
+    with pytest.raises(config.ConfigError, match="below the fab capability"):
+        fixes.apply_rule_profiles(project)
+
+
 def test_board_config_validation() -> None:
     config.validate({"netclass": {"USB": {"nets": ["USB*"], "track_width": 0.2}}})
     with pytest.raises(config.ConfigError):

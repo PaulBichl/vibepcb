@@ -34,6 +34,12 @@ these from the board's config file into the KiCad project (:func:`fixes.apply_bo
     [routing]                      # mode = "manual": tscircuit places only, routes.toml routes (vibepcb.routes);
     mode = "manual"                #   default "auto" = tscircuit's autorouter
 
+    [rules]                        # design / manufacturing rule profiles (vibepcb.rules): rules/<name>.toml,
+    profiles = ["jlcpcb-4l", "ipc-class2"]  # fab capability first, application layers after
+    [rules.override]               # single values; later profiles and overrides win, an override
+    min_clearance = 0.15           #   below the fab capability is an error (`pcb rules <board>`)
+    track_width = 0.2              #   Default net class: track_width, clearance, via_diameter, via_drill
+
     [escape.U2]                    # ball grid escaped by VibePCB, not tscircuit's router (vibepcb.fanout);
     track_width = 0.1              #   all optional: track_width, clearance, via_diameter, via_drill,
     layers = ["bottom"]            #   layers (escape layers of balls that can't leave on top)
@@ -55,6 +61,23 @@ if TYPE_CHECKING:
 CONFIG_NAME = "vibepcb.toml"
 ESCAPE_KEYS = ("track_width", "clearance", "via_diameter", "via_drill", "layers")
 KEEPOUT_KEYS = {"ref", "area", "margin", "layers", "block"}
+# rule-profile values (mm; vibepcb.rules): fab / application minimums, the Default net class, the board
+RULE_MIN_KEYS = (
+    "min_track_width",
+    "min_clearance",
+    "min_via_drill",
+    "min_via_diameter",
+    "min_via_annular_ring",
+    "min_hole_to_hole",
+    "min_hole_clearance",
+    "min_pad_hole_to_hole",
+    "min_pth_annular_ring",
+    "min_copper_edge_clearance",
+    "min_silk_width",
+    "min_silk_clearance",
+)
+RULE_CLASS_KEYS = ("track_width", "clearance", "via_diameter", "via_drill")
+RULE_KEYS = (*RULE_MIN_KEYS, *RULE_CLASS_KEYS, "board_thickness")
 NETCLASS_KEYS = ("track_width", "clearance", "via_diameter", "via_drill", "diff_pair_width", "diff_pair_gap")
 
 
@@ -77,7 +100,7 @@ def load(board: str) -> dict[str, Any]:
 
 
 def validate(data: dict[str, Any], where: str = CONFIG_NAME) -> None:
-    known = {"netclass", "length_group", "diff_pair", "planes", "escape", "routing", "keepout", "pour"}
+    known = {"netclass", "length_group", "diff_pair", "planes", "escape", "routing", "keepout", "pour", "rules"}
     if unknown := set(data) - known:
         msg = f"{where}: unknown section(s) {sorted(unknown)} (known: {sorted(known)})"
         raise ConfigError(msg)
@@ -88,6 +111,7 @@ def validate(data: dict[str, Any], where: str = CONFIG_NAME) -> None:
         if bad := set(cls) - {"nets", *NETCLASS_KEYS}:
             msg = f"{where}: netclass {name!r}: unknown key(s) {sorted(bad)}"
             raise ConfigError(msg)
+    _validate_rules(data.get("rules", {}), where)
     if data.get("routing", {}).get("mode", "auto") not in ("auto", "manual"):
         msg = f'{where}: [routing] mode must be "auto" (tscircuit routes) or "manual" (routes.toml)'
         raise ConfigError(msg)
@@ -121,4 +145,21 @@ def validate(data: dict[str, Any], where: str = CONFIG_NAME) -> None:
     for name, group in data.get("length_group", {}).items():
         if not group.get("nets") or "max_skew" not in group:
             msg = f"{where}: length_group {name!r} needs nets = [...] and max_skew"
+            raise ConfigError(msg)
+
+
+def _validate_rules(rules: dict[str, Any], where: str) -> None:
+    if bad := set(rules) - {"profiles", "override"}:
+        msg = f"{where}: [rules]: unknown key(s) {sorted(bad)} (known: override, profiles)"
+        raise ConfigError(msg)
+    profiles = rules.get("profiles", [])
+    if not isinstance(profiles, list) or not all(isinstance(p, str) for p in profiles):
+        msg = f'{where}: [rules] profiles must be a list of names, e.g. ["jlcpcb-4l", "ipc-class2"]'
+        raise ConfigError(msg)
+    for key, value in rules.get("override", {}).items():
+        if key not in RULE_KEYS:
+            msg = f"{where}: [rules.override]: unknown key {key!r} (known: {', '.join(RULE_KEYS)})"
+            raise ConfigError(msg)
+        if isinstance(value, bool) or not isinstance(value, int | float) or value <= 0:
+            msg = f"{where}: [rules.override] {key} must be a positive number (mm), got {value!r}"
             raise ConfigError(msg)
