@@ -201,6 +201,7 @@ ROUTER_KEYS = {
     "heuristic_weight": (router, "HEURISTIC_WEIGHT"),
     "grid_slack_mm": (router, "GRID_SLACK_MM"),
     "max_states": (router, "MAX_STATES"),
+    "avoid_own": (router, "AVOID_OWN"),
     "tube_states": (router, "TUBE_STATES"),
     "last_resort_states": (router, "LAST_RESORT_STATES"),
     "rip_up_rounds": (sys.modules[__name__], "RIP_UP_ROUNDS"),

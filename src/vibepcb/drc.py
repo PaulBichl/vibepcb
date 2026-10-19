@@ -119,6 +119,16 @@ def blocking_via(
     return next(scan_via(board, net, centre, diameter, drill, ignore), None)
 
 
+def overlaps_own(board: Board, net: str, layer: str, a: tracks.Point, b: tracks.Point, width: float) -> bool:
+    """A track of ``net`` from a to b would lie on the net's own routed tracks on ``layer`` (copper overlap)."""
+    m = width
+    near = board.near(min(a[0], b[0]) - m, min(a[1], b[1]) - m, max(a[0], b[0]) + m, max(a[1], b[1]) + m)
+    return any(
+        o.routed and o.net == net and layer in o.layers and len(o.points) == 2 and o.distance(a, b) < width / 2
+        for o in near
+    )
+
+
 def fits_track(board: Board, net: str, layer: str, a: tracks.Point, b: tracks.Point, width: float) -> bool:
     return blocking_track(board, net, layer, a, b, width) is None
 

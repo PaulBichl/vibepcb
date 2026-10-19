@@ -29,6 +29,8 @@ TUBE_MM = (1.2, 3.0)  # the fine search stays this close to the coarse path; a w
 LAST_RESORT_STATES = 300_000  # the unguided fine search when the guided ones failed
 GRID_SLACK_MM = 0.03  # grid nodes keep this much extra clearance: pieces between nodes then pass the exact check
 RESERVE_COST = 1.5  # per grid node in front of another net's pad: leave room for its exit / via
+AVOID_OWN = False  # true: a route keeps off its net's routed tracks except near its ends (they meet at pads)
+OWN_FREE_MM = 0.8  # how near its start / goal a route may run on its net's tracks
 SOFT_COST = 4.0  # per grid node through copper that may be ripped up (a crossing costs ~10-20 mm of detour)
 HEURISTIC_WEIGHT = 1.3  # >1: fewer states, routes a little longer than optimal
 LENGTH_COST = 1.0  # per mm
@@ -315,6 +317,14 @@ def _search(
             p = pos(ix, iy)
             w = spec.width + 2 * slack
             outside = not (x0 <= p[0] <= x1 and y0 <= p[1] <= y1) or (tube is not None and not tube.near(p))
+            if (
+                not outside
+                and AVOID_OWN
+                and math.dist(p, start) > OWN_FREE_MM
+                and math.dist(p, goal) > OWN_FREE_MM
+                and drc.overlaps_own(board, net, layers[li], p, p, spec.width)
+            ):
+                outside = True  # on its own net's track: they would merge into a junction at a random angle
             if outside or drc.blocking_track(board, net, layers[li], p, p, w, soft):
                 blocked[key] = 1
             else:
