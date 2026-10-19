@@ -433,6 +433,9 @@ def cmd_check(board: str) -> int:
         f"  [error] sharp_corner: {net} bend of {a:.1f} deg @ ({x:.3f}, {y:.3f}) mm" for net, (x, y), a in corners
     ]
     summary += [f"  [warning] unlabelled_connector: {w}" for w in fixes.unlabelled_connectors(loaded)]
+    splits = fixes.split_crossings(loaded)
+    summary.append(f"Plane splits: {len(splits)} track(s) crossing a region edge")
+    summary += [f"  [warning] split_crossing: {w}" for w in splits[:40]]
     summary.append(f"Pours: {len(unpoured)} copper layer(s) without a plane")
     summary += [f"  [error] no_pour: {layer} - add a <copperpour> (GND or a supply net) on it" for layer in unpoured]
     passed = not (erc.errors or drc.errors or corners or unpoured)

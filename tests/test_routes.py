@@ -111,3 +111,15 @@ def test_remove_antennas_cuts_a_stub_back_to_the_pad_it_runs_over(tmp_path: Path
     starts = [sexpr.child(s, "start") for s in sexpr.children(project.pcb, "segment")]
     assert ["start", sexpr.Sym("10"), sexpr.Sym("10")] in starts
     assert fixes.remove_antennas(project) == []
+
+
+def test_split_crossings_flags_a_track_over_a_region_edge(tmp_path: Path) -> None:
+    zones = (
+        '(zone (net 2) (net_name "B") (layer "B.Cu") (polygon (pts (xy 0.5 0.5) (xy 29.5 0.5) (xy 29.5 19.5) (xy 0.5 19.5))))'
+        '(zone (net 1) (net_name "A") (layer "B.Cu") (polygon (pts (xy 10 5) (xy 15 5) (xy 15 10) (xy 10 10))))'
+    )
+    tracks_ = seg("8 7", "17 7", 2) + seg("8 8", "17 8", 1)  # B crosses the A patch below it, A is its own net
+    project = write(tmp_path, zones + tracks_)
+    found = fixes.split_crossings(project)
+    assert len(found) == 1
+    assert found[0].startswith("B on F.Cu crosses the A region edge on B.Cu at (")

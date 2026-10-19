@@ -31,6 +31,8 @@ these from the board's config file into the KiCad project (:func:`fixes.apply_bo
     [pour.v3v3]                    # a pour the build lacks (manual routing: tscircuit emits pours with its routes):
     net = "V3V3"                   #   copy of the board's pour settings over the outline, inset by margin (default 0.5)
     layers = ["In2.Cu"]
+    # area = [x0, y0, x1, y1]        #   optional: only this box (board mm) - a split plane / a patch under a part;
+    # priority = 2                   #   it wins over a full pour of the layer (KiCad zone priority)
 
     [keepout.antenna]              # rule area (KiCad enforces it: pour fill + DRC; the router keeps out of tracks / vias)
     ref = "U3"                     #   over this part's pads + courtyard (or: area = [x0, y0, x1, y1] board mm)
@@ -158,8 +160,11 @@ def validate(data: dict[str, Any], where: str = CONFIG_NAME) -> None:
         if "net" not in k or not k.get("layers"):
             msg = f'{where}: pour {name!r} needs net = "NAME" and layers = ["In2.Cu", ...]'
             raise ConfigError(msg)
-        if bad := set(k) - {"net", "layers", "margin"}:
-            msg = f"{where}: pour {name!r}: unknown key(s) {sorted(bad)} (known: layers, margin, net)"
+        if bad := set(k) - {"net", "layers", "margin", "area", "priority"}:
+            msg = f"{where}: pour {name!r}: unknown key(s) {sorted(bad)} (known: area, layers, margin, net, priority)"
+            raise ConfigError(msg)
+        if "area" in k and len(k["area"]) != 4:
+            msg = f"{where}: pour {name!r}: area needs 4 numbers (x0 y0 x1 y1, board mm)"
             raise ConfigError(msg)
     for name, k in data.get("keepout", {}).items():
         if ("ref" in k) == ("area" in k):

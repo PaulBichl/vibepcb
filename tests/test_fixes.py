@@ -1175,3 +1175,16 @@ def test_stitch_pour_islands_puts_a_via_into_a_floating_piece(project: fixes.Kic
     vias = [v[1] for v in fixes._copper(project.pcb).vias if v[3] == "GND"]
     assert any(104 < x < 109 and 93.5 < y < 96 for x, y in vias)
     assert fixes.stitch_pour_islands(project) == []
+
+
+def test_apply_pours_area_pour_is_a_named_prioritised_box(project: fixes.KicadProject) -> None:
+    project.config = {"pour": {"core": {"net": "VCC", "layers": ["B.Cu"], "area": [95, 95, 100, 100], "priority": 2}}}
+    changes = fixes.apply_pours(project)
+    assert changes == ["core: VCC pour on B.Cu in (95, 95)-(100, 100)"]
+    zones = [z for z in sexpr.children(project.pcb, "zone") if fixes._is_pour_zone(z)]
+    assert len(zones) == 1
+    assert sexpr.child(zones[0], "priority") == ["priority", Sym("2")]
+    xs = {float(str(xy[1])) for xy in sexpr.walk(sexpr.child(zones[0], "polygon") or []) if sexpr.head(xy) == "xy"}
+    assert xs == {95.0, 100.0}
+    fixes.apply_pours(project)  # rewritten, not added twice
+    assert len([z for z in sexpr.children(project.pcb, "zone") if fixes._is_pour_zone(z)]) == 1

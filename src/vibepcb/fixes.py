@@ -3806,6 +3806,9 @@ def apply_pours(project: KicadProject) -> list[str]:
     ``[routing] mode = "manual"`` has none on a plane layer of a supply (a ``<copperpour>`` on an inner
     layer). A pour for a net and layer the board has no zone for yet is added here, as a copy of the
     board's existing pour settings (else KiCad's usual ones), over the board outline inset by ``margin``.
+    With ``area`` (x0, y0, x1, y1, board mm) the pour covers only that box - a split plane or a patch on a
+    signal layer (e.g. a BGA's core supply under it) - and ``priority`` lets it win over a full pour of the
+    same layer; such pours are rewritten from the config on every run.
     """
     cfg = project.config.get("pour", {})
     zones = [z for z in sexpr.children(project.pcb, "zone") if sexpr.child(z, "keepout") is None]
@@ -3824,6 +3827,8 @@ def apply_pours(project: KicadProject) -> list[str]:
         for pt in _graphic_points(g)
     ]
     changes = []
+    for z in [z for z in sexpr.children(project.pcb, "zone") if _is_pour_zone(z)]:
+        project.pcb.remove(z)  # area pours are rewritten from the config on every run
     for name, entry in cfg.items():
         net, margin = str(entry["net"]), float(entry.get("margin", 0.5))
         declared = _declared_net(project.pcb, net)
@@ -3834,8 +3839,12 @@ def apply_pours(project: KicadProject) -> list[str]:
             changes.append(f"{name}: no board outline, pour skipped")
             continue
         x0, y0, x1, y1 = _bbox(edge_points, -margin)
+        area = entry.get("area")
+        if area is not None:  # a region of the layer (a split plane, a patch under a part), inside the outline
+            ax0, ay0, ax1, ay1 = (float(v) for v in area)
+            x0, y0, x1, y1 = max(x0, ax0), max(y0, ay0), min(x1, ax1), min(y1, ay1)
         for layer in entry["layers"]:
-            if (net, layer) in have:
+            if area is None and (net, layer) in have:
                 continue
             zone = copy.deepcopy(template)
             for key in ("net", "net_name", "layer", "layers", "filled_polygon", "polygon"):
@@ -3852,10 +3861,21 @@ def apply_pours(project: KicadProject) -> list[str]:
             if uid_node is not None:
                 uid_node[1] = str(uid)
             zone[1:1] = head
+            if area is not None:
+                zone.insert(len(head) + 1, [Sym("name"), f"{POUR_ZONE_PREFIX}{name}"])
+                for old in list(sexpr.children(zone, "priority")):
+                    zone.remove(old)
+                zone.insert(len(head) + 2, [Sym("priority"), Sym(str(int(entry.get("priority", 1))))])
             zone.append(outline)
             project.pcb.append(zone)
-            changes.append(f"{name}: {net} pour on {layer}")
+            where = f" in ({_mm(x0)}, {_mm(y0)})-({_mm(x1)}, {_mm(y1)})" if area is not None else ""
+            changes.append(f"{name}: {net} pour on {layer}{where}")
     return changes
+
+
+def _is_pour_zone(zone: list[Node]) -> bool:
+    name = sexpr.child(zone, "name")
+    return name is not None and len(name) > 1 and str(name[1]).startswith(POUR_ZONE_PREFIX)
 
 
 def _zone_net(pcb: list[Node], zone: list[Node]) -> str:
@@ -4255,6 +4275,65 @@ DEFAULT_VIA_MM = (0.6, 0.3)
 
 
 CONNECTOR_LABEL_REACH_MM = 6.0  # board text this close to a connector's pads counts as its labelling
+
+
+FULL_POUR_SHARE = 0.8  # a zone covering this share of the board is a full plane, not a region of a split
+
+
+def split_crossings(project: KicadProject) -> list[str]:
+    """Tracks that cross the edge of a region pour (a split plane, a patch) on the copper layer next to them.
+
+    Over the edge the track's return current has to change planes: a detour and a noise source, so common
+    practice keeps signals off split edges (or stitches a capacitor across). One line per track and split.
+    """
+    layer_names = {
+        str(n[1]) for n in (sexpr.child(project.pcb, "layers") or [])[1:] if isinstance(n, list) and len(n) > 1
+    }
+    stack = [lay for lay in COPPER_LAYERS if lay in layer_names]
+    edge_points = [
+        pt
+        for g in project.pcb
+        if isinstance(g, list)
+        and sexpr.head(g) in ("gr_line", "gr_rect", "gr_arc", "gr_poly")
+        and _layer(g) == "Edge.Cuts"
+        for pt in _graphic_points(g)
+    ]
+    if not edge_points:
+        return []
+    bx0, by0, bx1, by1 = _bbox(edge_points)
+    board_area = (bx1 - bx0) * (by1 - by0)
+    names = _net_names(project.pcb)
+    regions: dict[str, list[tuple[str, list[tracks.Point]]]] = {}  # layer -> (net, outline) of region pours
+    nets_on: dict[str, set[str]] = {}
+    for zone in sexpr.children(project.pcb, "zone"):
+        if sexpr.child(zone, "keepout") is not None:
+            continue
+        net = _net_of(zone, names)
+        for layer, poly in _zone_polygons(zone, filled=False):
+            nets_on.setdefault(layer, set()).add(net)
+            x0, y0, x1, y1 = _bbox(poly)
+            if (x1 - x0) * (y1 - y0) < FULL_POUR_SHARE * board_area:
+                regions.setdefault(layer, []).append((net, poly))
+    out = []
+    copper = _copper(project.pcb)
+    for i, layer in enumerate(stack):
+        if len(nets_on.get(layer, set())) < 2 or not regions.get(layer):
+            continue  # one net on the layer: no split
+        neighbours = {stack[j] for j in (i - 1, i + 1) if 0 <= j < len(stack)}
+        for s in copper.segs:
+            if s.layer not in neighbours:
+                continue
+            for net, poly in regions[layer]:
+                if s.net == net:
+                    continue
+                ring = itertools.pairwise([*poly, poly[0]])
+                hit = next((p for a, b in ring if (p := tracks.crossing(s.a, s.b, a, b)) is not None), None)
+                if hit is not None:
+                    out.append(
+                        f"{s.net} on {s.layer} crosses the {net} region edge on {layer} at ({_mm(hit[0])}, {_mm(hit[1])})"
+                    )
+                    break
+    return out
 
 
 def unlabelled_connectors(project: KicadProject) -> list[str]:
