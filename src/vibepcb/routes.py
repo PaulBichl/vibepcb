@@ -188,7 +188,8 @@ def board_pads(project: KicadProject) -> list[Pad]:
 
 JOINTS = False  # true: a route continues a BGA escape at 90 degrees or more (off: crowded escape ends became
 # unreachable on la-ecp5; the clean-up chamfers those joints)
-PAD_JOINTS = True  # a route keeps 90 degrees or more to the tracks of its net already ending at its pad
+PAD_JOINTS = False  # true: a route keeps 90 degrees or more to the tracks of its net already ending at its pad
+# (off: on la-ecp5 it left chained multi-pad nets - the input clamps, supplies - without a way)
 # [router] in routes.toml: router settings for this board (experiments: variants of a board differ only there)
 ROUTER_KEYS = {
     "via_cost": (router, "VIA_COST"),
