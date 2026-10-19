@@ -57,6 +57,12 @@ def offset(points: list[tracks.Point], d: float) -> list[tracks.Point]:
     return out
 
 
+def _octilinear(a: tracks.Point, b: tracks.Point) -> bool:
+    """a-b runs in one of the 8 grid directions (horizontal, vertical, 45 degrees)."""
+    dx, dy = abs(b[0] - a[0]), abs(b[1] - a[1])
+    return dx < tracks.EPS or dy < tracks.EPS or abs(dx - dy) < tracks.EPS
+
+
 def route_pair(
     board: Board,
     nets: tuple[str, str],
@@ -81,6 +87,10 @@ def route_pair(
         del board.aliases[p_net]
     layer = centre.pieces[0][0]
     line = [centre.pieces[0][1], *(b for _, _, b in centre.pieces)]
+    # the search's last piece closes from the grid to the goal at any angle: offset with a miter, a short
+    # odd piece throws the two tracks into each other. It goes; the pad links cover the gap
+    while len(line) > 2 and not _octilinear(line[-2], line[-1]):
+        line.pop()
     half = (width + gap) / 2
     left, right = offset(line, half), offset(line, -half)
     cost_left = math.dist(left[0], starts[0].centre) + math.dist(left[-1], goals[0].centre)

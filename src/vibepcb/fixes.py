@@ -3843,6 +3843,7 @@ def apply_routes(project: KicadProject) -> list[str]:
 FIXES: dict[str, Fix] = {
     "rename_auto_nets": rename_auto_nets,
     "propagate_split_pad_nets": propagate_split_pad_nets,
+    "apply_board_config": apply_board_config,  # before the routing: the router reads the net classes
     "apply_escapes": apply_escapes,
     "apply_pours": apply_pours,
     "apply_keepouts": apply_keepouts,
@@ -3876,7 +3877,6 @@ FIXES: dict[str, Fix] = {
     "thermal_spoke_rule": thermal_spoke_rule,
     "router_clearance_tolerance": router_clearance_tolerance,
     "strict_track_rules": strict_track_rules,
-    "apply_board_config": apply_board_config,
     "place_reference_designators": place_reference_designators,
     "fit_schematic_sheet": fit_schematic_sheet,
 }
