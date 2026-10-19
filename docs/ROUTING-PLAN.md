@@ -16,7 +16,11 @@ What changed from the plan, in short:
   (time-boxed) beat negotiated congestion (PathFinder, still `method = "negotiate"`), which wandered.
 - Length tuning (`tune.py`): 45-degree bumps on the longest straight pieces, to 90 % of `max_skew` or `tune_to`.
 - Pairs (`pairs.py`, `[[pair]]`): wide centre line split into P / N; refused when P / N swap sides between the
-  ends (swap pins at a symmetric part instead). No stack-up impedance yet.
+  ends (swap pins at a symmetric part instead).
+- Impedance (`stackup.py`): `[stackup]` (JLCPCB presets or explicit layers), `[netclass.*] impedance` /
+  `impedance_diff` / `layer` solved into the class widths by `apply_board_config` (Hammerstad-Jensen microstrip,
+  Wheeler stripline, IPC-2141A coupling; checked against Pozar / Cohn, not yet against JLC's calculator; no
+  solder mask; no warning when a solved width is below the fab minimum).
 - Experiments: `[router]` settings per board, `pcb clone` for variants run in parallel.
 - Joint rules at escape ends / pads (`joints`, `pad_joints`) exist but are off: they blocked routes.
 Original text: Implement phase by phase; each phase ends with its
