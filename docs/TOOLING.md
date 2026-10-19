@@ -95,6 +95,8 @@ docstring of `cli.py` doubles as `--help` text.
 | `inspect <board> [--area x0 y0 x1 y1] [--net PAT] [--layer L] [--scale PX/MM] [--source unrouted]` | PNG of the board with a mm grid (KiCad coordinates), pad labels, one net pattern highlighted; text list of the pads in the area | `.work/preview/inspect.png` | 0 |
 | `padtable <board> REF...` | pad positions of the parts from the placement build as `boards/<board>/pads.ts` (pin plans by geometry in the board source) | `boards/<board>/pads.ts` | 1 without a build |
 | `clone <board> <new>` | copy of a board and its build (variants, e.g. other `[router]` settings, run in parallel without rebuilding) | `boards/<new>/`, `out/<new>/.work/raw/` | 1 if `<new>` exists |
+| `ratsnest <board> [--source current\|unrouted]` | `ratsnest.unrouted`: per net (not `[planes]` nets, not nets with a pour), the pads its tracks/vias do not join yet, linked by a minimum spanning tree over pad centres between the joined groups; prints the 40 longest links, totals (links, mm, crossings of straight links of different nets) and the 5 10 mm cells with the most crossings; `unrouted` reads `.work/unrouted.kicad_pcb` (manual mode) | none | 0 |
+| `place-score <board>.. [--source ...]` | `ratsnest.score` per board: one line with link count, total ratsnest length, crossings - the placement metric to compare `clone` variants | none | 0 |
 | `list` | prints board names (folders with `index.circuit.tsx` under `boards/`) | none | 0 |
 | `docs` | downloads `https://docs.tscircuit.com/llms.txt` to `docs/tscircuit-llms.txt` (60 s timeout) | `docs/` | 0 |
 

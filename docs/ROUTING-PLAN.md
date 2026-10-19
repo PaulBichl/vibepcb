@@ -1,8 +1,10 @@
 # Routing plan: agent-directed ("manual") routing
 
 Status (2026-10-19): phases 1-6 in, used on three BGA boards that pass `check` (la-bga54m, la-ecp5m,
-la-ecp5: ECP5 + BGA SDRAM, 6 layers, coupled USB pair). Phase 3 partly (`pcb inspect`; no `pcb ratsnest`),
-phase 4 (bus) is done differently, phase 7 (fallback autorouter) and 8 (placement helpers) open.
+la-ecp5: ECP5 + BGA SDRAM, 6 layers, coupled USB pair). Phase 3 in (`pcb inspect`, `pcb ratsnest`;
+nets with a pour are skipped like `[planes]` nets), phase 4 (bus) is done differently, phase 8 partly
+(`pcb place-score`; pin assignment by geometry lives in the board source with `pcb padtable`), phase 7
+(fallback autorouter) open.
 What changed from the plan, in short:
 - `board.py` wraps `fixes._copper` (no refactor of `fixes`); `drc.py` adds rip-up (`ignore`) and pair aliases.
 - Router: A* over (x, y, layer) with the heading beside the state (not in it), coarse 0.4 / 0.2 mm search
@@ -179,7 +181,7 @@ reasons the agent can act on. Route time for la-main under 5 min.
    net's copper recoloured (edit the SVG: KiCad SVGs group by layer, not net - so instead draw
    the highlighted net's tracks/pads ourselves as an overlay `<g>` from the board model).
 2. Text summary per net: length per layer, via count, connected yes/no, nearest clearance.
-3. `pcb ratsnest`: unrouted pad pairs (from the model's connectivity, `tracks.pad_groups`),
+3. (done) `pcb ratsnest`: unrouted pad pairs (from the model's connectivity, `tracks.pad_groups`),
    lengths, and a crossings count (segment intersections of the straight ratsnest lines) overall
    and per 10 mm cell.
 4. Tests: crop maths (viewBox), ratsnest on a fixture.
@@ -256,7 +258,7 @@ fallback, passes `check`.
    balls/pins are interchangeable), assign nets to pins by angle as seen from the partner part
    (the geometric pairing done by hand for la-main / la-bga54), written back as a generated TSX
    constant file the board imports (`boards/<b>/pinmap.ts`), so the netlist stays the source.
-2. Ratsnest crossing count (phase 3) as the placement score; `pcb place-score <b>` compares
+2. (done) Ratsnest crossing count (phase 3) as the placement score; `pcb place-score <b>` compares
    board copies.
 3. Orientation hints: for each 2-terminal part, the rotation that minimises its ratsnest length.
 
