@@ -57,7 +57,12 @@ def scan_track(
     also = board.aliases.get(net, NO_NETS)
     near = board.near(min(a[0], b[0]) - m, min(a[1], b[1]) - m, max(a[0], b[0]) + m, max(a[1], b[1]) + m)
     for o in near:
-        if _skipped(o, net, ignore) or o.net in also or layer not in o.layers or o.net == fixes.KEEPOUT_VIA_NET:
+        if (
+            _skipped(o, net, ignore)
+            or (o.routed and o.net in also)
+            or layer not in o.layers
+            or o.net == fixes.KEEPOUT_VIA_NET
+        ):
             continue
         keepout = o.net == fixes.KEEPOUT_NET
         need = 0.0 if keepout else board.rules.clearance(net, o.net)
@@ -79,7 +84,7 @@ def scan_via(
     also = board.aliases.get(net, NO_NETS)
     near = board.near(centre[0] - m, centre[1] - m, centre[0] + m, centre[1] + m)
     for o in near:
-        if _skipped(o, net, ignore) or o.net in also:
+        if _skipped(o, net, ignore) or (o.routed and o.net in also):
             continue
         keepout = o.net in (fixes.KEEPOUT_NET, fixes.KEEPOUT_VIA_NET)
         need = 0.0 if keepout else board.rules.clearance(net, o.net)

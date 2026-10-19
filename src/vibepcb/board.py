@@ -101,7 +101,8 @@ class Board:
         self.holes = holes
         self.layers = copper_layers(pcb)
         self.items: list[tracks.Obstacle] = []  # everything that blocks a track of another net
-        # nets that count as one: while a differential pair's centre line is routed as P, N is not in its way
+        # nets whose routed copper counts as the net's own: a differential pair's centre line, routed as P, may
+        # lie over N's tracks (their pads still keep their clearance)
         self.aliases: dict[str, frozenset[str]] = {}
         self.edges = list(copper.edges)
         self._index: tracks.BoxIndex | None = None
