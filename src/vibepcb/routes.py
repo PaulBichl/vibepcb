@@ -224,6 +224,7 @@ def _router_settings(settings: dict[str, Any]) -> Iterator[None]:
             setattr(module, name, value)
 
 
+PAIR_LAUNCH_MM = 0.5  # a pair's coupled section starts this far beyond its pads' exits
 RESERVED_KEY = "_reserved"  # internal: the pad exit reservations travel with the defaults
 EXIT_GAP_MM = 0.45  # a pad's exit spot: this far beyond its outer edge (room for a via beside a 0.5 mm pitch pin)
 EXIT_RADIUS_MM = 0.45
@@ -661,7 +662,13 @@ def _run_pair(
     gap = cls.diff_pair_gap or cls.clearance
 
     def end(p: Pad) -> pairs.End:
-        return pairs.End(p.centre, p.layers, p.exit or p.centre)
+        """The coupled section starts PAIR_LAUNCH_MM beyond the pad's exit: next to fine-pitch pins the pair's
+        width does not fit, the pad links fan in."""
+        if p.exit is None:
+            return pairs.End(p.centre, p.layers, p.centre)
+        dx, dy = p.exit[0] - p.centre[0], p.exit[1] - p.centre[1]
+        n = math.hypot(dx, dy) or 1.0
+        return pairs.End(p.centre, p.layers, (p.exit[0] + dx / n * PAIR_LAUNCH_MM, p.exit[1] + dy / n * PAIR_LAUNCH_MM))
 
     checkpoint = board.checkpoint()
     layers = list(entry.get("layers", defaults.get("layers", board.layers)))

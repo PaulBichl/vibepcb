@@ -47,3 +47,14 @@ def test_pair_routes_coupled_and_reports_uncoupled_and_skew(tmp_path: Path) -> N
 def test_pair_entry_is_validated() -> None:
     with pytest.raises(routes.RoutesError, match="two net names"):
         routes.validate({"pair": [{"nets": ["D_P"]}]})
+
+
+def test_pair_that_would_have_to_cross_is_refused(tmp_path: Path) -> None:
+    parts = " ".join([
+        pad("A1", 8, 8.5, 1, "D_P"), pad("A2", 8, 11.5, 2, "D_N"),
+        pad("B1", 22, 11.5, 1, "D_P"), pad("B2", 22, 8.5, 2, "D_N"),  # P below N at this end
+    ])  # fmt: skip
+    project = write(tmp_path, nets=PAIR_NETS, parts=parts)
+    report = routes.apply(project, {"pair": [{"nets": ["D_P", "D_N"]}]})
+    assert [r.ok for r in report.results] == [False]
+    assert "swap sides" in report.results[0].detail

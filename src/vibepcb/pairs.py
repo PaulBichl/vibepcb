@@ -96,6 +96,15 @@ def route_pair(
     cost_left = math.dist(left[0], starts[0].centre) + math.dist(left[-1], goals[0].centre)
     cost_right = math.dist(right[0], starts[0].centre) + math.dist(right[-1], goals[0].centre)
     p_line, n_line = (left, right) if cost_left <= cost_right else (right, left)
+    # P on the same side of the centre line at both ends, else the pair has to cross over on the way
+    p_start_left = math.dist(left[0], starts[0].centre) <= math.dist(right[0], starts[0].centre)
+    p_goal_left = math.dist(left[-1], goals[0].centre) <= math.dist(right[-1], goals[0].centre)
+    if p_start_left != p_goal_left:
+        msg = (
+            "P and N swap sides between the ends: swap the pins at one end (a part with symmetric channels, a "
+            "connector) or the pair has to cross over"
+        )
+        raise router.RouteFailure(msg)
     result = PairRoute()
     for net, pts in ((p_net, p_line), (n_net, n_line)):
         r = router.Route(net, width, [(layer, a, b) for a, b in itertools.pairwise(pts)])
