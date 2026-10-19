@@ -186,8 +186,9 @@ def board_pads(project: KicadProject) -> list[Pad]:
     return out
 
 
-JOINTS = False  # true: routes keep their joints with tracks already at their ends at 90 degrees or more (off: the
-# clean-up does it better, la-ecp5: the hard rule left crowded escape ends unreachable)
+JOINTS = False  # true: a route continues a BGA escape at 90 degrees or more (off: crowded escape ends became
+# unreachable on la-ecp5; the clean-up chamfers those joints)
+PAD_JOINTS = True  # a route keeps 90 degrees or more to the tracks of its net already ending at its pad
 # [router] in routes.toml: router settings for this board (experiments: variants of a board differ only there)
 ROUTER_KEYS = {
     "via_cost": (router, "VIA_COST"),
@@ -206,6 +207,7 @@ ROUTER_KEYS = {
     "exit_gap_mm": (sys.modules[__name__], "EXIT_GAP_MM"),
     "exit_radius_mm": (sys.modules[__name__], "EXIT_RADIUS_MM"),
     "joints": (sys.modules[__name__], "JOINTS"),
+    "pad_joints": (sys.modules[__name__], "PAD_JOINTS"),
 }
 
 
@@ -809,8 +811,8 @@ def _route_one(
         start_layers=[layer for layer in layers if layer in a.layers],
         goal_layers=[layer for layer in layers if layer in b.layers],
         waypoints=[(float(x), float(y)) for x, y in entry.get("waypoints", [])],
-        start_heads=router.headings(_escape(a), _tracks_at(board, net, a)) if JOINTS else None,
-        arrive_heads=router.headings(_tracks_at(board, net, b), _escape(b)) if JOINTS else None,
+        start_heads=router.headings(_escape(a) if JOINTS else [], _tracks_at(board, net, a) if PAD_JOINTS else []),
+        arrive_heads=router.headings(_tracks_at(board, net, b) if PAD_JOINTS else [], _escape(b) if JOINTS else []),
     )
     if via_max is not None and len(r.vias) > via_max:
         msg = f"needs {len(r.vias)} via(s), via_max is {via_max}"
