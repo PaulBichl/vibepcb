@@ -73,9 +73,7 @@ tsci = "npx --no-install tsci {args}"
 
 # Re-vendors the official tscircuit agent skill into .claude/skills/tscircuit
 update-skill = [
-    "rm -rf .claude/skills/tscircuit",
-    "git clone --depth 1 https://github.com/tscircuit/skill .claude/skills/tscircuit",
-    "rm -rf .claude/skills/tscircuit/.git",
+    "python scripts/update_skill.py",
 ]
 
 # Cleans files that are ignored by Git

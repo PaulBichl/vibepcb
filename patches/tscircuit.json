@@ -1,0 +1,55 @@
+{
+ "package": "tscircuit 0.0.2786",
+ "patches": [
+  {
+   "file": "@tscircuit/capacity-autorouter/dist/index.js",
+   "old": "throw new Error(`TraceSimplificationSolver cannot preserve endpoints for duplicate route \"${n.connectionName}\"`);t.set(n.connectionName,{start:{...e},end:{...o}})}this.preservedRouteEndpoints=t}this.MAX_ITERATIONS=1e8}simplificationConfig;getSolverName(){return\"TraceSimplificationSolver\"}hdRoutes=[];preservedRouteEndpoints;simplificationPipelineLoops=0;MAX_SIMPLIFICATION_PIPELINE_LOOPS=2;PHASE_ORDER=[\"via_removal\",\"crossing_via_reduction\",\"via_merging\",\"path_simplification\"];currentPhase=\"via_removal\";extractResult=null;get simplifiedHdRoutes(){return this.hdRoutes}validatePreservedRouteEndpoints(e){if(!this.preservedRouteEndpoints)",
+   "new": "{this.__dupRoute=true;continue;}t.set(n.connectionName,{start:{...e},end:{...o}})}this.preservedRouteEndpoints=this.__dupRoute?void 0:t}this.MAX_ITERATIONS=1e8}simplificationConfig;getSolverName(){return\"TraceSimplificationSolver\"}hdRoutes=[];preservedRouteEndpoints;simplificationPipelineLoops=0;MAX_SIMPLIFICATION_PIPELINE_LOOPS=2;PHASE_ORDER=[\"via_removal\",\"crossing_via_reduction\",\"via_merging\",\"path_simplification\"];currentPhase=\"via_removal\";extractResult=null;get simplifiedHdRoutes(){return this.hdRoutes}validatePreservedRouteEndpoints(e){"
+  },
+  {
+   "file": "@tscircuit/cli/dist/cli/main.js",
+   "old": "throw new Error(`TraceSimplificationSolver cannot preserve endpoints for duplicate route \"${o.connectionName}\"`);n.set(o.connectionName,{start:{...i},end:{...r}})}this.preservedRouteEndpoints=n}this.MAX_ITERATIONS=1e8}simplificationConfig;getSolverName(){return\"TraceSimplificationSolver\"}hdRoutes=[];preservedRouteEndpoints;simplificationPipelineLoops=0;MAX_SIMPLIFICATION_PIPELINE_LOOPS=2;PHASE_ORDER=[\"via_removal\",\"crossing_via_reduction\",\"via_merging\",\"path_simplification\"];currentPhase=\"via_removal\";extractResult=null;get simplifiedHdRoutes(){return this.hdRoutes}validatePreservedRouteEndpoints(e){if(!this.preservedRouteEndpoints)",
+   "new": "{this.__dupRoute=true;continue;}n.set(o.connectionName,{start:{...i},end:{...r}})}this.preservedRouteEndpoints=this.__dupRoute?void 0:n}this.MAX_ITERATIONS=1e8}simplificationConfig;getSolverName(){return\"TraceSimplificationSolver\"}hdRoutes=[];preservedRouteEndpoints;simplificationPipelineLoops=0;MAX_SIMPLIFICATION_PIPELINE_LOOPS=2;PHASE_ORDER=[\"via_removal\",\"crossing_via_reduction\",\"via_merging\",\"path_simplification\"];currentPhase=\"via_removal\";extractResult=null;get simplifiedHdRoutes(){return this.hdRoutes}validatePreservedRouteEndpoints(e){"
+  },
+  {
+   "file": "@tscircuit/cli/dist/lib/index.js",
+   "old": "throw new Error(`TraceSimplificationSolver cannot preserve endpoints for duplicate route \"${o.connectionName}\"`);n.set(o.connectionName,{start:{...i},end:{...r}})}this.preservedRouteEndpoints=n}this.MAX_ITERATIONS=1e8}simplificationConfig;getSolverName(){return\"TraceSimplificationSolver\"}hdRoutes=[];preservedRouteEndpoints;simplificationPipelineLoops=0;MAX_SIMPLIFICATION_PIPELINE_LOOPS=2;PHASE_ORDER=[\"via_removal\",\"crossing_via_reduction\",\"via_merging\",\"path_simplification\"];currentPhase=\"via_removal\";extractResult=null;get simplifiedHdRoutes(){return this.hdRoutes}validatePreservedRouteEndpoints(e){if(!this.preservedRouteEndpoints)",
+   "new": "{this.__dupRoute=true;continue;}n.set(o.connectionName,{start:{...i},end:{...r}})}this.preservedRouteEndpoints=this.__dupRoute?void 0:n}this.MAX_ITERATIONS=1e8}simplificationConfig;getSolverName(){return\"TraceSimplificationSolver\"}hdRoutes=[];preservedRouteEndpoints;simplificationPipelineLoops=0;MAX_SIMPLIFICATION_PIPELINE_LOOPS=2;PHASE_ORDER=[\"via_removal\",\"crossing_via_reduction\",\"via_merging\",\"path_simplification\"];currentPhase=\"via_removal\";extractResult=null;get simplifiedHdRoutes(){return this.hdRoutes}validatePreservedRouteEndpoints(e){"
+  },
+  {
+   "file": "@tscircuit/core/dist/index.js",
+   "old": "const { floatingPourIds, floatingViaIds } = findFloatingCopper(\n    circuitJson,\n    board._generatedStitchingViaIds\n  )",
+   "new": "let floatingCopper;\n  try {\n    floatingCopper = findFloatingCopper(circuitJson, board._generatedStitchingViaIds);\n  } catch {\n    return; // VibePCB patch: degenerate pour geometry (zero-length edge); KiCad refills the pours anyway\n  }\n  const { floatingPourIds, floatingViaIds } = floatingCopper"
+  },
+  {
+   "file": "@tscircuit/eval/dist/webworker/entrypoint.js",
+   "old": "throw new Error(`TraceSimplificationSolver cannot preserve endpoints for duplicate route \"${n10.connectionName}\"`);t48.set(n10.connectionName,{start:{...e56},end:{...o11}})}this.preservedRouteEndpoints=t48}this.MAX_ITERATIONS=1e8}getSolverName(){return\"TraceSimplificationSolver\"}get simplifiedHdRoutes(){return this.hdRoutes}validatePreservedRouteEndpoints(e55){if(!this.preservedRouteEndpoints)",
+   "new": "{this.__dupRoute=true;continue;}t48.set(n10.connectionName,{start:{...e56},end:{...o11}})}this.preservedRouteEndpoints=this.__dupRoute?void 0:t48}this.MAX_ITERATIONS=1e8}getSolverName(){return\"TraceSimplificationSolver\"}get simplifiedHdRoutes(){return this.hdRoutes}validatePreservedRouteEndpoints(e55){"
+  },
+  {
+   "file": "@tscircuit/runframe/dist/standalone-preview.min.js",
+   "old": "throw new Error(`TraceSimplificationSolver cannot preserve endpoints for duplicate route \"${o.connectionName}\"`);n.set(o.connectionName,{start:{...i},end:{...r}})}this.preservedRouteEndpoints=n}this.MAX_ITERATIONS=1e8}simplificationConfig;getSolverName(){return\"TraceSimplificationSolver\"}hdRoutes=[];preservedRouteEndpoints;simplificationPipelineLoops=0;MAX_SIMPLIFICATION_PIPELINE_LOOPS=2;PHASE_ORDER=[\"via_removal\",\"crossing_via_reduction\",\"via_merging\",\"path_simplification\"];currentPhase=\"via_removal\";extractResult=null;get simplifiedHdRoutes(){return this.hdRoutes}validatePreservedRouteEndpoints(e){if(!this.preservedRouteEndpoints)",
+   "new": "{this.__dupRoute=true;continue;}n.set(o.connectionName,{start:{...i},end:{...r}})}this.preservedRouteEndpoints=this.__dupRoute?void 0:n}this.MAX_ITERATIONS=1e8}simplificationConfig;getSolverName(){return\"TraceSimplificationSolver\"}hdRoutes=[];preservedRouteEndpoints;simplificationPipelineLoops=0;MAX_SIMPLIFICATION_PIPELINE_LOOPS=2;PHASE_ORDER=[\"via_removal\",\"crossing_via_reduction\",\"via_merging\",\"path_simplification\"];currentPhase=\"via_removal\";extractResult=null;get simplifiedHdRoutes(){return this.hdRoutes}validatePreservedRouteEndpoints(e){"
+  },
+  {
+   "file": "@tscircuit/runframe/dist/standalone.min.js",
+   "old": "throw new Error(`TraceSimplificationSolver cannot preserve endpoints for duplicate route \"${o.connectionName}\"`);n.set(o.connectionName,{start:{...i},end:{...r}})}this.preservedRouteEndpoints=n}this.MAX_ITERATIONS=1e8}simplificationConfig;getSolverName(){return\"TraceSimplificationSolver\"}hdRoutes=[];preservedRouteEndpoints;simplificationPipelineLoops=0;MAX_SIMPLIFICATION_PIPELINE_LOOPS=2;PHASE_ORDER=[\"via_removal\",\"crossing_via_reduction\",\"via_merging\",\"path_simplification\"];currentPhase=\"via_removal\";extractResult=null;get simplifiedHdRoutes(){return this.hdRoutes}validatePreservedRouteEndpoints(e){if(!this.preservedRouteEndpoints)",
+   "new": "{this.__dupRoute=true;continue;}n.set(o.connectionName,{start:{...i},end:{...r}})}this.preservedRouteEndpoints=this.__dupRoute?void 0:n}this.MAX_ITERATIONS=1e8}simplificationConfig;getSolverName(){return\"TraceSimplificationSolver\"}hdRoutes=[];preservedRouteEndpoints;simplificationPipelineLoops=0;MAX_SIMPLIFICATION_PIPELINE_LOOPS=2;PHASE_ORDER=[\"via_removal\",\"crossing_via_reduction\",\"via_merging\",\"path_simplification\"];currentPhase=\"via_removal\";extractResult=null;get simplifiedHdRoutes(){return this.hdRoutes}validatePreservedRouteEndpoints(e){"
+  },
+  {
+   "file": "@tscircuit/runframe/node_modules/@tscircuit/eval/dist/webworker/entrypoint.js",
+   "old": "throw new Error(`TraceSimplificationSolver cannot preserve endpoints for duplicate route \"${n10.connectionName}\"`);t48.set(n10.connectionName,{start:{...e56},end:{...o11}})}this.preservedRouteEndpoints=t48}this.MAX_ITERATIONS=1e8}getSolverName(){return\"TraceSimplificationSolver\"}get simplifiedHdRoutes(){return this.hdRoutes}validatePreservedRouteEndpoints(e55){if(!this.preservedRouteEndpoints)",
+   "new": "{this.__dupRoute=true;continue;}t48.set(n10.connectionName,{start:{...e56},end:{...o11}})}this.preservedRouteEndpoints=this.__dupRoute?void 0:t48}this.MAX_ITERATIONS=1e8}getSolverName(){return\"TraceSimplificationSolver\"}get simplifiedHdRoutes(){return this.hdRoutes}validatePreservedRouteEndpoints(e55){"
+  },
+  {
+   "file": "tscircuit/dist/browser.min.js",
+   "old": "throw new Error(`TraceSimplificationSolver cannot preserve endpoints for duplicate route \"${o.connectionName}\"`);n.set(o.connectionName,{start:{...i},end:{...r}})}this.preservedRouteEndpoints=n}this.MAX_ITERATIONS=1e8}simplificationConfig;getSolverName(){return\"TraceSimplificationSolver\"}hdRoutes=[];preservedRouteEndpoints;simplificationPipelineLoops=0;MAX_SIMPLIFICATION_PIPELINE_LOOPS=2;PHASE_ORDER=[\"via_removal\",\"crossing_via_reduction\",\"via_merging\",\"path_simplification\"];currentPhase=\"via_removal\";extractResult=null;get simplifiedHdRoutes(){return this.hdRoutes}validatePreservedRouteEndpoints(e){if(!this.preservedRouteEndpoints)",
+   "new": "{this.__dupRoute=true;continue;}n.set(o.connectionName,{start:{...i},end:{...r}})}this.preservedRouteEndpoints=this.__dupRoute?void 0:n}this.MAX_ITERATIONS=1e8}simplificationConfig;getSolverName(){return\"TraceSimplificationSolver\"}hdRoutes=[];preservedRouteEndpoints;simplificationPipelineLoops=0;MAX_SIMPLIFICATION_PIPELINE_LOOPS=2;PHASE_ORDER=[\"via_removal\",\"crossing_via_reduction\",\"via_merging\",\"path_simplification\"];currentPhase=\"via_removal\";extractResult=null;get simplifiedHdRoutes(){return this.hdRoutes}validatePreservedRouteEndpoints(e){"
+  },
+  {
+   "file": "tscircuit/dist/webworker.min.js",
+   "old": "throw new Error(`TraceSimplificationSolver cannot preserve endpoints for duplicate route \"${n10.connectionName}\"`);t48.set(n10.connectionName,{start:{...e56},end:{...o11}})}this.preservedRouteEndpoints=t48}this.MAX_ITERATIONS=1e8}getSolverName(){return\"TraceSimplificationSolver\"}get simplifiedHdRoutes(){return this.hdRoutes}validatePreservedRouteEndpoints(e55){if(!this.preservedRouteEndpoints)",
+   "new": "{this.__dupRoute=true;continue;}t48.set(n10.connectionName,{start:{...e56},end:{...o11}})}this.preservedRouteEndpoints=this.__dupRoute?void 0:t48}this.MAX_ITERATIONS=1e8}getSolverName(){return\"TraceSimplificationSolver\"}get simplifiedHdRoutes(){return this.hdRoutes}validatePreservedRouteEndpoints(e55){"
+  }
+ ]
+}
