@@ -14,12 +14,13 @@ import glob
 import json
 import os
 import re
+import shutil
 import zlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from vibepcb import sexpr
+from vibepcb import kicad, sexpr
 from vibepcb.sexpr import Sym
 
 if TYPE_CHECKING:
@@ -33,6 +34,11 @@ LIBRARY_DIRS = (
     "/var/lib/flatpak/runtime/org.kicad.KiCad.Library.Symbols/*/stable/*/files/symbols",
     "~/.local/share/flatpak/runtime/org.kicad.KiCad.Library.Symbols/*/stable/*/files/symbols",
     "/Applications/KiCad/KiCad.app/Contents/SharedSupport/symbols",
+    "/opt/homebrew/share/kicad/symbols",
+    "/usr/local/opt/kicad/share/kicad/symbols",
+    "C:/Program Files/KiCad/*/share/kicad/symbols",
+    "C:/Program Files (x86)/KiCad/*/share/kicad/symbols",
+    "~/AppData/Local/Programs/KiCad/*/share/kicad/symbols",
 )
 CACHE = Path("~/.cache/vibepcb").expanduser()
 _TOP_SYMBOL = re.compile(r'^\t\(symbol "([^"]+)"', re.MULTILINE)
@@ -41,12 +47,26 @@ MIN_NAME = 4  # shorter library names match too much
 MIN_NAME_MATCH = 0.5  # share of named pins whose names must agree
 
 
+def cli_relative_dirs(cli: str) -> list[str]:
+    """Where the symbol library sits relative to a ``kicad-cli`` binary (Linux/Windows prefix, macOS app bundle)."""
+    binary = Path(cli).resolve()
+    prefix = binary.parent.parent  # <prefix>/bin/kicad-cli, KiCad\\10.0\\bin\\kicad-cli.exe, KiCad.app/Contents/MacOS
+    return [
+        (prefix / "share" / "kicad" / "symbols").as_posix(),
+        (prefix / "SharedSupport" / "symbols").as_posix(),
+        (prefix / "Resources" / "symbols").as_posix(),
+    ]
+
+
 def library_dir() -> Path | None:
     """KiCad's installed symbol library (a directory of ``*.kicad_sym``), if any."""
     for key in sorted(os.environ, reverse=True):
         if re.fullmatch(r"KICAD\d*_SYMBOL_DIR", key) and Path(os.environ[key]).is_dir():
             return Path(os.environ[key])
-    for pattern in LIBRARY_DIRS:
+    cli = kicad.find_kicad_cli()
+    found_cli = shutil.which(cli) if cli else None  # $KICAD_CLI may be a bare name
+    derived = [glob.escape(d) for d in cli_relative_dirs(found_cli or cli)] if cli else []
+    for pattern in [*derived, *LIBRARY_DIRS]:
         for found in sorted(glob.glob(os.path.expanduser(pattern)), reverse=True):
             if Path(found).is_dir() and any(Path(found).glob("*.kicad_sym")):
                 return Path(found)

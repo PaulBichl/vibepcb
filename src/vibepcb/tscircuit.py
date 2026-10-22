@@ -5,11 +5,11 @@ from __future__ import annotations
 import json
 import re
 import shutil
-import subprocess
 import tempfile
 from collections import Counter
 from pathlib import Path
 
+from vibepcb import proc
 from vibepcb.paths import ROOT
 
 
@@ -19,11 +19,12 @@ class TscircuitError(RuntimeError):
 
 def _tsci() -> list[str]:
     tsci = ROOT / "node_modules" / ".bin" / "tsci"
-    if not tsci.exists() or shutil.which("node") is None:
-        msg = "tscircuit is not installed - run `hatch run setup` first"
+    npx = shutil.which("npx")  # npx.cmd on Windows (a bare "npx" is not found there)
+    if not tsci.exists() or shutil.which("node") is None or npx is None:
+        msg = "tscircuit is not installed - run `hatch run setup` first (`hatch run pcb doctor` checks the setup)"
         raise TscircuitError(msg)
     # tsci's shebang is `env bun`; bun comes from node_modules/.bin as well
-    return ["npx", "--no-install", "tsci"]
+    return [npx, "--no-install", "tsci"]
 
 
 def export(source: Path, fmt: str, output: Path) -> None:
@@ -31,7 +32,7 @@ def export(source: Path, fmt: str, output: Path) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
     # the parts engine looks up every part on the network on each run; `fab` checks availability once
     cmd = [*_tsci(), "export", str(source), "-f", fmt, "-o", str(output.resolve()), "--disable-parts-engine"]
-    result = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, check=False)
+    result = proc.run(cmd, cwd=ROOT)
     if result.returncode != 0 or not output.exists():
         msg = f"tsci export -f {fmt} failed:\n{result.stdout}{result.stderr}"
         raise TscircuitError(msg)
@@ -71,7 +72,7 @@ def prepared_source(source: Path, target_dir: Path, *, effort: str | None = None
     """
     text = source.read_text(encoding="utf-8")
     here = source.resolve().parent
-    text = _RELATIVE_IMPORT.sub(lambda m: f"{m[1]}{m[2]}{(here / m[3]).resolve()}{m[2]}", text)
+    text = _RELATIVE_IMPORT.sub(lambda m: f"{m[1]}{m[2]}{(here / m[3]).resolve().as_posix()}{m[2]}", text)
     if not _BOARD_TAG.search(text):
         msg = f"no <board> tag found in {source}"
         raise TscircuitError(msg)
@@ -97,7 +98,7 @@ def evaluate_unrouted(source: Path, output: Path, *, parts_engine: bool = False)
     cmd = [*_tsci(), "build", str(source), "--routing-disabled", "--ignore-errors"]
     if not parts_engine:
         cmd.append("--disable-parts-engine")
-    result = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, check=False)
+    result = proc.run(cmd, cwd=ROOT)
     relative = source.resolve().relative_to(ROOT)
     circuit = (
         ROOT / "dist" / relative.parent / relative.name.removesuffix(".tsx").removesuffix(".circuit") / "circuit.json"
