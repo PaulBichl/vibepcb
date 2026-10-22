@@ -475,7 +475,8 @@ Answers "does the circuit do what it should", not "is the layout clean". Policy 
 | `review.py` | reviewer agent: package, part classification (element type, reference letters, regulator / MCU detection), answer validation, findings, record `boards/<board>/review.toml` with the netlist hash, `check`'s missing / stale status. Checklists: `rules/review-checklists.toml`; agent: `.claude/agents/pcb-reviewer.md`; workflow: `docs/REVIEW.md` |
 | `verify.py` | glue: runs the above, builds the summary lines, counts issues |
 
-Pass ranges come from (in order) a datasheet-sourced `* range:`, the intent (`vmax_<rail>`, `vmin_<rail>`,
+A deck that sweeps corners in `.control` echoes its result as `name = value`; the `* range:` line of that name
+declares it (`meas` inside `.control` are scratch values, not judged). Pass ranges come from (in order) a datasheet-sourced `* range:`, the intent (`vmax_<rail>`, `vmin_<rail>`,
 `imax_<rail>`), the house `[limits]` (measure name or `*_<name>`); a `* range:` without `source=` and a measure
 without any range are "assumed". A deck passive named like a board reference (`R5`) must equal the board's
 value, one that is not on the board is stale; a stale deck is not run and covers nothing. A regulator

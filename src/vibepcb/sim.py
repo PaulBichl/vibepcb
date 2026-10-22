@@ -18,6 +18,10 @@ Where a measure's pass range comes from (first match wins; the agent must not se
 
 Any other ``source=`` text (``source=app note``) is a sourced range (kind ``sourced``).
 
+A deck that sweeps corners in a ``.control`` block computes its result there and prints it as
+``echo "pm_min_phase_margin_deg = $&pm"``: the ``* range:`` line of that name declares it (``meas`` statements
+inside ``.control`` are scratch values and are not judged; ``.measure`` lines in the netlist always are).
+
 Deck vs board: every resistor / capacitor / inductor of the deck whose name is also a reference on the
 board (``R5``, ``C3``) must have the same value (SPICE suffixes: ``k meg u n p m f g t``), and a deck
 passive named like a reference (``R9``) that is not on the board is stale. Either invalidates the deck
@@ -206,6 +210,9 @@ def parse_deck(path: Path, text: str | None = None) -> Deck:
                 )
             except ValueError:
                 continue  # a model name / expression: nothing to compare
+    # a `* range:` line declares its measure too: a `.control` sweep echoes "name = value" for a result it
+    # computed (worst case over corners), which no `.measure` line can declare
+    deck.measures += [name for name in deck.ranges if name not in deck.measures]
     return deck
 
 

@@ -117,6 +117,18 @@ def test_parse_deck(tmp_path: Path) -> None:
     assert {(e.name, e.value) for e in deck.elements} == {("R1", 1e5), ("R2", 33e3), ("C1", 4.7e-6)}
 
 
+def test_control_block_result_declared_by_its_range(tmp_path: Path) -> None:
+    text = (
+        "sweep\n* range: pm_min_phase_margin_deg 45 - source=house\nR9 a 0 1k\n"
+        '.control\n  meas ac fcx when vdb=0\n  echo "pm_min_phase_margin_deg = 52"\n.endc\n'
+    )
+    deck = sim.parse_deck(tmp_path / "loop.cir", text)
+    assert deck.measures == ["pm_min_phase_margin_deg"]  # the control block's `meas fcx` is a scratch value
+    values = sim.parse_measures("fcx = 1.2e+04\npm_min_phase_margin_deg = 52\n")
+    [judged] = sim.evaluate(deck, values, NO_INTENT, DEFAULTS)
+    assert (judged.name, judged.value, judged.status) == ("pm_min_phase_margin_deg", 52.0, "ok")
+
+
 def test_bad_range_line(tmp_path: Path) -> None:
     with pytest.raises(sim.SimError, match="needs <measure> <min> <max>"):
         sim.parse_deck(tmp_path / "x.cir", "title\n* range: vout_max 3.2\n")
