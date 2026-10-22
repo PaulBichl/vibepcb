@@ -250,6 +250,35 @@ def test_mark_dnp_parts(project: fixes.KicadProject) -> None:
     assert fixes.mark_dnp_parts(project) == []
 
 
+BOTTOM_CAP = """(footprint "tscircuit:capacitor_cap0603" (layer B.Cu) (at 100 104 0)
+  (fp_text reference "C9" (at 0 -1.375 0) (layer B.SilkS) (effects (font (size 0.4 0.4) (thickness 0.15)) (justify mirror)))
+  (fp_line (start -0.825 -0.875) (end 1.425 -0.875) (stroke (width 0.1) (type default)) (layer B.SilkS))
+  (pad "1" smd rect (at 0.825 0 0) (size 0.8 0.95) (layers B.Cu B.Paste B.Mask))
+  (pad "2" smd rect (at -0.825 0 0) (size 0.8 0.95) (layers B.Cu B.Paste B.Mask)))"""
+
+
+def test_place_reference_designators_bottom_side(project: fixes.KicadProject) -> None:
+    project.pcb.append(sexpr.loads(BOTTOM_CAP))
+    changes = fixes.place_reference_designators(project)
+    assert any(c.startswith("C9: reference at") for c in changes)
+    fp = next(f for f in sexpr.children(project.pcb, "footprint") if sexpr.property_value(f, "Reference") == "C9"
+              or any(str(t[2]) == "C9" for t in sexpr.children(f, "fp_text")))  # fmt: skip
+    assert fixes._footprint_geometry(fp) is None  # not a top part
+    geometry = fixes._footprint_geometry(fp, "B")
+    assert geometry is not None
+    effects = sexpr.child(geometry.prop, "effects")
+    assert effects is not None
+    assert [Sym("justify"), Sym("mirror")] in effects  # bottom text stays mirrored
+    font = sexpr.child(effects, "font")
+    assert font is not None
+    assert sexpr.child(font, "size") == [Sym("size"), Sym("0.8"), Sym("0.8")]
+    at = sexpr.child(geometry.prop, "at")
+    x, y = fixes._fp_to_board(fp)(fixes._num(at, 1), fixes._num(at, 2))
+    box = fixes._text_box(x, y, geometry.ref, fixes.REF_TEXT_SIZE_MM, fixes._num(at, 3))
+    assert not any(fixes._overlaps(box, keepout) for keepout in geometry.keepouts)
+    assert fixes.place_reference_designators(project) == []  # idempotent
+
+
 ZONE = """(zone (net 2) (net_name "GND") (layer "F.Cu") (hatch edge 0.5)
   (connect_pads yes (clearance 0.15)) (min_thickness 0.25)
   (fill yes (thermal_gap 0.5) (thermal_bridge_width 0.5))
@@ -1207,3 +1236,50 @@ def test_apply_pours_area_pour_is_a_named_prioritised_box(project: fixes.KicadPr
     assert xs == {95.0, 100.0}
     fixes.apply_pours(project)  # rewritten, not added twice
     assert len([z for z in sexpr.children(project.pcb, "zone") if fixes._is_pour_zone(z)]) == 1
+
+
+EXPOSED_PAD_PART = """(footprint "tscircuit:soic8_ep" (layer F.Cu) (at 110 110 90)
+  (fp_text reference "U7" (at 0 -3 0) (layer F.SilkS) (effects (font (size 0.8 0.8) (thickness 0.15))))
+  (pad "1" smd rect (at -1.9 -2.5 0) (size 0.6 1.5) (layers F.Cu F.Paste F.Mask) (net 1 "VCC"))
+  (pad "9" smd rect (at 0 0 0) (size 2.4 3.1) (layers F.Cu F.Paste F.Mask) (net 2 "GND")))"""
+
+
+def test_thermal_pad_vias(project: fixes.KicadProject) -> None:
+    assert fixes.thermal_pad_vias(project) == []  # nothing configured
+    project.pcb.append(sexpr.loads(EXPOSED_PAD_PART))
+    before = len(list(sexpr.children(project.pcb, "via")))
+    project.config = {"thermal_vias": {"U7": {}, "U99": {}}}
+    changes = fixes.thermal_pad_vias(project)
+    # a pad's angle in the file is absolute (0 here, whatever the footprint's): 2.4 wide, 3.1 high;
+    # inset 0.45 per side: 2 x 3 vias at 1 mm pitch
+    assert changes == [
+        "U7: 6 thermal via(s) (2 x 3, GND) in pad 9",
+        "U7: pad 9 connects solid to the pours (no thermal spokes on a heat path)",
+        "U99: no such footprint, no thermal vias",
+    ]
+    ep = next(
+        pd for f in sexpr.children(project.pcb, "footprint") for pd in sexpr.children(f, "pad") if str(pd[1]) == "9"
+    )
+    assert sexpr.child(ep, "zone_connect") == [Sym("zone_connect"), Sym("2")]
+    vias = list(sexpr.children(project.pcb, "via"))[before:]
+    assert len(vias) == 6
+    points = sorted((fixes._num(sexpr.child(v, "at"), 1), fixes._num(sexpr.child(v, "at"), 2)) for v in vias)
+    assert points[0] == (109.5, 109.0)
+    assert points[-1] == (110.5, 111.0)
+    names = fixes._net_names(project.pcb)
+    assert all(fixes._net_of(v, names) == "GND" for v in vias)
+    assert all(sexpr.child(v, "drill") == [Sym("drill"), Sym("0.3")] for v in vias)
+    assert fixes.thermal_pad_vias(project) == ["U99: no such footprint, no thermal vias"]  # idempotent for U7
+    project.config = {"thermal_vias": {"U7": {"pad": "1"}}}
+    assert fixes.thermal_pad_vias(project) == [
+        "U7: 1 thermal via(s) (1 x 1, VCC) in pad 1",
+        "U7: pad 1 connects solid to the pours (no thermal spokes on a heat path)",
+    ]
+
+
+def test_thermal_vias_config() -> None:
+    config.validate({"thermal_vias": {"U3": {"pad": "9", "pitch": 1.2}}})
+    with pytest.raises(config.ConfigError, match="keys from"):
+        config.validate({"thermal_vias": {"U3": {"grid": 3}}})
+    with pytest.raises(config.ConfigError, match="positive"):
+        config.validate({"thermal_vias": {"U3": {"drill": 0}}})

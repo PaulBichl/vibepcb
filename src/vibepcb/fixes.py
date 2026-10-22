@@ -1346,12 +1346,14 @@ def _pad_corners(pad: list[Node], to_board: Callable[[float, float], tuple[float
     ]
 
 
-def _footprint_geometry(fp: list[Node]) -> _Footprint | None:
+def _footprint_geometry(fp: list[Node], side: str = "F") -> _Footprint | None:
+    """Reference, body and keepouts of a part on ``side`` (``F`` top, ``B`` bottom); None for the other side's
+    parts and for hidden references. Bottom footprints carry their geometry already flipped, on ``B.*`` layers."""
     # tscircuit writes a visible ``(fp_text reference ...)`` next to a hidden Reference property
     # (KiCad merges the two on save); both keep the text at index 2
     prop = next((t for t in sexpr.children(fp, "fp_text") if str(t[1]) == "reference"), None)
     prop = prop if prop is not None else sexpr.property_node(fp, "Reference")
-    if prop is None or not prop[2] or _layer(prop) != "F.SilkS" or _layer(fp) != "F.Cu":
+    if prop is None or not prop[2] or _layer(prop) != f"{side}.SilkS" or _layer(fp) != f"{side}.Cu":
         return None
     effects = sexpr.child(prop, "effects")
     for parent in (prop, effects):
@@ -1360,7 +1362,7 @@ def _footprint_geometry(fp: list[Node]) -> _Footprint | None:
     to_board = _fp_to_board(fp)
     keepouts, body_points = [], []
     for pad in sexpr.children(fp, "pad"):
-        if not (_pad_on_layer(pad, "F.Cu") or str(pad[2]) == "np_thru_hole"):
+        if not (_pad_on_layer(pad, f"{side}.Cu") or str(pad[2]) == "np_thru_hole"):
             continue
         corners = _pad_corners(pad, to_board)
         keepouts.append(_bbox(corners, REF_CLEARANCE_MM))
@@ -1376,9 +1378,9 @@ def _footprint_geometry(fp: list[Node]) -> _Footprint | None:
         points = [to_board(x, y) for x, y in _graphic_points(item)]
         if not points:
             continue
-        if _layer(item) == "F.SilkS":
+        if _layer(item) == f"{side}.SilkS":
             keepouts += _segment_boxes(points, REF_CLEARANCE_MM)
-        elif _layer(item) == "F.CrtYd":
+        elif _layer(item) == f"{side}.CrtYd":
             courtyard += points
     body_points = courtyard or body_points
     if not body_points:
@@ -1408,17 +1410,18 @@ def _grow(box: Box, d: float) -> Box:
     return box[0] - d, box[1] - d, box[2] + d, box[3] + d
 
 
-def _fixed_obstacles(pcb: list[Node], footprints: list[_Footprint]) -> list[Box]:
-    """Board-level things a reference must not cover: edges, silkscreen, vias, reference-less parts."""
+def _fixed_obstacles(pcb: list[Node], footprints: list[_Footprint], side: str = "F") -> list[Box]:
+    """Board-level things a reference on ``side`` must not cover: edges, that side's silkscreen, vias, and the
+    pads of every other part on that side (reference-less parts, the other side's through-hole pads)."""
     obstacles: list[Box] = []
     for item in pcb:
         if not isinstance(item, list):
             continue
         kind, layer = sexpr.head(item), _layer(item)
-        if kind in ("gr_line", "gr_rect", "gr_arc", "gr_poly") and layer in ("Edge.Cuts", "F.SilkS"):
+        if kind in ("gr_line", "gr_rect", "gr_arc", "gr_poly") and layer in ("Edge.Cuts", f"{side}.SilkS"):
             grow = REF_EDGE_CLEARANCE_MM if layer == "Edge.Cuts" else REF_CLEARANCE_MM
             obstacles += _segment_boxes(_graphic_points(item), grow)
-        elif kind == "gr_text" and layer == "F.SilkS":
+        elif kind == "gr_text" and layer == f"{side}.SilkS":
             at, effects = sexpr.child(item, "at"), sexpr.child(item, "effects")
             font = None if effects is None else sexpr.child(effects, "font")
             size = _num(None if font is None else sexpr.child(font, "size"), 1, 1.0)
@@ -1433,6 +1436,8 @@ def _fixed_obstacles(pcb: list[Node], footprints: list[_Footprint]) -> list[Box]
             continue
         to_board = _fp_to_board(fp)
         for pad in sexpr.children(fp, "pad"):
+            if not (_pad_on_layer(pad, f"{side}.Cu") or "thru_hole" in str(pad[2])):
+                continue  # an SMD pad on the other side
             pad_size, pad_at = sexpr.child(pad, "size"), sexpr.child(pad, "at")
             x, y = to_board(_num(pad_at, 1), _num(pad_at, 2))
             r = max(_num(pad_size, 1), _num(pad_size, 2)) / 2
@@ -1441,12 +1446,15 @@ def _fixed_obstacles(pcb: list[Node], footprints: list[_Footprint]) -> list[Box]
 
 
 def _set_ref_font(text: list[Node]) -> bool:
-    """Reference text to REF_TEXT_SIZE_MM, centred; returns whether the size changed."""
+    """Reference text to REF_TEXT_SIZE_MM, centred (bottom text stays mirrored); returns whether the size changed."""
     effects = sexpr.child(text, "effects")
     font = None if effects is None else sexpr.child(effects, "font")
     if effects is None or font is None:
         return False
+    mirrored = any(sexpr.head(e) == "justify" and Sym("mirror") in e for e in effects)
     effects[:] = [e for e in effects if sexpr.head(e) != "justify"]
+    if mirrored:
+        effects.append([Sym("justify"), Sym("mirror")])
     changed = False
     size, thickness = Sym(_mm(REF_TEXT_SIZE_MM)), Sym(_mm(REF_TEXT_THICKNESS_MM))
     for key, value in (("size", [size, size]), ("thickness", [thickness])):
@@ -1469,6 +1477,7 @@ def place_reference_designators(project: KicadProject) -> list[str]:
     Each reference gets 0.8 mm text, placed at the first candidate around its courtyard
     that stays inside the board and clear of pads, vias, holes, silkscreen, board-level text
     and references already placed; parts' bodies (courtyards) are avoided when possible.
+    Top and bottom parts are placed separately, each against its own side's silkscreen and pads.
     """
     pcb = project.pcb
     edge_points = [
@@ -1478,9 +1487,15 @@ def place_reference_designators(project: KicadProject) -> list[str]:
     if not edge_points:
         return []
     board = _bbox(edge_points, -REF_EDGE_CLEARANCE_MM)
-    footprints = [geo for fp in sexpr.children(pcb, "footprint") if (geo := _footprint_geometry(fp)) is not None]
-    hard = _fixed_obstacles(pcb, footprints) + [box for geo in footprints for box in geo.keepouts]
+    changes = []
+    for side in ("F", "B"):
+        changes += _place_side_references(pcb, board, side)
+    return changes
 
+
+def _place_side_references(pcb: list[Node], board: Box, side: str) -> list[str]:
+    footprints = [geo for fp in sexpr.children(pcb, "footprint") if (geo := _footprint_geometry(fp, side)) is not None]
+    hard = _fixed_obstacles(pcb, footprints, side) + [box for geo in footprints for box in geo.keepouts]
     changes = []
     placed: list[Box] = []
     h = REF_TEXT_SIZE_MM + REF_TEXT_THICKNESS_MM
@@ -3693,6 +3708,100 @@ POST_FILL_PASSES = 3
 type Fix = Callable[[KicadProject], list[str]]
 
 
+THERMAL_VIA_DEFAULTS = {"pitch": 1.0, "drill": 0.3, "size": 0.5, "margin": 0.2}  # mm; JLCPCB 4-layer capable
+
+
+def thermal_pad_vias(project: KicadProject) -> list[str]:
+    """A grid of vias in a part's exposed pad (``[thermal_vias.<ref>]``): heat into the inner / bottom planes.
+
+    tscircuit has no via-in-pad; without them a power IC's exposed pad only spreads heat on its own layer
+    (LMR33630 at 3 A: Tj about 110 C instead of 75 C). The grid fills the pad's copper box minus ``margin``
+    (via edge to pad edge) at ``pitch``, on the pad's net, through all layers. Small drills (0.3 mm) wick
+    little solder; the fab tents / plugs them on request. The pad connects solid to the pours
+    (``zone_connect 2``, overriding ``zone_thermal_reliefs``' spokes). Runs before the track clean-up,
+    so later fixes treat the vias as obstacles and the connectivity roll-back keeps them.
+    """
+    specs = project.config.get("thermal_vias", {})
+    if not specs:
+        return []
+    names = _net_names(project.pcb)
+    existing = {
+        (_mm(_num(sexpr.child(v, "at"), 1)), _mm(_num(sexpr.child(v, "at"), 2)))
+        for v in sexpr.children(project.pcb, "via")
+    }
+    changes = []
+    for ref, spec in sorted(specs.items()):
+        cfg = {**THERMAL_VIA_DEFAULTS, **{k: float(v) for k, v in spec.items() if k != "pad"}}
+        fp = next(
+            (f for f in sexpr.children(project.pcb, "footprint") if _footprint_ref(f) == ref),
+            None,
+        )
+        if fp is None:
+            changes.append(f"{ref}: no such footprint, no thermal vias")
+            continue
+        pad_name = str(spec.get("pad", ""))
+        pads = [pd for pd in sexpr.children(fp, "pad") if str(pd[2]) == "smd"]
+        pad = (
+            next((pd for pd in pads if str(pd[1]) == pad_name), None)
+            if pad_name
+            else max(pads, key=_pad_area, default=None)  # the exposed pad is the largest
+        )
+        net = None if pad is None else _net_of(pad, names)
+        net_node = None if net is None else _net_node(project.pcb, net)
+        if pad is None or net is None or net_node is None:
+            changes.append(f"{ref}: pad {pad_name or '(largest)'} not found or on no net, no thermal vias")
+            continue
+        xmin, ymin, xmax, ymax = _bbox(_pad_corners(pad, _fp_to_board(fp)))
+        inset = cfg["margin"] + cfg["size"] / 2
+        nx = max(1, int((xmax - xmin - 2 * inset) / cfg["pitch"] + 1e-6) + 1)
+        ny = max(1, int((ymax - ymin - 2 * inset) / cfg["pitch"] + 1e-6) + 1)
+        cx, cy = (xmin + xmax) / 2, (ymin + ymax) / 2
+        added = 0
+        for i in range(nx):
+            for j in range(ny):
+                x = _mm(cx + (i - (nx - 1) / 2) * cfg["pitch"])
+                y = _mm(cy + (j - (ny - 1) / 2) * cfg["pitch"])
+                if (x, y) in existing:
+                    continue
+                uid = uuid.uuid5(uuid.NAMESPACE_OID, f"thermal-via:{ref}:{x},{y}")
+                via = sexpr.loads(
+                    f'(via (at {x} {y}) (size {_mm(cfg["size"])}) (drill {_mm(cfg["drill"])}) (layers "F.Cu" "B.Cu") '
+                    f'(uuid "{uid}"))'
+                )
+                via.insert(len(via) - 1, copy.deepcopy(net_node))
+                project.pcb.append(via)
+                existing.add((x, y))
+                added += 1
+        if added:
+            changes.append(f"{ref}: {added} thermal via(s) ({nx} x {ny}, {net}) in pad {pad[1]}")
+        if _solid_zone_connect(pad):
+            changes.append(f"{ref}: pad {pad[1]} connects solid to the pours (no thermal spokes on a heat path)")
+    return changes
+
+
+def _solid_zone_connect(pad: list[Node]) -> bool:
+    """``(zone_connect 2)`` on the pad (KiCad: solid, overriding the zones' thermal reliefs); whether it changed."""
+    node = sexpr.child(pad, "zone_connect")
+    if node is not None:
+        if str(node[1]) == "2":
+            return False
+        node[1] = Sym("2")
+        return True
+    uid = next((i for i, item in enumerate(pad) if sexpr.head(item) == "uuid"), len(pad))
+    pad.insert(uid, [Sym("zone_connect"), Sym("2")])
+    return True
+
+
+def _footprint_ref(fp: list[Node]) -> str:
+    text = next((t for t in sexpr.children(fp, "fp_text") if str(t[1]) == "reference"), None)
+    return str(text[2]) if text is not None else (sexpr.property_value(fp, "Reference") or "")
+
+
+def _pad_area(pad: list[Node]) -> float:
+    xmin, ymin, xmax, ymax = _pad_box(pad)
+    return (xmax - xmin) * (ymax - ymin)
+
+
 def plane_pad_vias(project: KicadProject) -> list[str]:
     """Connect the SMD pads of plane nets to their plane through their own via, not by tracks.
 
@@ -3994,6 +4103,7 @@ FIXES: dict[str, Fix] = {
     "apply_pours": apply_pours,
     "apply_keepouts": apply_keepouts,
     "apply_routes": apply_routes,
+    "thermal_pad_vias": thermal_pad_vias,  # before the track fixes: obstacles for them, kept by restore_nets
     "repair_zero_width_tracks": repair_zero_width_tracks,
     "drop_tracks_inside_pads": drop_tracks_inside_pads,
     "merge_duplicate_vias": merge_duplicate_vias,

@@ -53,6 +53,11 @@ these from the board's config file into the KiCad project (:func:`fixes.apply_bo
     track_width = 0.1              #   all optional: track_width, clearance, via_diameter, via_drill,
     layers = ["bottom"]            #   layers (escape layers of balls that can't leave on top)
 
+    [thermal_vias.U3]              # via grid in an exposed pad, into the inner / bottom planes (fixes.thermal_pad_vias)
+    pad = "9"                      #   pad number (default: the part's largest SMD pad)
+    pitch = 1.0                    #   all optional, mm: pitch 1.0, drill 0.3, size 0.5,
+    drill = 0.3                    #   margin 0.2 (via edge to pad edge)
+
     [testpoints]                   # house rule in `check`: every rail and GND needs a test point (vibepcb.testpoints)
     required = ["power", "gnd", "RESET"]  # "power" / "gnd" = rails found by name + power symbols; others are
                                    #   net-name patterns (* ?). Default ["power", "gnd"]; [] = rule off
@@ -76,6 +81,7 @@ if TYPE_CHECKING:
 CONFIG_NAME = "vibepcb.toml"
 ESCAPE_KEYS = ("track_width", "clearance", "via_diameter", "via_drill", "layers")
 KEEPOUT_KEYS = {"ref", "area", "margin", "layers", "block"}
+THERMAL_VIA_KEYS = {"pad", "pitch", "drill", "size", "margin"}
 # rule-profile values (mm; vibepcb.rules): fab / application minimums, the Default net class, the board
 RULE_MIN_KEYS = (
     "min_track_width",
@@ -128,6 +134,7 @@ def validate(data: dict[str, Any], where: str = CONFIG_NAME) -> None:
         "stackup",
         "rules",
         "testpoints",
+        "thermal_vias",
     }
     if unknown := set(data) - known:
         msg = f"{where}: unknown section(s) {sorted(unknown)} (known: {sorted(known)})"
@@ -196,6 +203,13 @@ def validate(data: dict[str, Any], where: str = CONFIG_NAME) -> None:
     for ref, part in data.get("escape", {}).items():
         if bad := set(part) - set(ESCAPE_KEYS):
             msg = f"{where}: escape {ref!r}: unknown key(s) {sorted(bad)} (known: {list(ESCAPE_KEYS)})"
+            raise ConfigError(msg)
+    for ref, spec in data.get("thermal_vias", {}).items():
+        if not isinstance(spec, dict) or (bad := set(spec) - THERMAL_VIA_KEYS):
+            msg = f"{where}: thermal_vias {ref!r}: a table with keys from {sorted(THERMAL_VIA_KEYS)}"
+            raise ConfigError(msg)
+        if any(not isinstance(v, int | float) or v <= 0 for k, v in spec.items() if k != "pad"):
+            msg = f"{where}: thermal_vias {ref!r}: pitch / drill / size / margin must be positive numbers (mm)"
             raise ConfigError(msg)
     for name, group in data.get("length_group", {}).items():
         if not group.get("nets") or "max_skew" not in group:
