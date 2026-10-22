@@ -2,7 +2,7 @@
 
 Measured on smu-main (238 parts, 586 routes, 4 layers) in VibePCB-smu:
 routing pass ~10 min, `kicad-library` export 32 min (it re-routes), `fix` 17 min, `check` (post-fill) many min.
-Rules: CLAUDE.md conventions; run `hatch run style`, `type`, `test` after each step; one commit per step.
+Rules: AGENTS.md conventions; run `hatch run style`, `type`, `test` after each step; one commit per step.
 
 ## Steps
 
@@ -41,10 +41,10 @@ Rules: CLAUDE.md conventions; run `hatch run style`, `type`, `test` after each s
 
 7. **Route cache**: tscircuit can't save routes for smu-main ("PCB port selector is not unique:
    .Q44 > port.pin3", imported `AO3400A`). Find why the selector is ambiguous (check the import's ports/pads),
-   fix the import pattern, document in CLAUDE.md "Board design lessons".
+   fix the import pattern, document in AGENTS.md "Board design lessons".
    *Why:* unchanged placement then replays routes instead of recomputing them.
 
-8. **Docs**: CLAUDE.md pipeline section + `docs/TOOLING.md` (build flow, timings). Add the rule:
+8. **Docs**: AGENTS.md pipeline section + `docs/TOOLING.md` (build flow, timings). Add the rule:
    "never evaluate the TSX more than once per build".
 
 ## Verify

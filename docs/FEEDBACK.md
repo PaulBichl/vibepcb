@@ -89,7 +89,7 @@ Human effort per board: one assumption list at the start, a handful of flagged i
 
 No human-readable change log is needed during the agent's loop. One cheap aid for the agent itself:
 
-- **Regression table between runs**: DRC errors, unrouted connections, ratsnest length, sharp corners,
+- **Regression table between runs** (done: `history.py`, `check` prints it): DRC errors, unrouted connections, ratsnest length, sharp corners,
   compared with the previous run. Anything that got worse is flagged, so the agent doesn't oscillate between
   two variants.
 
@@ -100,6 +100,10 @@ No human-readable change log is needed during the agent's loop. One cheap aid fo
 - **Firmware header** (done: `<name>-pins.h`) generated from the MCU pin assignments.
 
 ## 6. Portability (Windows / WSL, Copilot)
+
+Status: the table below, the KiCad version notes, `pcb doctor`, the versioned tscircuit patches (`patches/`), the
+regression table (section 4) and `AGENTS.md` are implemented (docs/TOOLING.md sections 2 and 8.1a). The text is kept
+as the original findings.
 
 On WSL2 the repo runs essentially as-is. Native Windows needs these fixes:
 

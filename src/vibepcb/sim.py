@@ -33,7 +33,7 @@ import tomllib
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from vibepcb import paths, rules
+from vibepcb import paths, proc, rules
 from vibepcb.config import ConfigError
 from vibepcb.intent import Intent, measure_key
 
@@ -247,14 +247,7 @@ def ngspice() -> str | None:
 def run_deck(deck_path: Path, binary: str) -> dict[str, float | None]:
     """Run ``ngspice -b`` on a deck (in its folder, so includes work) and parse the measures."""
     try:
-        done = subprocess.run(
-            [binary, "-b", deck_path.name],
-            cwd=deck_path.parent,
-            capture_output=True,
-            text=True,
-            timeout=SIM_TIMEOUT_S,
-            check=False,
-        )
+        done = proc.run([binary, "-b", deck_path.name], cwd=deck_path.parent, timeout=SIM_TIMEOUT_S)
     except subprocess.TimeoutExpired as exc:
         msg = f"{deck_path.name}: ngspice timed out after {SIM_TIMEOUT_S} s"
         raise SimError(msg) from exc

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import multiprocessing
+import pickle
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from synth import seg, write
 
+from vibepcb import board as board_mod
 from vibepcb import fixes, router, routes, sexpr
 
 if TYPE_CHECKING:
@@ -123,3 +126,16 @@ def test_split_crossings_flags_a_track_over_a_region_edge(tmp_path: Path) -> Non
     found = fixes.split_crossings(project)
     assert len(found) == 1
     assert found[0].startswith("B on F.Cu crosses the A region edge on B.Cu at (")
+
+
+def test_worker_state_survives_spawn(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Without fork (Windows) the workers get the round's state pickled: the board must survive it."""
+    board = board_mod.Board.from_project(write(tmp_path))
+    state: tuple[Any, ...] = (board, {}, {}, [], frozenset(), 1.0, {})
+    clone = pickle.loads(pickle.dumps(state))
+    assert len(clone[0].edges) == len(board.edges)
+    monkeypatch.setattr(multiprocessing, "get_all_start_methods", lambda: ["spawn"])
+    assert routes._mp_context().get_start_method() == "spawn"
+    routes._init_worker(state)
+    assert routes._WORK is state
+    routes._init_worker(())

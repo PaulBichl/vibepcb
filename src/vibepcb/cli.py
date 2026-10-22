@@ -18,6 +18,7 @@ vibepcb rules <board>   the merged design / manufacturing rule profiles ([rules]
 vibepcb clone <board> <new>  copy a board and its build (variants to compare, no rebuild)
 vibepcb list            list the boards under boards/
 vibepcb docs            download tscircuit's LLM docs to docs/tscircuit-llms.txt
+vibepcb doctor          check the setup (node, bun, tsci + patches, KiCad, symbol library, rsvg, network); exit 1 on FAIL
 """
 
 from __future__ import annotations
@@ -26,10 +27,10 @@ import argparse
 import contextlib
 import copy
 import hashlib
+import importlib
 import json
 import os
 import shutil
-import subprocess
 import sys
 import tempfile
 import time
@@ -43,13 +44,16 @@ from vibepcb import board as board_model
 from vibepcb import (
     bringup,
     config,
+    doctor,
     fanout,
     fixes,
+    history,
     inspect,
     intent,
     kicad,
     padtable,
     paths,
+    proc,
     progress,
     ratsnest,
     routes,
@@ -163,8 +167,7 @@ def cmd_build(board: str, *, fast: bool = False) -> int:
             tscircuit.evaluate_unrouted(source, circuit)
         with _phase("conversions from the circuit JSON"):
             tscircuit.build(circuit, raw, board, JSON_FORMATS)
-            if shutil.which("rsvg-convert"):
-                _png(raw / f"{board}.pcb.svg", paths.preview_dir(board) / "routed.png", 1200)
+            _png(raw / f"{board}.pcb.svg", paths.preview_dir(board) / "routed.png", 1200)
         print(
             f"  tscircuit output: {raw.relative_to(paths.ROOT)}/ (internal; `fix` makes the KiCad project and routes it)"
         )
@@ -181,16 +184,41 @@ def cmd_build(board: str, *, fast: bool = False) -> int:
         return 1
     with _phase("conversions from the circuit JSON"):
         tscircuit.build(circuit, raw, board, JSON_FORMATS)
-        if shutil.which("rsvg-convert"):  # the routed board as tscircuit left it, for an agent to look at
-            _png(raw / f"{board}.pcb.svg", paths.preview_dir(board) / "routed.png", 1200)
+        # the routed board as tscircuit left it, for an agent to look at
+        _png(raw / f"{board}.pcb.svg", paths.preview_dir(board) / "routed.png", 1200)
     print(f"  tscircuit output: {raw.relative_to(paths.ROOT)}/ (internal; `fix` makes the KiCad project)")
     _written(raw)
     return 0
 
 
-def _png(svg: Path, png: Path, width: int) -> None:
+_PNG_WARNED = False
+
+
+def _png(svg: Path, png: Path, width: int) -> bool:
+    """SVG -> PNG with ``rsvg-convert``, else ``cairosvg`` (pip); False (and one loud warning) if neither works."""
+    global _PNG_WARNED  # noqa: PLW0603
     png.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["rsvg-convert", "-w", str(width), "-b", "white", "-o", str(png), str(svg)], check=True)
+    if rsvg := shutil.which("rsvg-convert"):
+        result = proc.run([rsvg, "-w", str(width), "-b", "white", "-o", str(png), str(svg)])
+        if result.returncode == 0:
+            return True
+        print(f"warning: rsvg-convert failed on {svg.name}: {result.stderr.strip()}", file=sys.stderr)
+    else:
+        try:
+            cairosvg = importlib.import_module("cairosvg")  # optional fallback, not a dependency
+            cairosvg.svg2png(url=str(svg), write_to=str(png), output_width=width, background_color="white")
+        except (ImportError, OSError):
+            pass
+        else:
+            return True
+    if not _PNG_WARNED:  # agents read the PNG previews; say once that they are missing
+        _PNG_WARNED = True
+        print(
+            "warning: no PNG previews (.work/preview/*.png): install librsvg (`rsvg-convert`: pacman -S librsvg /"
+            " apt install librsvg2-bin / brew install librsvg) or `pip install cairosvg`; the SVGs are still written",
+            file=sys.stderr,
+        )
+    return False
 
 
 _STAGES = progress.Stages()
@@ -247,8 +275,16 @@ def cmd_fix(board: str) -> int:
             print(f"  fix {name}: {change}")
     # safety net: nets KiCad finds broken after the track fixes go back to their routed state
     report_path = paths.reports_dir(board) / "fix-drc.json"
-    with _phase("KiCad connectivity check"):
-        lost = kicad.unconnected_nets(project.pcb_path, report_path)
+    if kicad.find_kicad_cli():
+        with _phase("KiCad connectivity check"):
+            lost = kicad.unconnected_nets(project.pcb_path, report_path)
+    else:
+        lost = set()
+        print(
+            "warning: kicad-cli not found - SAFETY NET SKIPPED: nets the track clean-up disconnected are NOT rolled"
+            " back; install KiCad 9/10 (or set $KICAD_CLI) and re-run `fix`, `check` will report them",
+            file=sys.stderr,
+        )
     restored = fixes.restore_nets(project, lost)
     for change in restored:
         print(f"  fix restore_nets: {change}")
@@ -269,8 +305,7 @@ def cmd_fix(board: str) -> int:
         with _phase("schematic preview"):
             svg = kicad.export_schematic_svg(sch, paths.work_dir(board))
         svg = svg.replace(paths.board_out(board) / "schematic.svg")
-        if shutil.which("rsvg-convert"):
-            _png(svg, paths.preview_dir(board) / "schematic.png", SCHEMATIC_PNG_WIDTH)
+        _png(svg, paths.preview_dir(board) / "schematic.png", SCHEMATIC_PNG_WIDTH)
         print(f"  schematic: {svg.relative_to(paths.ROOT)}")
     print(f"KiCad project: {(target / f'{board}.kicad_pro').relative_to(paths.ROOT)}")
     _written(target / f"{board}.kicad_pro")
@@ -368,8 +403,8 @@ def cmd_inspect(
     svg.parent.mkdir(parents=True, exist_ok=True)
     svg.write_text(inspect.render(project, model, box, px_per_mm=scale, layers=layers, net=net), encoding="utf-8")
     png = svg.with_suffix(".png")
-    _png(svg, png, round((box[2] - box[0]) * scale))
-    print(f"{png.relative_to(paths.ROOT)}  ({box[0]:g},{box[1]:g})-({box[2]:g},{box[3]:g}) mm, {scale:g} px/mm")
+    shown = png if _png(svg, png, round((box[2] - box[0]) * scale)) else svg
+    print(f"{shown.relative_to(paths.ROOT)}  ({box[0]:g},{box[1]:g})-({box[2]:g},{box[3]:g}) mm, {scale:g} px/mm")
     for line in inspect.summary(project, box, net)[:80]:
         print(f"  {line}")
     return 0
@@ -518,9 +553,19 @@ def cmd_check(board: str, *, strict: bool = False) -> int:
     print("\n".join(summary))
     (paths.board_out(board) / "check.txt").write_text("\n".join(summary) + "\n", encoding="utf-8")
     _written(paths.board_out(board) / "check.txt")
+    loaded.config = config.load(board)  # [planes] nets are joined by their plane, not ratsnest links
+    run = history.snapshot(  # regression table: what got worse since the previous check run
+        erc=erc.violations,
+        drc=drc.violations,
+        unrouted=drc.unconnected,
+        sharp_corners=len(corners),
+        warnings=sum("[warning]" in line for line in summary),
+        board=history.board_metrics(loaded),
+        passed=passed,
+    )
+    print("\n".join(history.record(reports / "history.json", run)))
     svg = kicad.export_board_svg(pcb, paths.board_out(board) / "board.svg")  # the filled, final board
-    if shutil.which("rsvg-convert"):
-        _png(svg, paths.preview_dir(board) / "board.png", BOARD_PNG_WIDTH)
+    _png(svg, paths.preview_dir(board) / "board.png", BOARD_PNG_WIDTH)
     _write_index(board)
     return 0 if passed else 1
 
@@ -652,6 +697,12 @@ def cmd_docs() -> int:
     return 0
 
 
+def cmd_doctor() -> int:
+    checks = doctor.collect()
+    print(doctor.table(checks))
+    return doctor.exit_code(checks)
+
+
 def cmd_rules(board: str) -> int:
     if not paths.board_source(board).exists():
         print(f"error: no board {board!r} (boards/{board}/index.circuit.tsx)", file=sys.stderr)
@@ -662,6 +713,9 @@ def cmd_rules(board: str) -> int:
         return 0
     print("\n".join(rules.table(ruleset)))
     return 0
+
+
+KICAD_COMMANDS = ("fix", "check", "all", "fab", "publish")  # the ones that run kicad-cli
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -707,9 +761,12 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("rules").add_argument("board")
     sub.add_parser("list")
     sub.add_parser("docs")
+    sub.add_parser("doctor")
     args = parser.parse_args(argv)
     _OUTPUTS.clear()
     _set_verbose(quiet=getattr(args, "quiet", False))
+    if args.command in KICAD_COMMANDS and (warning := kicad.version_warning()):
+        print(warning, file=sys.stderr)
 
     try:
         match args.command:
@@ -718,6 +775,8 @@ def main(argv: list[str] | None = None) -> int:
                 return 0
             case "docs":
                 return cmd_docs()
+            case "doctor":
+                return cmd_doctor()
             case "rules":
                 return cmd_rules(args.board)
             case "clone":

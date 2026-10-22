@@ -51,17 +51,41 @@ corrections for systematic export quirks, plus track cleanup and a few hard rule
 | hatch | the project manager; all commands are `hatch run ...` |
 | Node.js + npm | not required on the system: `hatch run setup` installs Node LTS into the hatch env via `nodeenv` |
 | tscircuit, bun | npm packages from `package.json` (`tscircuit`, `bun`, `@types/react`) |
-| KiCad >= 9 (`kicad-cli`) | system install (`sudo pacman -S kicad`), or set `$KICAD_CLI`. Needed for `check` and `fab` only |
+| KiCad 9 or 10 (`kicad-cli`) | system install (`sudo pacman -S kicad`, winget, brew), or set `$KICAD_CLI`. Needed for `check`, `fab`, `publish`; `fix` uses it for its connectivity safety net and **skips it with a loud warning** if KiCad is missing. Fixes were tuned on KiCad 10, 9 is supported, any other major version gets a warning at startup (`kicad.version_warning`, from `kicad-cli version`) |
 | ngspice | optional, `check` runs `boards/<name>/sim/*.cir` decks with it (`ngspice -b`); without it the decks are reported as not run |
-| rsvg-convert | optional, makes the agent's PNG previews in `out/<name>/.work/preview/` from the SVGs |
+| rsvg-convert (or `pip install cairosvg`) | optional, makes the agent's PNG previews in `out/<name>/.work/preview/` from the SVGs; without either, a warning says the previews are missing (`cli._png`) |
 
 Setup sequence:
 
 ```bash
 hatch run setup          # nodeenv --python-virtualenv --node=lts (only if no node on PATH), then npm install
 sudo pacman -S kicad     # or any KiCad >= 9 install; or export KICAD_CLI=/path/to/kicad-cli
+hatch run pcb doctor     # checks all of the above, prints OK / WARN / FAIL with a hint each
 hatch run pcb docs       # optional: tscircuit LLM docs -> docs/tscircuit-llms.txt
 ```
+
+`pcb doctor` (`src/vibepcb/doctor.py`) checks: node, bun, tsci (`npx --no-install tsci --version`), the tscircuit
+patches (below), `kicad-cli` path + version, the KiCad symbol library, rsvg-convert / cairosvg, ngspice (optional)
+and, with a 5 s timeout each, the endpoints the tool uses (docs.tscircuit.com, the tscircuit parts engine,
+easyeda.com). Exit 1 if anything is FAIL (node, bun, tsci, kicad-cli missing); WARN is for optional things.
+
+Portability: native Windows is handled (`npx.cmd` via `shutil.which`, POSIX import paths written into the prepared
+TSX, `spawn` instead of `fork` for the routing workers, UTF-8 decoding of every subprocess through `vibepcb.proc`,
+KiCad's symbol library found relative to `kicad-cli`). WSL2 runs as-is.
+
+### tscircuit patches
+
+`node_modules/tscircuit` (0.0.2786) carries local fixes, versioned in `patches/tscircuit.json` and re-applied by
+`scripts/patch-tscircuit.mjs` as the npm `postinstall` (`npm install`, `hatch run setup`). They are exact text
+replacements in 10 dist files (the same code is bundled several times): the `@tscircuit/core` pour export
+(`findFloatingCopper` throws on a degenerate pour edge -> skipped, KiCad refills the pours anyway) and
+`TraceSimplificationSolver` of `@tscircuit/capacity-autorouter` (duplicate-route endpoints threw -> the endpoint
+preservation is dropped for that board). They were reconstructed by diffing the patched `node_modules` of
+VibePCB-smu (which kept `*.orig` files) against a pristine `npm ci` of the same lockfile; the result applies
+byte-identically. `node scripts/patch-tscircuit.mjs --check` reports without writing (exit 1 if one is missing).
+patch-package is not used: the bundles are minified, so its line diffs would be megabytes. A tscircuit upgrade needs
+the patches re-checked (the script says "does not match"); to add one, edit the file in `node_modules` and add
+`{file, old, new}` (the smallest unique span) to the JSON.
 
 `hatch run setup` is one script with two commands. The first runs
 `python -c "...shutil.which('node')..." || nodeenv --python-virtualenv --node=lts`, so
@@ -100,6 +124,7 @@ docstring of `cli.py` doubles as `--help` text.
 | `place-score <board>.. [--source ...]` | `ratsnest.score` per board: one line with link count, total ratsnest length, crossings - the placement metric to compare `clone` variants | none | 0 |
 | `rules <board>` | merges the board's rule profiles (`[rules] profiles` + `[rules.override]` in `vibepcb.toml`, `vibepcb.rules`) and prints one line per value with the profile that set it (and the fab capability where an application layer or override changed it), then the profiles' / board's net classes; a value below the fab's capability is an error | none | 1 on an invalid profile set |
 | `list` | prints board names (folders with `index.circuit.tsx` under `boards/`) | none | 0 |
+| `doctor` | the setup check above | none | 1 on FAIL |
 | `docs` | downloads `https://docs.tscircuit.com/llms.txt` to `docs/tscircuit-llms.txt` (60 s timeout) | `docs/` | 0 |
 
 Output is verbose by default (`--quiet` on build / fix / check / all / fab gives the old output): every
@@ -378,7 +403,8 @@ has `test_clean_tracks_*` and `test_strict_track_rules` on the fixture board.
 ### 8.1 `kicad.py`
 
 - `find_kicad_cli()`: `$KICAD_CLI` or `kicad-cli` on PATH. `_kicad_cli()` raises
-  `KicadCliError` with an install hint if none is found.
+  `KicadCliError` with an install hint if none is found. `cli_version()` (cached `kicad-cli version`),
+  `version_warning()` (None for KiCad 9/10): `main()` prints it once for `fix`, `check`, `all`, `fab`, `publish`.
 - `assemble_project(zip, library_dir, target, stem)`: wipes `target`, extracts the zip,
   renames `index.circuit.*` to `<stem>.*`, sets `project_name`, `last_opened_files` and
   `last_opened_board` in the `.kicad_pro` JSON, and copies `lib/` (without `*-lib-table`).
@@ -390,6 +416,13 @@ has `test_clean_tracks_*` and `test_strict_track_rules` on the fixture board.
   `unconnected_spots()` (mm positions of unconnected items), `__str__` (LLM-readable).
 - `export_fab(pcb, out_dir)`, `jlcpcb_files(bom, pos, gerbers, out_dir)`: section 9.
 - `KicadCliError` is raised for missing CLI or a failed command without a report file.
+
+### 8.1a Regression table (`history.py`)
+
+After every `check`, the key metrics go to `.work/reports/history.json` (last 30 runs) and a table compares them
+with the previous run, `WORSE` flagged: ERC errors, DRC errors (total and per type), unrouted connections, ratsnest
+length, sharp bends, vias, track length, warnings. Counts are worse at any increase, lengths above +1 %. It goes to
+stdout only (the last line of `check.txt` stays the verdict). The first run just records.
 
 ### 8.2 The `check` post-fill loop
 
@@ -480,7 +513,7 @@ agent's, `docs/REVIEW.md`) are never touched; `accepted` needs a reason.
 
 Gerber and drill export clear the `gerbers/` folder first. Run `check` first; the CLI does
 not enforce it, but the project rule is "never hand over fab files of a board whose check
-fails" (CLAUDE.md).
+fails" (AGENTS.md).
 
 ---
 
@@ -506,7 +539,7 @@ fails" (CLAUDE.md).
   `no_implicit_reexport`, `strict_equality`, `warn_return_any`, `warn_unused_ignores`, ...).
   basedpyright is configured for editors only (`typeCheckingMode = "standard"`,
   `venv = "vibepcb"` in `.hatch`); mypy is the real checker.
-- **Python conventions** (CLAUDE.md): `from __future__ import annotations` in every file,
+- **Python conventions** (AGENTS.md): `from __future__ import annotations` in every file,
   typing-only imports under `if TYPE_CHECKING:`, absolute imports, `X | None` hints, error
   messages assigned to `msg` before `raise` (ruff EM), library code raises and only `cli.py` prints.
 
@@ -519,10 +552,10 @@ fails" (CLAUDE.md).
 | `tsci` (tscircuit CLI) | `tscircuit.py`, `hatch run tsci` | `node_modules/.bin/tsci`, run as `npx --no-install tsci` | `_tsci()` raises `TscircuitError` if the binary or `node` is missing |
 | node / npm | tscircuit, bun | `nodeenv` (hatch env) or system | `shutil.which("node")` is checked |
 | bun | tsci's shebang is `env bun` | npm devDependency | comes from `node_modules/.bin` |
-| `kicad-cli` (KiCad >= 9) | `kicad.py` | `$KICAD_CLI`, else PATH | ERC, DRC, refill, fab exports, renders |
-| `rsvg-convert` | `cli.cmd_build`, `cli.cmd_fix`, `cli.cmd_check` | PATH, optional | makes the PNG previews in `.work/preview/`; skipped silently if absent |
+| `kicad-cli` (KiCad 9 / 10) | `kicad.py`, `symlib.py` (library dir) | `$KICAD_CLI`, else PATH | ERC, DRC, refill, fab exports, renders |
+| `rsvg-convert` / `cairosvg` | `cli._png` (build, fix, check, inspect) | PATH / pip, optional | makes the PNG previews in `.work/preview/`; if neither exists one warning is printed per run, the SVGs are still written |
 | ngspice | `sim.py` (`check`) | PATH | `ngspice -b <deck>` per deck; missing = warning (error in strict mode), never a crash |
-| git | `update-skill`, `clean` | PATH | `git clean -ffX` deletes ignored files in `.tmp` and `out` |
+| git | `update-skill` (`scripts/update_skill.py`, no `rm`), `clean` | PATH | `git clean -ffX` deletes ignored files in `.tmp` and `out` |
 | network | `docs` (llms.txt), `update-skill` (GitHub clone), `fix` (LCSC symbols, first time per part) | - | `fix` works offline: uncached parts get boxes |
 
 The tscircuit skill is vendored in `.claude/skills/tscircuit/` (`SKILL.md`, `elements/*.md`,
@@ -608,5 +641,5 @@ Generic, reusable without changes (apart from the names):
 - The `check` post-fill retry loop (`cli.cmd_check`).
 
 Project-specific: the tscircuit wrapper (`tscircuit.py`), the board template in `cli.py`,
-the constants in `fixes.py`, and the `CLAUDE.md` workflow that tells an LLM agent how to run
+the constants in `fixes.py`, and the `AGENTS.md` workflow that tells an LLM agent how to run
 the loop.

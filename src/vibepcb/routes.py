@@ -36,6 +36,7 @@ import copy
 import fnmatch
 import math
 import multiprocessing
+import multiprocessing.context
 import os
 import sys
 import time
@@ -572,7 +573,19 @@ def _log(text: str) -> None:
         print(text, file=sys.stderr, flush=True)
 
 
-_WORK: tuple[Any, ...] = ()  # what the worker processes of a round inherit by fork
+_WORK: tuple[Any, ...] = ()  # what the worker processes of a round inherit (fork) or are handed (spawn)
+
+
+def _init_worker(work: tuple[Any, ...]) -> None:
+    """Pool initializer: the worker's copy of the round's shared state (a no-op copy under fork, pickled under spawn)."""
+    global _WORK  # noqa: PLW0603
+    _WORK = work
+
+
+def _mp_context() -> multiprocessing.context.BaseContext:
+    """``fork`` where it exists (the board is shared copy-on-write), else ``spawn`` (Windows)."""
+    method = "fork" if "fork" in multiprocessing.get_all_start_methods() else "spawn"
+    return multiprocessing.get_context(method)
 
 
 def _jobs(defaults: dict[str, Any]) -> int:
@@ -603,14 +616,14 @@ def _search_round(
     history: dict[tuple[str, int, int], float],
     jobs: int,
 ) -> list[tuple[tuple[str, Pad, Pad, str], router.Route | None, str]]:
-    """Route the ``todo`` connections against the board as it is, in parallel (fork: the board is shared copy-on-write)."""
+    """Route the ``todo`` connections against the board as it is, in parallel (fork: the board is shared copy-on-write; spawn: pickled to the workers)."""
     global _WORK  # noqa: PLW0603 - handed to the forked workers
     _WORK = (board, entry, defaults, todo, nets, cost, history)
     try:
         if jobs <= 1 or len(todo) < 3:
             results = [_route_task(i) for i in range(len(todo))]
         else:
-            with multiprocessing.get_context("fork").Pool(min(jobs, len(todo))) as pool:
+            with _mp_context().Pool(min(jobs, len(todo)), _init_worker, (_WORK,)) as pool:
                 results = pool.map(_route_task, range(len(todo)), chunksize=1)
     finally:
         _WORK = ()

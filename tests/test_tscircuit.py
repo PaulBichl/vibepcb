@@ -112,3 +112,14 @@ def test_run_streams_lines_to_the_handler() -> None:
     assert result.returncode == 3
     assert "one" in result.stdout
     assert tscircuit._run(cmd).stdout.strip() == "one"  # no handler: captured silently
+
+
+def test_prepared_source_writes_posix_import_paths(tmp_path: Path) -> None:
+    src = tmp_path / "board"
+    src.mkdir()
+    (src / "index.circuit.tsx").write_text(
+        'import x from "./lib/x"\nexport default () => <board />\n', encoding="utf-8"
+    )
+    text = tscircuit.prepared_source(src / "index.circuit.tsx", tmp_path / "work").read_text(encoding="utf-8")
+    assert "\\" not in text
+    assert (src / "lib" / "x").resolve().as_posix() in text

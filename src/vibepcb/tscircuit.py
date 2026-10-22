@@ -11,6 +11,7 @@ from collections import Counter
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from vibepcb import proc
 from vibepcb.paths import ROOT
 
 if TYPE_CHECKING:
@@ -23,11 +24,12 @@ class TscircuitError(RuntimeError):
 
 def _tsci() -> list[str]:
     tsci = ROOT / "node_modules" / ".bin" / "tsci"
-    if not tsci.exists() or shutil.which("node") is None:
-        msg = "tscircuit is not installed - run `hatch run setup` first"
+    npx = shutil.which("npx")  # npx.cmd on Windows (a bare "npx" is not found there)
+    if not tsci.exists() or shutil.which("node") is None or npx is None:
+        msg = "tscircuit is not installed - run `hatch run setup` first (`hatch run pcb doctor` checks the setup)"
         raise TscircuitError(msg)
     # tsci's shebang is `env bun`; bun comes from node_modules/.bin as well
-    return ["npx", "--no-install", "tsci"]
+    return [npx, "--no-install", "tsci"]
 
 
 # set by the CLI to show tsci's output live (line by line); without one the output is captured silently
@@ -43,17 +45,17 @@ def set_line_handler(handler: Callable[[str], None] | None) -> None:
 def _run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
     """Run a tsci command in the project root; stdout+stderr (merged) go to the line handler as they appear."""
     if _line_handler is None:
-        return subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, check=False)
+        return proc.run(cmd, cwd=ROOT)
     lines = []
     with subprocess.Popen(
-        cmd, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace"
-    ) as proc:
-        if proc.stdout is not None:
-            for line in proc.stdout:
+        cmd, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace"
+    ) as child:
+        if child.stdout is not None:
+            for line in child.stdout:
                 lines.append(line)
                 if text := line.rstrip():
                     _line_handler(text)
-    return subprocess.CompletedProcess(cmd, proc.returncode, "".join(lines), "")
+    return subprocess.CompletedProcess(cmd, child.returncode, "".join(lines), "")
 
 
 def export(source: Path, fmt: str, output: Path) -> None:
@@ -101,7 +103,7 @@ def prepared_source(source: Path, target_dir: Path, *, effort: str | None = None
     """
     text = source.read_text(encoding="utf-8")
     here = source.resolve().parent
-    text = _RELATIVE_IMPORT.sub(lambda m: f"{m[1]}{m[2]}{(here / m[3]).resolve()}{m[2]}", text)
+    text = _RELATIVE_IMPORT.sub(lambda m: f"{m[1]}{m[2]}{(here / m[3]).resolve().as_posix()}{m[2]}", text)
     if not _BOARD_TAG.search(text):
         msg = f"no <board> tag found in {source}"
         raise TscircuitError(msg)

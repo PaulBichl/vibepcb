@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import csv
+import functools
 import json
 import os
 import re
@@ -16,10 +17,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from vibepcb import sexpr
+from vibepcb import proc, sexpr
 from vibepcb.sexpr import Sym
 
 if TYPE_CHECKING:
+    from subprocess import CompletedProcess
+
     from vibepcb.sexpr import Node
 
 
@@ -31,12 +34,49 @@ def find_kicad_cli() -> str | None:
     return os.environ.get("KICAD_CLI") or shutil.which("kicad-cli")
 
 
-def _kicad_cli(*args: str) -> subprocess.CompletedProcess[str]:
+SUPPORTED_MAJORS = (9, 10)  # fixes were tuned on KiCad 10; 9 works (the same file format family)
+_VERSION = re.compile(r"(\d+)\.(\d+)(?:\.(\d+))?")
+
+
+def parse_version(text: str) -> tuple[int, int, int] | None:
+    """``(major, minor, patch)`` from the first version number in ``kicad-cli version`` output (``10.0.1-rc1`` etc.)."""
+    match = _VERSION.search(text)
+    return (int(match[1]), int(match[2]), int(match[3] or 0)) if match else None
+
+
+@functools.cache
+def cli_version() -> tuple[int, int, int] | None:
+    """The installed ``kicad-cli`` version, None if there is no kicad-cli or it does not answer."""
+    cli = find_kicad_cli()
+    if cli is None:
+        return None
+    try:
+        result = proc.run([cli, "version"], timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return parse_version(result.stdout) if result.returncode == 0 else None
+
+
+def version_warning() -> str | None:
+    """A warning for a missing, unreadable or unsupported KiCad, None if it is a supported version."""
+    if find_kicad_cli() is None:
+        return None  # not installed: the commands that need it say so themselves
+    version = cli_version()
+    supported = " / ".join(str(m) for m in SUPPORTED_MAJORS)
+    if version is None:
+        return f"warning: could not read `kicad-cli version`; VibePCB supports KiCad {supported}"
+    if version[0] not in SUPPORTED_MAJORS:
+        found = ".".join(str(v) for v in version)
+        return f"warning: KiCad {found} is not supported (KiCad {supported}; tuned on 10): DRC/ERC results and fixes may differ"
+    return None
+
+
+def _kicad_cli(*args: str) -> CompletedProcess[str]:
     cli = find_kicad_cli()
     if cli is None:
         msg = "kicad-cli not found - install KiCad (>= 9, e.g. `sudo pacman -S kicad`) or set $KICAD_CLI"
         raise KicadCliError(msg)
-    return subprocess.run([cli, *args], capture_output=True, text=True, check=False)
+    return proc.run([cli, *args])
 
 
 def assemble_project(kicad_zip: Path, target: Path, stem: str) -> None:
