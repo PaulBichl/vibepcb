@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import shutil
 import subprocess
 import urllib.error
@@ -126,7 +127,7 @@ def check_png() -> Check:
     if rsvg := shutil.which("rsvg-convert"):
         return Check("rsvg-convert", OK, rsvg)
     try:
-        import cairosvg  # type: ignore[import-not-found,unused-ignore]  # noqa: F401 - optional fallback
+        importlib.import_module("cairosvg")  # optional fallback, not a dependency
     except (ImportError, OSError):
         return Check(
             "rsvg-convert",

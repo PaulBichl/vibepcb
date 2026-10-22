@@ -25,6 +25,7 @@ import argparse
 import contextlib
 import copy
 import hashlib
+import importlib
 import json
 import os
 import shutil
@@ -169,8 +170,7 @@ def _png(svg: Path, png: Path, width: int) -> bool:
         print(f"warning: rsvg-convert failed on {svg.name}: {result.stderr.strip()}", file=sys.stderr)
     else:
         try:
-            import cairosvg  # type: ignore[import-not-found,unused-ignore]
-
+            cairosvg = importlib.import_module("cairosvg")  # optional fallback, not a dependency
             cairosvg.svg2png(url=str(svg), write_to=str(png), output_width=width, background_color="white")
         except (ImportError, OSError):
             pass
