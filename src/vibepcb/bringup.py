@@ -195,7 +195,8 @@ def render_sheet(board: str, data: BringUp) -> str:
     for rail in data.rails:
         where = " or ".join(rail.access) or "a pad of the net"
         lines.append(
-            f"{step}. Measure {rail.net} at {where} against GND ({gnd}): expect {_volts(rail.volts)}"
+            f"{step}. Measure {rail.net} at {where} against GND ({gnd}): "
+            + ("expect the voltage given in the schematic" if rail.volts is None else f"expect {rail.volts:g} V")
             + (f" +/- {VOLT_TOLERANCE}." if rail.volts is not None else ".")
         )
         step += 1
