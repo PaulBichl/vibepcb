@@ -84,12 +84,13 @@ docstring of `cli.py` doubles as `--help` text.
 
 | Command | Does | Writes | Exit code |
 |---------|------|--------|-----------|
-| `new <board>` | writes a starter board (a 30x20 mm board with R1, C1 and a trace) to `boards/<board>/index.circuit.tsx` plus an empty `intent.toml`; refuses if the file exists | `boards/<board>/` | 1 if it exists |
-| `build <board> [--fast]` | placement gate: `tsci build --routing-disabled`, stops on placement/outside-board/overlap/clearance errors (about 1 min on a 238-part board); then ONE routed `tsci export -f circuit-json` (stops on `*_error` elements), and `kicad_zip`, netlist, PCB SVG are converted from that JSON; PNG via `rsvg-convert`. tscircuit always evaluates a copy in `out/<board>/.work/src/` with `schematicDisabled` (`tscircuit.prepared_source`: its schematic layout does not scale, `fix` generates the schematic); `--fast` also sets `autorouterEffortLevel="2x"` in that copy | `out/<board>/.work/raw/` | 1 on errors or unknown board |
+| `new <board>` | writes a starter board (26x18 mm: header, R1, LED, GND pours, test points TP1 VCC / TP2 GND with silkscreen labels, title) to `boards/<board>/index.circuit.tsx` plus an empty `intent.toml`; refuses if the file exists | `boards/<board>/` | 1 if it exists |
+| `build <board> [--fast] [--quiet]` | placement gate: `tsci build --routing-disabled`, stops on placement/outside-board/overlap/clearance errors (about 1 min on a 238-part board); then ONE routed `tsci export -f circuit-json` (stops on `*_error` elements), and `kicad_zip`, netlist, PCB SVG are converted from that JSON; PNG via `rsvg-convert`. tscircuit always evaluates a copy in `out/<board>/.work/src/` with `schematicDisabled` (`tscircuit.prepared_source`: its schematic layout does not scale, `fix` generates the schematic); `--fast` also sets `autorouterEffortLevel="2x"` in that copy | `out/<board>/.work/raw/` | 1 on errors or unknown board |
 | `fix <board>` | removes and re-creates `out/<board>/kicad/` from the raw zip (the footprint library `lib/footprints/tscircuit_builtin.pretty` is written from the footprints embedded in the board, `kicad.write_footprint_library`), renames the files to the board name, replaces the schematic with `schgen.write` (from the circuit JSON + the TSX sections), then runs `fixes.apply_all` and prints one line per change; exports `schematic.svg` (+ `.work/preview/schematic.png`, 4000 px) and refreshes `README.md` | `out/<board>/kicad/` | 0 (exceptions reported as `error:`, exit 1) |
-| `check <board> [--strict]` | `kicad-cli sch erc`, `kicad-cli pcb drc` (refills zones, saves the board), post-fill loop, sharp-corner and unlabelled-connector checks, split crossings (warning: a track crossing the edge of a region pour on the layer next to it); prints the summary, writes it to `check.txt`, exports `board.svg`; then circuit verification (section 8.3: sims, required sims, netlist checks, `findings.toml`); `--strict` makes its issues errors | `out/<board>/check.txt`, `board.svg`, `.work/reports/`, modifies the KiCad PCB | 1 if ERC errors, DRC errors or sharp corners (strict: or a verification issue) |
-| `all <board> [--strict]` | `build`, then `fix`, then `check`, short-circuiting on a non-zero result | all of the above | first non-zero, else `check`'s result |
-| `fab <board>` | refuses unless the last `check --strict` passed on this board (`check.json` `strict_passed` + board hash); part availability check once (parts engine, placement-only evaluation), then `kicad.export_fab` on `out/<board>/kicad/<board>.kicad_pcb`: one file per purpose (gerbers zip, JLCPCB BOM with MPN, CPL, schematic PDF, top/bottom renders); intermediates in `.work/fab/` | `out/<board>/fab/` | 0 |
+| `check <board> [--strict] [--quiet]` | `kicad-cli sch erc`, `kicad-cli pcb drc` (refills zones, saves the board), post-fill loop, sharp-corner, unlabelled-connector and test-point checks (`testpoints.py`, `[testpoints]` in `vibepcb.toml`), split crossings (warning: a track crossing the edge of a region pour on the layer next to it); prints the summary, writes it to `check.txt`, exports `board.svg`; then circuit verification (section 8.3: sims, required sims, netlist checks, `findings.toml`); `--strict` makes its issues errors | `out/<board>/check.txt`, `board.svg`, `.work/reports/`, modifies the KiCad PCB | 1 if ERC errors, DRC errors or sharp corners (strict: or a verification issue; test points with `severity = "error"`) |
+| `bringup <board>` | `bringup.collect` on the finished KiCad project (+ the circuit JSON for pin names): `fab/<board>-bringup.md` and `fab/<board>-pins.h` (section 9a); `fab` calls it too | `out/<board>/fab/` | 0 |
+| `all <board> [--strict] [--fast] [--quiet]` | `build`, then `fix`, then `check`, short-circuiting on a non-zero result | all of the above | first non-zero, else `check`'s result |
+| `fab <board>` | refuses unless the last `check --strict` passed on this board (`check.json` `strict_passed` + board hash); part availability check once (parts engine, placement-only evaluation), then `kicad.export_fab` on `out/<board>/kicad/<board>.kicad_pcb`: one file per purpose (gerbers zip, JLCPCB BOM with MPN, CPL, schematic PDF, top/bottom renders), then `bringup`; intermediates in `.work/fab/` | `out/<board>/fab/` | 0 |
 | `publish <board>` | only if the last `check` passed on the current board (`.work/reports/check.json`, board hash): KiCad project without 3D models, BOM, schematic PDF, renders (`kicad.export_docs`), layout PDF (a page per copper layer) + front/back SVGs (`kicad.export_layout`) | `boards/<board>/hardware/` (committed) | 0 |
 | `route <board> [--only NET] [--dry-run] [--drc]` | manual routing quick loop: `routes.toml` onto `.work/unrouted.kicad_pcb` (written by `fix`), no clean-up; `--drc` runs KiCad's DRC on the result | `out/<board>/kicad/<board>.kicad_pcb` | 1 if a connection failed |
 | `inspect <board> [--area x0 y0 x1 y1] [--net PAT] [--layer L] [--scale PX/MM] [--source unrouted]` | PNG of the board with a mm grid (KiCad coordinates), pad labels, one net pattern highlighted; text list of the pads in the area | `.work/preview/inspect.png` | 0 |
@@ -101,6 +102,13 @@ docstring of `cli.py` doubles as `--help` text.
 | `list` | prints board names (folders with `index.circuit.tsx` under `boards/`) | none | 0 |
 | `docs` | downloads `https://docs.tscircuit.com/llms.txt` to `docs/tscircuit-llms.txt` (60 s timeout) | `docs/` | 0 |
 
+Output is verbose by default (`--quiet` on build / fix / check / all / fab gives the old output): every
+stage prints `[elapsed] stage ...` when it starts and `time: stage N s` when it ends (`cli._phase`,
+`progress.Stages`), the tsci subprocesses' output is streamed live line by line, prefixed `      | `
+(`tscircuit.set_line_handler`; stdout and stderr merged, still captured for the error text), and a
+closing `stages:` table (durations, total) and `written:` list (`cli._written`) follow, also after a
+failure. Library code never prints: `Stages` and the tsci runner call back into `cli.py`.
+
 Error handling in `main()`: `TscircuitError`, `KicadCliError` and `FileNotFoundError` are
 caught and printed as `error: <message>` with exit 1. Other exceptions propagate with a
 traceback. Only `cli.py` prints; library modules raise.
@@ -111,6 +119,7 @@ traceback. Only `cli.py` prints; library modules raise.
   (`ERC: N issue(s) {...} - full report: <path>`) and one line per violation, plus
   one line per item with its position in mm.
 - `Track bends: N sharper than 135 deg` followed by `[error] sharp_corner: ...` lines.
+- `Test points: N rail / net without one` and `[warning] missing_testpoint: NET` lines (`[error]` and part of the exit code with `[testpoints] severity = "error"`).
 - Exit 1 if `erc.errors`, `drc.errors` or any sharp corner remains. Warnings do not fail
   the check (the severity count uses `--severity-all` for the report, but `errors` only
   counts `severity == "error"`).
@@ -204,6 +213,7 @@ connection rules still join the net's pads (checked net by net, else polyline by
 | 22 | `drop_loose_power_symbols` | Removes power symbols whose pin touches no wire, label or pin | tscircuit's schematic can leave a rail symbol standing alone; ERC flags its hidden pin |
 | 23 | `add_part_numbers` | Copies MPN / LCSC from the circuit JSON into hidden fields | Export drops them, so the BOM could not say what to buy |
 | 23b | `mark_dnp_parts` | `doNotPlace` parts (circuit JSON `pcb_component.do_not_place`) get `(dnp yes)` on the symbol and `dnp` in the footprint's `attr`; `fab` exports BOM and CPL with `--exclude-dnp` | Neither the export nor `schgen` carries the flag: unpopulated pads (ISP header, antenna / touch pads) landed in the BOM / CPL without LCSC numbers |
+| 23c | `exclude_testpoints_from_bom` | `<testpoint>` footprints get `(attr board_only exclude_from_pos_files exclude_from_bom)`, their symbols `in_bom no` | The export lists a bare test pad as a part: JLCPCB would try to buy and place it (verified: BOM and CPL of `pcb new` boards list R, D, J only) |
 | 24 | `link_footprint_library` | Registers the footprint library under the `tscircuit` nickname | Footprints are `tscircuit:<name>`, library is `tscircuit_builtin` |
 | 25 | `footprint_internal_clearance_rule` | Custom DRC rule: hole clearance inside one footprint follows its land pattern | Manufacturer land patterns (USB-C) sit under the board-wide hole clearance |
 | 26 | `zone_thermal_reliefs` | Pad-to-pour connections via narrow thermal spokes instead of solid | Solid connect on 0402s causes tombstoning and hard rework |
@@ -220,6 +230,7 @@ connection rules still join the net's pads (checked net by net, else polyline by
 | - | repair after restore (fix) | After `restore_nets`, `relocate_vias` + `push_tracks_clear` once more; undone if KiCad then finds another net broken | A restored net's routed geometry can clash with its cleaned-up neighbours |
 | - | post-fill second pass, repeated (check) | The second pass runs up to 3 times while it still changes something; it includes `relocate_vias` | Each step leaves work for an earlier one (a snap creates a T to square, ...) |
 | - | `unlabelled_connectors` (check, warning) | Connectors (J..., 3+ pads) with no board silkscreen text within 6 mm | A header nobody can read is useless on the bench |
+| - | `testpoints.findings` (check, warning or error) | Every supply rail (by name: VCC/VDD/+3V3/5V/VBUS/VIN/VBAT..., plus nets of power symbols) and GND needs a test-point footprint (`TP...`, `test_point_*`) or a connector pad (J/P/CN/X) on it; `[testpoints]` in `vibepcb.toml` sets `required` (groups `power`, `gnd`, or net patterns), `ignore`, `severity` (`warning` default, `error` fails `check`) | Bring-up needs somewhere to put a probe; the designer should not have to remember |
 | - | `stitch_unconnected_pads` (check) | A pad of a poured net that KiCad reports unconnected after the fill gets a via beside it (not in it) into the net's filled plane on another layer, plus a short track; kept only if DRC finds fewer unconnected items | Pads boxed in by other nets' tracks get no copper from their own layer's pour, and tscircuit routes nothing to a poured net (seen: an ESD part's GND pin between the USB lines) |
 | - | `restore_nets` (check, last attempt) | If DRC still finds more unconnected items after 4 post-fill attempts, those nets are restored from before the post-fill | Same safety net, after the refill |
 | - | `sharp_corners`, `unpoured_copper_layers` (check) | Not fixes, hard gates: bends < 135 deg; copper layers without a pour fail `check` | Quality bar: 135-deg minimum (not expressible in KiCad); common practice = every layer poured |
@@ -457,6 +468,15 @@ agent's, `docs/REVIEW.md`) are never touched; `accepted` needs a reason.
 | `jlcpcb/<board>-gerbers.zip` | copy of the gerber zip |
 | `jlcpcb/<board>-bom-jlcpcb.csv` | columns Comment, Designator, Footprint (last `:` part), LCSC Part # |
 | `jlcpcb/<board>-cpl-jlcpcb.csv` | columns Designator, Mid X, Mid Y (`mm` suffix, 4 decimals), Layer (Top/Bottom), Rotation; rows without a reference (mounting holes) are skipped |
+
+### 9a. Bring-up sheet and firmware header (`bringup.py`)
+
+`fab` (or `pcb bringup <board>` alone) also writes, deterministically and from the finished board:
+
+| File | Content |
+|------|---------|
+| `<board>-bringup.md` | rails (nets matching the power-name patterns of `testpoints.py` or carrying a power symbol) with the voltage the name promises (`+3V3`, `V3V3`, `1V8`, `5V`, `VBUS` = 5 V; else "see schematic"), their test points / connector pads, regulators (a U part with at most 8 pads and 2+ supply nets, or a regulator-like value), the GND test points, a power-on checklist (visual, continuity, current-limited supply, rails one by one highest voltage first, load, then signals) and the signal nets that carry a TP |
+| `<board>-pins.h` | only if an MCU is found: the U part with the most pads among those with 4+ GPIO-like pin names (PA5, PB12, GPIO4, IO4, GP2, P0.13, D3, A0; names from the circuit JSON `source_port`s). `#define <NET>_PIN <pin>` per connected pin on a named net (no rails, no `Net-(...)` nets); `GPIO4`/`IO4`/`GP4` become the number `4`, others stay the identifier (`PA5`); a net on several pins gets `_<PIN>` appended |
 
 Gerber and drill export clear the `gerbers/` folder first. Run `check` first; the CLI does
 not enforce it, but the project rule is "never hand over fab files of a board whose check

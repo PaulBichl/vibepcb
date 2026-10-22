@@ -33,7 +33,7 @@ import tomllib
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from vibepcb import paths
+from vibepcb import paths, rules
 from vibepcb.config import ConfigError
 from vibepcb.intent import Intent, measure_key
 
@@ -270,8 +270,6 @@ def run_deck(deck_path: Path, binary: str) -> dict[str, float | None]:
 
 
 def defaults_path() -> Path | None:
-    from vibepcb import rules
-
     return next((d / DEFAULTS_NAME for d in rules.profile_dirs() if (d / DEFAULTS_NAME).is_file()), None)
 
 

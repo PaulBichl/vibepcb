@@ -95,9 +95,9 @@ No human-readable change log is needed during the agent's loop. One cheap aid fo
 
 ## 5. After the layout (one person + one agent)
 
-- **Bring-up sheet** generated from the design: rails and expected voltages, test points, expected current
+- **Bring-up sheet** (done: `pcb bringup` / `pcb fab`, TOOLING 9a) generated from the design: rails and expected voltages, test points, expected current
   at first power-on.
-- **Firmware header** generated from the MCU pin assignments.
+- **Firmware header** (done: `<name>-pins.h`) generated from the MCU pin assignments.
 
 ## 6. Portability (Windows / WSL, Copilot)
 

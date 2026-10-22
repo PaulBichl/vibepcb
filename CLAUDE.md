@@ -49,6 +49,9 @@ Rules of the pipeline (details and timings: `docs/TOOLING.md`):
 
 ## How to work on a board
 
+`build` / `all` / `fix` / `check` / `fab` are verbose (stage log with elapsed time, live tsci output, summary);
+add `--quiet` for the short output.
+
 1. Write/modify `boards/<name>/index.circuit.tsx`. Use the **tscircuit skill**
    (`.claude/skills/tscircuit/`, elements in `elements/*.md`) for syntax; don't
    invent props. For details beyond it: `hatch run pcb docs` downloads the full
@@ -65,12 +68,22 @@ Rules of the pipeline (details and timings: `docs/TOOLING.md`):
    `fixes.py`.
 5. Repeat until `check` exits 0 (errors = 0). Then `hatch run pcb fab <name>`:
    gerbers/drill zip, BOM and CPL in JLCPCB's format (BOM with LCSC + MPN), schematic PDF,
-   top/bottom 3D renders, all in `out/<name>/fab/` (after check, look at `.work/preview/board.png`).
+   top/bottom 3D renders, a bring-up sheet (`<name>-bringup.md`: rails, expected voltages, test points,
+   power-on checklist) and, for a board with an MCU, the firmware pin header `<name>-pins.h`, all in
+   `out/<name>/fab/` (after check, look at `.work/preview/board.png`; `hatch run pcb bringup <name>` makes
+   just the last two).
    Never hand over fab files of a board whose `check` fails.
 
 Silkscreen: every connector's pins labelled (`showSilkscreenPinLabels` or a `<silkscreentext>` per pin; `check` warns
 about connectors without text next to them), LEDs / switches / test points with their function, the board with a
 title and revision.
+
+Test points by default: every supply rail and GND gets a `<testpoint name="TP1" footprintVariant="pad"
+padShape="circle" padDiameter="1mm" />` (wired with `<trace from=".TP1 > .pin1" to="net.VCC" />`, a
+`<silkscreentext>` with the rail name beside it), plus the key debug signals (reset, clocks, UART/SWD, enables).
+A connector pin on the net also counts. `check` warns about a rail/GND without one; configure in `vibepcb.toml`
+(`[testpoints] required / ignore / severity`, `src/vibepcb/config.py`). Test points are kept out of BOM and CPL by
+the `exclude_testpoints_from_bom` fix. Use `padDiameter="1mm"` (other sizes need a 3D model from the network).
 
 Layout quality bar, enforced by `check` (not by eye): a pour on every copper layer
 (GND or a supply plane; `check` fails a layer without one), GND connects through the pours

@@ -33,3 +33,4 @@ _autosave-*
 *.swp
 *~
 .DS_Store
+.claude/worktrees/
