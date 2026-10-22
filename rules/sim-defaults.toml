@@ -1,0 +1,23 @@
+# House defaults for `check`'s simulation and netlist verification (src/vibepcb/sim.py, netcheck.py).
+# Looked up in <project>/rules/ first (own policy), then in the tool's rules/. Not a rule profile.
+
+# Pass ranges for measures of that name (or ending in "_<name>") when a deck gives none with a datasheet
+# source: [min, max], "-" = open end. Reported with the source "house".
+[limits]
+overshoot_pct = [0, 5]        # output voltage overshoot at startup / load release, % of nominal
+ripple_pct = [0, 2]           # output ripple, % of nominal
+undershoot_pct = [0, 10]      # droop after a load step, % of nominal
+inrush_a = ["-", 2.0]         # input inrush peak, A (a USB port gives 0.5 A steady, 2 A is generous)
+phase_margin_deg = [45, "-"]  # loop stability
+settle_ms = ["-", 10.0]       # time until the output is within tolerance
+
+# Simulations every part of a circuit type must have: a deck with `* covers: <kind> <refs>` that runs and
+# passes. Regulators are detected from pin names (VIN + VOUT/FB/SW) and part names (netcheck.find_regulators).
+[required.regulator]
+decks = ["powerup"]
+
+# Netlist check parameters
+[netlist]
+cap_derating = 0.8            # a capacitor sees at most this fraction of its voltage rating
+vref_min = 0.4                # a feedback divider implies a reference voltage inside this range (V) ...
+vref_max = 1.3                # ... unless intent.toml gives the regulator's vref

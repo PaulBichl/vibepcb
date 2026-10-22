@@ -52,7 +52,7 @@ corrections for systematic export quirks, plus track cleanup and a few hard rule
 | Node.js + npm | not required on the system: `hatch run setup` installs Node LTS into the hatch env via `nodeenv` |
 | tscircuit, bun | npm packages from `package.json` (`tscircuit`, `bun`, `@types/react`) |
 | KiCad >= 9 (`kicad-cli`) | system install (`sudo pacman -S kicad`), or set `$KICAD_CLI`. Needed for `check` and `fab` only |
-| ngspice | optional, only for `boards/<name>/sim/*.cir` decks (`ngspice -b <deck>`) |
+| ngspice | optional, `check` runs `boards/<name>/sim/*.cir` decks with it (`ngspice -b`); without it the decks are reported as not run |
 | rsvg-convert | optional, makes the agent's PNG previews in `out/<name>/.work/preview/` from the SVGs |
 
 Setup sequence:
@@ -84,12 +84,12 @@ docstring of `cli.py` doubles as `--help` text.
 
 | Command | Does | Writes | Exit code |
 |---------|------|--------|-----------|
-| `new <board>` | writes a starter board (a 30x20 mm board with R1, C1 and a trace) to `boards/<board>/index.circuit.tsx`; refuses if the file exists | `boards/<board>/` | 1 if it exists |
+| `new <board>` | writes a starter board (a 30x20 mm board with R1, C1 and a trace) to `boards/<board>/index.circuit.tsx` plus an empty `intent.toml`; refuses if the file exists | `boards/<board>/` | 1 if it exists |
 | `build <board> [--fast]` | placement gate: `tsci build --routing-disabled`, stops on placement/outside-board/overlap/clearance errors (about 1 min on a 238-part board); then ONE routed `tsci export -f circuit-json` (stops on `*_error` elements), and `kicad_zip`, netlist, PCB SVG are converted from that JSON; PNG via `rsvg-convert`. tscircuit always evaluates a copy in `out/<board>/.work/src/` with `schematicDisabled` (`tscircuit.prepared_source`: its schematic layout does not scale, `fix` generates the schematic); `--fast` also sets `autorouterEffortLevel="2x"` in that copy | `out/<board>/.work/raw/` | 1 on errors or unknown board |
 | `fix <board>` | removes and re-creates `out/<board>/kicad/` from the raw zip (the footprint library `lib/footprints/tscircuit_builtin.pretty` is written from the footprints embedded in the board, `kicad.write_footprint_library`), renames the files to the board name, replaces the schematic with `schgen.write` (from the circuit JSON + the TSX sections), then runs `fixes.apply_all` and prints one line per change; exports `schematic.svg` (+ `.work/preview/schematic.png`, 4000 px) and refreshes `README.md` | `out/<board>/kicad/` | 0 (exceptions reported as `error:`, exit 1) |
-| `check <board>` | `kicad-cli sch erc`, `kicad-cli pcb drc` (refills zones, saves the board), post-fill loop, sharp-corner and unlabelled-connector checks, split crossings (warning: a track crossing the edge of a region pour on the layer next to it); prints the summary, writes it to `check.txt`, exports `board.svg` | `out/<board>/check.txt`, `board.svg`, `.work/reports/`, modifies the KiCad PCB | 1 if ERC errors, DRC errors or sharp corners |
-| `all <board>` | `build`, then `fix`, then `check`, short-circuiting on a non-zero result | all of the above | first non-zero, else `check`'s result |
-| `fab <board>` | part availability check once (parts engine, placement-only evaluation), then `kicad.export_fab` on `out/<board>/kicad/<board>.kicad_pcb`: one file per purpose (gerbers zip, JLCPCB BOM with MPN, CPL, schematic PDF, top/bottom renders); intermediates in `.work/fab/` | `out/<board>/fab/` | 0 |
+| `check <board> [--strict]` | `kicad-cli sch erc`, `kicad-cli pcb drc` (refills zones, saves the board), post-fill loop, sharp-corner and unlabelled-connector checks, split crossings (warning: a track crossing the edge of a region pour on the layer next to it); prints the summary, writes it to `check.txt`, exports `board.svg`; then circuit verification (section 8.3: sims, required sims, netlist checks, `findings.toml`); `--strict` makes its issues errors | `out/<board>/check.txt`, `board.svg`, `.work/reports/`, modifies the KiCad PCB | 1 if ERC errors, DRC errors or sharp corners (strict: or a verification issue) |
+| `all <board> [--strict]` | `build`, then `fix`, then `check`, short-circuiting on a non-zero result | all of the above | first non-zero, else `check`'s result |
+| `fab <board>` | refuses unless the last `check --strict` passed on this board (`check.json` `strict_passed` + board hash); part availability check once (parts engine, placement-only evaluation), then `kicad.export_fab` on `out/<board>/kicad/<board>.kicad_pcb`: one file per purpose (gerbers zip, JLCPCB BOM with MPN, CPL, schematic PDF, top/bottom renders); intermediates in `.work/fab/` | `out/<board>/fab/` | 0 |
 | `publish <board>` | only if the last `check` passed on the current board (`.work/reports/check.json`, board hash): KiCad project without 3D models, BOM, schematic PDF, renders (`kicad.export_docs`), layout PDF (a page per copper layer) + front/back SVGs (`kicad.export_layout`) | `boards/<board>/hardware/` (committed) | 0 |
 | `route <board> [--only NET] [--dry-run] [--drc]` | manual routing quick loop: `routes.toml` onto `.work/unrouted.kicad_pcb` (written by `fix`), no clean-up; `--drc` runs KiCad's DRC on the result | `out/<board>/kicad/<board>.kicad_pcb` | 1 if a connection failed |
 | `inspect <board> [--area x0 y0 x1 y1] [--net PAT] [--layer L] [--scale PX/MM] [--source unrouted]` | PNG of the board with a mm grid (KiCad coordinates), pad labels, one net pattern highlighted; text list of the pads in the area | `.work/preview/inspect.png` | 0 |
@@ -415,6 +415,32 @@ Why post-fill is separate from `FIXES`: it needs KiCad's zone fill, which only e
 `FIXES` runs on fresh tscircuit output only. The KiCad 10 save writes `(net "NAME")` without
 ids, which the registered fixes do not expect.
 
+### 8.3 Circuit verification (`verify.py`, called at the end of `check`)
+
+Answers "does the circuit do what it should", not "is the layout clean". Policy file: `rules/sim-defaults.toml`
+(house limits, required sims per circuit type, netlist parameters; `<project>/rules/` overrides the tool's).
+
+| Module | Content |
+|--------|---------|
+| `intent.py` | `boards/<board>/intent.toml`: the agent's assumption list (supply, rails with voltage / tolerance / current / regulator / vref). Format in the module docstring. Source of net voltages and sim ranges |
+| `sim.py` | decks `boards/<board>/sim/*.cir`: `* range: <measure> <min> <max> source=<text>` and `* covers: <kind> <refs>` comment lines, `.measure` lines; value parsing (SPICE suffixes), deck-vs-board value comparison, `ngspice -b` run, range resolution |
+| `netcheck.py` | deterministic checks on the circuit JSON: cap rating vs net voltage, one I2C pull-up, power-pin decoupling, feedback divider vs vref, floating EN/RESET/BOOT; regulator detection |
+| `findings.py` | `boards/<board>/findings.toml` read / merge / write |
+| `verify.py` | glue: runs the above, builds the summary lines, counts issues |
+
+Pass ranges come from (in order) a datasheet-sourced `* range:`, the intent (`vmax_<rail>`, `vmin_<rail>`,
+`imax_<rail>`), the house `[limits]` (measure name or `*_<name>`); a `* range:` without `source=` and a measure
+without any range are "assumed". A deck passive named like a board reference (`R5`) must equal the board's
+value, one that is not on the board is stale; a stale deck is not run and covers nothing. A regulator
+(pins VIN + VOUT/FB/SW, or a known part family) needs a passing deck with `* covers: powerup <ref>`.
+`ngspice` missing: one `sim_no_ngspice` line, no crash.
+
+Modes: **vibe** (default) prints every issue as `[warning]` (failed / stale / error sims, `sim_assumed`,
+`sim_missing`, open findings) and the check still passes; **strict** (`check --strict`) prints `[error]` and
+fails. `fab` needs the last check to have been strict-clean. Findings: ids `<rule>:<what>`; `check` keeps the
+status / reason of ids it still finds and drops the others; entries with another `source` (the reviewer
+agent's, `docs/REVIEW.md`) are never touched; `accepted` needs a reason.
+
 ---
 
 ## 9. Fab outputs (`kicad.export_fab`)
@@ -475,7 +501,7 @@ fails" (CLAUDE.md).
 | bun | tsci's shebang is `env bun` | npm devDependency | comes from `node_modules/.bin` |
 | `kicad-cli` (KiCad >= 9) | `kicad.py` | `$KICAD_CLI`, else PATH | ERC, DRC, refill, fab exports, renders |
 | `rsvg-convert` | `cli.cmd_build`, `cli.cmd_fix`, `cli.cmd_check` | PATH, optional | makes the PNG previews in `.work/preview/`; skipped silently if absent |
-| ngspice | `boards/<name>/sim/*.cir` | PATH | run manually: `ngspice -b <deck>` |
+| ngspice | `sim.py` (`check`) | PATH | `ngspice -b <deck>` per deck; missing = warning (error in strict mode), never a crash |
 | git | `update-skill`, `clean` | PATH | `git clean -ffX` deletes ignored files in `.tmp` and `out` |
 | network | `docs` (llms.txt), `update-skill` (GitHub clone), `fix` (LCSC symbols, first time per part) | - | `fix` works offline: uncached parts get boxes |
 

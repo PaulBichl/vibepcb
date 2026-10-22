@@ -43,6 +43,7 @@ from vibepcb import (
     fanout,
     fixes,
     inspect,
+    intent,
     kicad,
     padtable,
     paths,
@@ -52,6 +53,7 @@ from vibepcb import (
     schgen,
     sexpr,
     tscircuit,
+    verify,
 )
 
 if TYPE_CHECKING:
@@ -85,6 +87,7 @@ def cmd_new(board: str) -> int:
         return 1
     source.parent.mkdir(parents=True)
     source.write_text(TEMPLATE, encoding="utf-8")
+    intent.intent_path(board).write_text(intent.TEMPLATE, encoding="utf-8")
     print(f"created {source.relative_to(paths.ROOT)}")
     return 0
 
@@ -357,7 +360,7 @@ def _pad_spots(result: kicad.CheckResult) -> set[tuple[str, tuple[float, float]]
     return {(net, (round(x, 3), round(y, 3))) for net, (x, y) in result.unconnected_pads()}
 
 
-def cmd_check(board: str) -> int:
+def cmd_check(board: str, *, strict: bool = False) -> int:
     project, reports = paths.kicad_dir(board), paths.reports_dir(board)
     pcb = project / f"{board}.kicad_pcb"
     with ThreadPoolExecutor(max_workers=2) as pool, _phase("ERC + DRC"):  # independent kicad-cli processes
@@ -438,9 +441,14 @@ def cmd_check(board: str) -> int:
     summary += [f"  [warning] split_crossing: {w}" for w in splits[:40]]
     summary.append(f"Pours: {len(unpoured)} copper layer(s) without a plane")
     summary += [f"  [error] no_pour: {layer} - add a <copperpour> (GND or a supply net) on it" for layer in unpoured]
-    passed = not (erc.errors or drc.errors or corners or unpoured)
-    _write_check_status(board, pcb, passed)
-    verdict = "PASSED" if passed else f"FAILED ({erc.errors + drc.errors + len(corners) + len(unpoured)} error(s))"
+    report = verify.run(board, strict=strict)  # simulations, required sims, netlist checks, findings.toml
+    summary += report.lines
+    errors = erc.errors + drc.errors + len(corners) + len(unpoured) + (report.issues if strict else 0)
+    passed = not errors
+    _write_check_status(board, pcb, passed, strict_passed=passed and not report.issues)
+    verdict = "PASSED" if passed else f"FAILED ({errors} error(s))"
+    if passed and report.issues:
+        verdict += f" with {report.issues} verification warning(s) (`check --strict` fails on them; `fab` needs it)"
     summary.append(f"check: {verdict}")
     print("\n".join(summary))
     (paths.board_out(board) / "check.txt").write_text("\n".join(summary) + "\n", encoding="utf-8")
@@ -482,30 +490,35 @@ def _board_hash(pcb: Path) -> str:
     return hashlib.sha256(pcb.read_bytes()).hexdigest()
 
 
-def _write_check_status(board: str, pcb: Path, passed: bool) -> None:
-    """``reports/check.json``: the verdict of the last ``check`` and the board it was for."""
-    status = {"passed": passed, "board_sha256": _board_hash(pcb)}
+def _write_check_status(board: str, pcb: Path, passed: bool, *, strict_passed: bool = False) -> None:
+    """``reports/check.json``: the verdict of the last ``check`` (``strict_passed``: no verification issue
+    either, what ``fab`` needs) and the board it was for."""
+    status = {"passed": passed, "strict_passed": strict_passed, "board_sha256": _board_hash(pcb)}
     (paths.reports_dir(board) / "check.json").write_text(json.dumps(status, indent=2), encoding="utf-8")
 
 
-def _check_passed(board: str, pcb: Path) -> bool:
-    """Whether the last ``check`` passed on the board as it is now."""
+def _check_passed(board: str, pcb: Path, *, strict: bool = False) -> bool:
+    """Whether the last ``check`` passed (``strict``: in strict mode) on the board as it is now."""
     path = paths.reports_dir(board) / "check.json"
     try:
         status = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return False
-    return bool(status.get("passed")) and status.get("board_sha256") == _board_hash(pcb)
+    return bool(status.get("strict_passed" if strict else "passed")) and status.get("board_sha256") == _board_hash(pcb)
 
 
 def cmd_fab(board: str) -> int:
+    pcb = paths.kicad_dir(board) / f"{board}.kicad_pcb"
+    if not _check_passed(board, pcb, strict=True):
+        print(f"error: `pcb check {board} --strict` has not passed on this board - fab files need a strict pass",
+              file=sys.stderr)  # fmt: skip
+        return 1
     # build/export run with the parts engine off (no network lookups); do the availability check once, here
     source = paths.board_source(board)
     if source.exists():
         print("checking part availability (tscircuit parts engine) ...")
         warnings = tscircuit.availability_warnings(tscircuit.prepared_source(source, paths.work_dir(board) / "src"))
         print("\n".join(f"  {w}" for w in warnings) if warnings else "  all parts available")
-    pcb = paths.kicad_dir(board) / f"{board}.kicad_pcb"
     for f in kicad.export_fab(pcb, paths.board_out(board) / "fab", paths.work_dir(board) / "fab"):
         print(f"  {f.relative_to(paths.ROOT)}")
     _write_index(board)
@@ -557,6 +570,10 @@ def main(argv: list[str] | None = None) -> int:
     for name in ("new", "build", "fix", "route", "inspect", "check", "all", "fab", "publish"):
         command_parser = sub.add_parser(name)
         command_parser.add_argument("board")
+        if name in ("check", "all"):
+            command_parser.add_argument(
+                "--strict", action="store_true", help="failed sims, assumed ranges and open findings fail the check"
+            )
         if name in ("build", "all"):
             command_parser.add_argument("--fast", action="store_true", help="router effort 2x (quick experiments)")
         if name == "inspect":
@@ -606,7 +623,11 @@ def main(argv: list[str] | None = None) -> int:
             case "place-score":
                 return cmd_place_score(args.boards, args.source)
             case "all":
-                return cmd_build(args.board, fast=args.fast) or cmd_fix(args.board) or cmd_check(args.board)
+                return (
+                    cmd_build(args.board, fast=args.fast)
+                    or cmd_fix(args.board)
+                    or cmd_check(args.board, strict=args.strict)
+                )
             case command:
                 if command == "build":
                     return cmd_build(args.board, fast=args.fast)
@@ -614,7 +635,9 @@ def main(argv: list[str] | None = None) -> int:
                     return cmd_inspect(args.board, args.area, args.net, args.layer, args.scale, args.source)
                 if command == "route":
                     return cmd_route(args.board, only=args.only, dry_run=args.dry_run, drc=args.drc)
-                handler = {"new": cmd_new, "fix": cmd_fix, "check": cmd_check, "fab": cmd_fab, "publish": cmd_publish}
+                if command == "check":
+                    return cmd_check(args.board, strict=args.strict)
+                handler = {"new": cmd_new, "fix": cmd_fix, "fab": cmd_fab, "publish": cmd_publish}
                 return handler[command](args.board)
     except (
         tscircuit.TscircuitError,
