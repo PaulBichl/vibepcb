@@ -1,4 +1,6 @@
-# CLAUDE.md
+# AGENTS.md
+
+Instructions for any coding agent (Claude Code, Copilot, Codex, ...). `CLAUDE.md` includes this file.
 
 VibePCB: design PCBs with an LLM. The circuit is written in **tscircuit** (React/TSX),
 exported to **KiCad**, then post-processed (scripted fixes + DRC/ERC) so the result
@@ -44,8 +46,15 @@ Rules of the pipeline (details and timings: `docs/TOOLING.md`):
 - `build --fast` / `all --fast`: router effort 2x on a temp copy, for experiments only, never final runs.
 - `fix` has a KiCad-verified safety net: nets KiCad finds unconnected after the track clean-up are rolled back.
 - Exports run with `--disable-parts-engine`; `pcb fab` checks part availability once.
-- `node_modules/tscircuit` may carry local patches (see the VibePCB-smu commit notes); `npm install` can drop them.
+- `node_modules/tscircuit` carries local patches (`patches/tscircuit.json`, applied by `scripts/patch-tscircuit.mjs` as npm
+  `postinstall`, so `npm install` keeps them; `hatch run pcb doctor` verifies them).
 - **All fixes are listed in `docs/TOOLING.md` section 5.2** (name | what | why) - update it with any fix you add.
+
+## Long builds: run them in the background
+
+A `build` / `all` of a big board takes 10+ minutes and outlasts the synchronous terminal of most agents. Start it
+detached (the tool's background mode, or `nohup ... > build.log 2>&1 &`), then poll the log / wait for the exit; do
+not re-run it while it is running (each run re-places and re-routes). `--fast` is for experiments only.
 
 ## How to work on a board
 
@@ -165,8 +174,12 @@ test in `tests/test_fixes.py` against the fixtures in `tests/data/`.
 
 - `hatch run setup` installs Node.js *into the hatch env* (nodeenv) and runs
   `npm install` (tscircuit + bun as npm packages). No system node/bun needed.
-- KiCad (>= 9, provides `kicad-cli`) is a system install: `sudo pacman -S kicad`.
-  Override the binary with `$KICAD_CLI`. Without it, `check`/`fab` fail; build/fix work.
+- KiCad 9 or 10 (provides `kicad-cli`) is a system install: `sudo pacman -S kicad` (Windows: winget/installer, macOS:
+  brew). Fixes were tuned on KiCad 10; 9 is supported, other versions get a warning at startup. Override the binary
+  with `$KICAD_CLI`. Without it `check`/`fab` fail; `build` works and `fix` runs with a loud warning that its
+  KiCad connectivity safety net is skipped.
+- `hatch run pcb doctor` checks the whole setup (node, bun, tsci, patches, KiCad + version, symbol library,
+  rsvg-convert, ngspice, network) and says what to install.
 
 ## Commands
 
@@ -177,6 +190,7 @@ test in `tests/test_fixes.py` against the fixtures in `tests/data/`.
 | `hatch run pcb publish <name>` | review set for GitHub in `boards/<name>/hardware/` (needs a passing `check`; no fab files) |
 | `hatch run pcb rules <name>` | Merged design / manufacturing rule profiles of a board, each value's source |
 | `hatch run pcb list` | List boards |
+| `hatch run pcb doctor` | Check the setup (tools, KiCad version, patches, network); exit 1 on FAIL |
 | `hatch run tsci <args>` | tscircuit CLI |
 | `hatch run test` / `style` / `type` | pytest / ruff / mypy |
 | `hatch run update-skill` | Re-vendor the tscircuit skill |

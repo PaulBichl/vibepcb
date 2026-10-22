@@ -285,7 +285,7 @@ Accept: la-bga54's hand-made `SDRAM_PINS` pairing reproduced (or beaten on cross
 
 ## Conventions (same as the rest of the repo)
 
-- Python conventions from `CLAUDE.md` (future annotations, `msg` before `raise`, library code
+- Python conventions from `AGENTS.md` (future annotations, `msg` before `raise`, library code
   raises, only `cli.py` prints). Edit KiCad files only through `vibepcb.sexpr`.
 - Deterministic output (content-derived UUIDs; sorted iteration).
 - Every new fix / pipeline step: a row in `docs/TOOLING.md` section 5.2, tests in `tests/`.

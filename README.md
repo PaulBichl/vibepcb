@@ -74,7 +74,7 @@ sudo pacman -S kicad       # or your distro's KiCad >= 9 package
 ```
 
 Then open the repo in the agent and describe the board: what it should do, power, interfaces,
-size, fab house. The agent follows [CLAUDE.md](CLAUDE.md) and does the rest, and hands over the
+size, fab house. The agent follows [AGENTS.md](AGENTS.md) and does the rest, and hands over the
 KiCad project and fab files once the checks pass. `pcb publish` puts the review set (schematic,
 layout, renders, BOM, KiCad project; no fab files) into the board's folder for sharing.
 
@@ -98,7 +98,7 @@ Each board's output is in `out/<board>/`: its `README.md` says what to open (the
 ## For developers
 
 The agent-facing reference (commands, pipeline, every fix, timings, gotchas) is in
-[docs/TOOLING.md](docs/TOOLING.md); the working rules for the agent are in [CLAUDE.md](CLAUDE.md).
+[docs/TOOLING.md](docs/TOOLING.md); the working rules for the agent are in [AGENTS.md](AGENTS.md).
 
 ```bash
 hatch run test     # pytest

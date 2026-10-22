@@ -9,7 +9,7 @@
   impedance profiles for `stackup.py`, the build deriving tscircuit's board props from the profile,
   `fab` stamping the profile names into the fab notes, `pcb new` asking for profiles.
 - **Route cache replay**: tscircuit saves route paths only for boards without custom-symbol
-  imports (see CLAUDE.md); wire `<autoroutingphase pcbTracePaths>` so unchanged placements
+  imports (see AGENTS.md); wire `<autoroutingphase pcbTracePaths>` so unchanged placements
   skip the routing pass.
 - **`check` post-fill speed**: not profiled yet (minutes on a 238-part board).
 
