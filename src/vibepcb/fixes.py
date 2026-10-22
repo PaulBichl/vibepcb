@@ -1088,6 +1088,47 @@ def add_part_numbers(project: KicadProject) -> list[str]:
     return changes
 
 
+def mark_dnp_parts(project: KicadProject) -> list[str]:
+    """Mark tscircuit's ``doNotPlace`` parts DNP on the symbol and the footprint.
+
+    Neither the KiCad export nor ``schgen`` carries the flag, so unpopulated pads (ISP headers,
+    antenna / touch pads) landed in the fab BOM and CPL. ``fab`` exports both with ``--exclude-dnp``
+    (BOM from the symbols, CPL from the footprints), so both get it.
+    """
+    circuit = _raw_circuit(project)
+    if not circuit.exists():
+        return []
+    elements = json.loads(circuit.read_text(encoding="utf-8"))
+    names = {e["source_component_id"]: str(e.get("name")) for e in elements if e.get("type") == "source_component"}
+    dnp = {
+        names[e["source_component_id"]]
+        for e in elements
+        if e.get("type") == "pcb_component" and e.get("do_not_place") and e.get("source_component_id") in names
+    }
+    changes = []
+    for symbol in sexpr.children(project.sch, "symbol"):
+        ref = sexpr.property_value(symbol, "Reference") or ""
+        flag = sexpr.child(symbol, "dnp")
+        if ref in dnp and (flag is None or flag[1] != Sym("yes")):
+            if flag is None:
+                symbol.append([Sym("dnp"), Sym("yes")])
+            else:
+                flag[1] = Sym("yes")
+            changes.append(f"{ref}: symbol DNP")
+    for fp in sexpr.children(project.pcb, "footprint"):
+        ref = sexpr.property_value(fp, "Reference") or ""
+        attr = sexpr.child(fp, "attr")
+        if ref not in dnp or (attr is not None and Sym("dnp") in attr):
+            continue
+        if attr is None:
+            props = [i for i, item in enumerate(fp) if sexpr.head(item) == "property"]
+            fp.insert(props[-1] + 1 if props else len(fp), [Sym("attr"), Sym("dnp")])
+        else:
+            attr.append(Sym("dnp"))
+        changes.append(f"{ref}: footprint DNP")
+    return changes
+
+
 FOOTPRINT_INTERNAL_HOLE_CLEARANCE_MM = 0.15  # still comfortably within common 2-layer fab limits
 
 
@@ -3945,6 +3986,7 @@ FIXES: dict[str, Fix] = {
     "schematic_power_symbols": schematic_power_symbols,
     "drop_loose_power_symbols": drop_loose_power_symbols,
     "add_part_numbers": add_part_numbers,
+    "mark_dnp_parts": mark_dnp_parts,
     "link_footprint_library": link_footprint_library,
     "footprint_internal_clearance_rule": footprint_internal_clearance_rule,
     "zone_thermal_reliefs": zone_thermal_reliefs,

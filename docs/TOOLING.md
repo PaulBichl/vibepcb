@@ -203,6 +203,7 @@ connection rules still join the net's pads (checked net by net, else polyline by
 | 21 | `schematic_power_symbols` | GND/supply rail parts become power symbols, plus one PWR_FLAG per rail | Rails are exported as ordinary parts (own net each, in BOM, on board) |
 | 22 | `drop_loose_power_symbols` | Removes power symbols whose pin touches no wire, label or pin | tscircuit's schematic can leave a rail symbol standing alone; ERC flags its hidden pin |
 | 23 | `add_part_numbers` | Copies MPN / LCSC from the circuit JSON into hidden fields | Export drops them, so the BOM could not say what to buy |
+| 23b | `mark_dnp_parts` | `doNotPlace` parts (circuit JSON `pcb_component.do_not_place`) get `(dnp yes)` on the symbol and `dnp` in the footprint's `attr`; `fab` exports BOM and CPL with `--exclude-dnp` | Neither the export nor `schgen` carries the flag: unpopulated pads (ISP header, antenna / touch pads) landed in the BOM / CPL without LCSC numbers |
 | 24 | `link_footprint_library` | Registers the footprint library under the `tscircuit` nickname | Footprints are `tscircuit:<name>`, library is `tscircuit_builtin` |
 | 25 | `footprint_internal_clearance_rule` | Custom DRC rule: hole clearance inside one footprint follows its land pattern | Manufacturer land patterns (USB-C) sit under the board-wide hole clearance |
 | 26 | `zone_thermal_reliefs` | Pad-to-pour connections via narrow thermal spokes instead of solid | Solid connect on 0402s causes tombstoning and hard rework |

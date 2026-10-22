@@ -231,6 +231,25 @@ def test_add_part_numbers(project: fixes.KicadProject) -> None:
     assert fixes.add_part_numbers(project) == []
 
 
+def test_mark_dnp_parts(project: fixes.KicadProject) -> None:
+    assert fixes.mark_dnp_parts(project) == []  # no circuit JSON next to the project
+    raw = project.directory.parent / "raw"
+    raw.mkdir()
+    circuit = [
+        {"type": "source_component", "source_component_id": "s1", "name": "D1"},
+        {"type": "source_component", "source_component_id": "s2", "name": "R1"},
+        {"type": "pcb_component", "source_component_id": "s1", "do_not_place": True},
+        {"type": "pcb_component", "source_component_id": "s2", "do_not_place": False},
+    ]  # fmt: skip
+    (raw / "board.circuit.json").write_text(json.dumps(circuit), encoding="utf-8")
+    assert fixes.mark_dnp_parts(project) == ["D1: symbol DNP", "D1: footprint DNP"]
+    d1 = next(s for s in sexpr.children(project.sch, "symbol") if sexpr.property_value(s, "Reference") == "D1")
+    assert sexpr.child(d1, "dnp") == [Sym("dnp"), Sym("yes")]
+    fp = next(f for f in sexpr.children(project.pcb, "footprint") if sexpr.property_value(f, "Reference") == "D1")
+    assert sexpr.child(fp, "attr") == [Sym("attr"), Sym("dnp")]
+    assert fixes.mark_dnp_parts(project) == []
+
+
 ZONE = """(zone (net 2) (net_name "GND") (layer "F.Cu") (hatch edge 0.5)
   (connect_pads yes (clearance 0.15)) (min_thickness 0.25)
   (fill yes (thermal_gap 0.5) (thermal_bridge_width 0.5))
