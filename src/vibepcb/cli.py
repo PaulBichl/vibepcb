@@ -1,15 +1,17 @@
 """``vibepcb`` command line - the build/fix/check loop for LLM-designed boards.
 
 vibepcb new <board>     scaffold boards/<board>/index.circuit.tsx
-vibepcb build <board>   [--fast] tscircuit -> out/<board>/raw (KiCad zip, netlist, SVG/PNG previews)
+vibepcb build <board>   [--fast] [--quiet] tscircuit -> out/<board>/raw (KiCad zip, netlist, SVG/PNG previews)
 vibepcb fix <board>     raw -> out/<board>/kicad, apply post-processing fixes
 vibepcb route <board>   [--only NET] [--dry-run] routes.toml -> tracks on the KiCad board (seconds, no rebuild)
 vibepcb inspect <board> [--area x0 y0 x1 y1] [--net PAT] [--layer L] [--scale PX/MM] [--source unrouted]  PNG of the board
 vibepcb ratsnest <board> [--source unrouted]  unrouted links (longest first), crossings, worst 10 mm cells
 vibepcb place-score <board>..  total ratsnest length and crossings per board (compare `clone` variants)
 vibepcb check <board>   KiCad DRC + ERC -> out/<board>/reports (after refill: drop tracks the GND pour provides)
-vibepcb all <board>     [--fast] build + fix + check
-vibepcb fab <board>     part availability check, gerbers/drill zip, BOM, pick-and-place, schematic PDF, 3D renders
+vibepcb all <board>     [--fast] [--quiet] build + fix + check
+vibepcb fab <board>     part availability check, gerbers/drill zip, BOM, pick-and-place, schematic PDF, 3D renders,
+                        bring-up sheet + firmware pin header
+vibepcb bringup <board> out/<board>/fab/<board>-bringup.md (rails, test points, power-on checklist) + <board>-pins.h
 vibepcb publish <board> boards/<board>/hardware/: schematic + layout PDF/PNG, renders, BOM, KiCad project (no fab files)
 vibepcb padtable <board> REF..  boards/<board>/pads.ts: pad positions from the placement build (pin plans)
 vibepcb rules <board>   the merged design / manufacturing rule profiles ([rules] in vibepcb.toml), each value with its source
@@ -39,6 +41,7 @@ from typing import TYPE_CHECKING
 
 from vibepcb import board as board_model
 from vibepcb import (
+    bringup,
     config,
     fanout,
     fixes,
@@ -46,11 +49,13 @@ from vibepcb import (
     kicad,
     padtable,
     paths,
+    progress,
     ratsnest,
     routes,
     rules,
     schgen,
     sexpr,
+    testpoints,
     tscircuit,
 )
 
@@ -61,11 +66,36 @@ SCHEMATIC_PNG_WIDTH = 4000  # px: an A0 sheet stays readable when zoomed into a 
 TSCIRCUIT_LLM_DOCS = "https://docs.tscircuit.com/llms.txt"
 
 TEMPLATE = """\
+// Scaffold: 5 V header -> current-limiting resistor -> LED, GND poured on both layers.
+// Every rail and GND gets a test point with a silkscreen label (`check` warns about a rail without one).
 export default () => (
-  <board width="30mm" height="20mm">
-    <resistor name="R1" resistance="1k" footprint="0603" pcbX={-3} pcbY={0} />
-    <capacitor name="C1" capacitance="100nF" footprint="0603" pcbX={3} pcbY={0} />
-    <trace from=".R1 > .pin2" to=".C1 > .pin1" />
+  <board width="26mm" height="18mm">
+    {/* ===== supply ===== */}
+    <pinheader name="J1" pinCount={2} pitch="2.54mm" pinLabels={["VCC", "GND"]} showSilkscreenPinLabels
+      pcbX={-9} pcbY={0} />
+
+    {/* ===== indicator ===== */}
+    <resistor name="R1" resistance="330" footprint="0603" pcbX={0} pcbY={2.5} />
+    <led name="D1" color="red" footprint="0603" pcbX={0} pcbY={-2.5} />
+    <silkscreentext text="PWR" pcbX={4} pcbY={-2.5} fontSize="0.8mm" />
+
+    {/* ===== test points (one per rail; add one for every key debug signal) ===== */}
+    <testpoint name="TP1" footprintVariant="pad" padShape="circle" padDiameter="1mm" pcbX={9} pcbY={6} />
+    <silkscreentext text="VCC" pcbX={9} pcbY={4.2} fontSize="0.8mm" />
+    <testpoint name="TP2" footprintVariant="pad" padShape="circle" padDiameter="1mm" pcbX={9} pcbY={-6} />
+    <silkscreentext text="GND" pcbX={9} pcbY={-4.2} fontSize="0.8mm" />
+
+    <silkscreentext text="LED demo rev A" pcbX={0} pcbY={7.6} fontSize="0.9mm" />
+
+    <trace name="J1_VCC" from=".J1 > .pin1" to="net.VCC" />
+    <trace name="J1_GND" from=".J1 > .pin2" to="net.GND" />
+    <trace name="R1_VCC" from="net.VCC" to=".R1 > .pin1" />
+    <trace name="LED_A" from=".R1 > .pin2" to=".D1 > .anode" />
+    <trace name="LED_K" from=".D1 > .cathode" to="net.GND" />
+    <trace name="TP_VCC" from=".TP1 > .pin1" to="net.VCC" />
+    <trace name="TP_GND" from=".TP2 > .pin1" to="net.GND" />
+    <copperpour connectsTo="net.GND" layer="top" clearance="0.2mm" />
+    <copperpour connectsTo="net.GND" layer="bottom" clearance="0.2mm" />
   </board>
 )
 """
@@ -104,10 +134,9 @@ def cmd_build(board: str, *, fast: bool = False) -> int:
     raw = paths.raw_dir(board)
     circuit = raw / f"{board}.circuit.json"
     # placement gate: a placement-only evaluation takes about a minute and fails before the routing pass
-    print(f"checking the placement of {board} (routing disabled) ...")
-    errors, report = tscircuit.circuit_errors(
-        tscircuit.evaluate_unrouted(source, raw / f"{board}.unrouted.circuit.json"), tscircuit.PLACEMENT_ERRORS
-    )
+    with _phase("placement gate (routing disabled)"):
+        unrouted_json = tscircuit.evaluate_unrouted(source, raw / f"{board}.unrouted.circuit.json")
+    errors, report = tscircuit.circuit_errors(unrouted_json, tscircuit.PLACEMENT_ERRORS)
     if errors:
         print(report)
         print(f"placement errors - fix {board_tsx.relative_to(paths.ROOT)} first", file=sys.stderr)
@@ -127,18 +156,19 @@ def cmd_build(board: str, *, fast: bool = False) -> int:
             print(f"  {p.ref}: {len(p.escapes)} balls escaped ({vias} via dogbones), tscircuit routes to their ends")
         print(f"  escape plan: {fanout_path.relative_to(paths.ROOT)}")
     if config.load(board).get("routing", {}).get("mode") == "manual":  # routes.toml routes, tscircuit only places
-        print(f"building {board} with tscircuit (placement only; routing: routes.toml) ...")
-        tscircuit.evaluate_unrouted(source, circuit)
-        tscircuit.build(circuit, raw, board, JSON_FORMATS)
-        if shutil.which("rsvg-convert"):
-            _png(raw / f"{board}.pcb.svg", paths.preview_dir(board) / "routed.png", 1200)
+        with _phase("tscircuit placement (routing: routes.toml)"):
+            tscircuit.evaluate_unrouted(source, circuit)
+        with _phase("conversions from the circuit JSON"):
+            tscircuit.build(circuit, raw, board, JSON_FORMATS)
+            if shutil.which("rsvg-convert"):
+                _png(raw / f"{board}.pcb.svg", paths.preview_dir(board) / "routed.png", 1200)
         print(
             f"  tscircuit output: {raw.relative_to(paths.ROOT)}/ (internal; `fix` makes the KiCad project and routes it)"
         )
         return 0
     # tscircuit evaluates (places + routes) the board on every call: do it once, export the rest from the JSON
-    print(f"building {board} with tscircuit (placement + routing) ...")
-    tscircuit.export(source, "circuit-json", circuit)
+    with _phase("tscircuit placement + routing (the long step)"):
+        tscircuit.export(source, "circuit-json", circuit)
     for change in tscircuit.repair_trace_nets(circuit):
         print(f"  re-linked route {change}")
     errors, report = tscircuit.routed_errors(circuit)
@@ -146,10 +176,12 @@ def cmd_build(board: str, *, fast: bool = False) -> int:
     if errors:
         print(f"tscircuit found {errors} error(s) - fix {board_tsx.relative_to(paths.ROOT)} first", file=sys.stderr)
         return 1
-    tscircuit.build(circuit, raw, board, JSON_FORMATS)
-    if shutil.which("rsvg-convert"):  # the routed board as tscircuit left it, for an agent to look at
-        _png(raw / f"{board}.pcb.svg", paths.preview_dir(board) / "routed.png", 1200)
+    with _phase("conversions from the circuit JSON"):
+        tscircuit.build(circuit, raw, board, JSON_FORMATS)
+        if shutil.which("rsvg-convert"):  # the routed board as tscircuit left it, for an agent to look at
+            _png(raw / f"{board}.pcb.svg", paths.preview_dir(board) / "routed.png", 1200)
     print(f"  tscircuit output: {raw.relative_to(paths.ROOT)}/ (internal; `fix` makes the KiCad project)")
+    _written(raw)
     return 0
 
 
@@ -158,11 +190,37 @@ def _png(svg: Path, png: Path, width: int) -> None:
     subprocess.run(["rsvg-convert", "-w", str(width), "-b", "white", "-o", str(png), str(svg)], check=True)
 
 
+_STAGES = progress.Stages()
+_OUTPUTS: list[str] = []  # for the closing summary
+
+
+def _written(path: Path) -> None:
+    _OUTPUTS.append(str(path.relative_to(paths.ROOT)))
+
+
+def _set_verbose(*, quiet: bool) -> None:
+    """Verbose is the default: stage starts with elapsed time, tsci's output live, a summary at the end."""
+    global _STAGES  # noqa: PLW0603
+    _STAGES = progress.Stages(None if quiet else print)
+    tscircuit.set_line_handler(None if quiet else lambda line: print(f"      | {line}", flush=True))
+
+
+def _summary() -> None:
+    """The stage durations of this command (verbose runs only); the next command starts a fresh log."""
+    if _STAGES.emit is not None and (lines := _STAGES.summary()):
+        print("stages:")
+        print("\n".join(lines))
+        if _OUTPUTS:
+            print("written:")
+            print("\n".join(f"  {o}" for o in _OUTPUTS))
+
+
 @contextlib.contextmanager
 def _phase(label: str) -> Iterator[None]:
-    """Print how long a pipeline step took (the agent sees where a run spends its minutes)."""
+    """Announce a pipeline step and print how long it took (the agent sees where a run spends its minutes)."""
     started = time.monotonic()
-    yield
+    with _STAGES.stage(label):
+        yield
     print(f"  time: {label} {time.monotonic() - started:.0f} s")
 
 
@@ -212,6 +270,7 @@ def cmd_fix(board: str) -> int:
             _png(svg, paths.preview_dir(board) / "schematic.png", SCHEMATIC_PNG_WIDTH)
         print(f"  schematic: {svg.relative_to(paths.ROOT)}")
     print(f"KiCad project: {(target / f'{board}.kicad_pro').relative_to(paths.ROOT)}")
+    _written(target / f"{board}.kicad_pro")
     _write_index(board)
     return 0
 
@@ -438,12 +497,20 @@ def cmd_check(board: str) -> int:
     summary += [f"  [warning] split_crossing: {w}" for w in splits[:40]]
     summary.append(f"Pours: {len(unpoured)} copper layer(s) without a plane")
     summary += [f"  [error] no_pour: {layer} - add a <copperpour> (GND or a supply net) on it" for layer in unpoured]
-    passed = not (erc.errors or drc.errors or corners or unpoured)
+    tp_lines, tp_severity = testpoints.findings(
+        testpoints.parts(loaded.pcb), loaded.sch, config.load(board).get("testpoints")
+    )
+    summary.append(f"Test points: {len(tp_lines)} rail / net without one")
+    summary += tp_lines
+    tp_errors = len(tp_lines) if tp_severity == "error" else 0
+    passed = not (erc.errors or drc.errors or corners or unpoured or tp_errors)
     _write_check_status(board, pcb, passed)
-    verdict = "PASSED" if passed else f"FAILED ({erc.errors + drc.errors + len(corners) + len(unpoured)} error(s))"
+    errors_total = erc.errors + drc.errors + len(corners) + len(unpoured) + tp_errors
+    verdict = "PASSED" if passed else f"FAILED ({errors_total} error(s))"
     summary.append(f"check: {verdict}")
     print("\n".join(summary))
     (paths.board_out(board) / "check.txt").write_text("\n".join(summary) + "\n", encoding="utf-8")
+    _written(paths.board_out(board) / "check.txt")
     svg = kicad.export_board_svg(pcb, paths.board_out(board) / "board.svg")  # the filled, final board
     if shutil.which("rsvg-convert"):
         _png(svg, paths.preview_dir(board) / "board.png", BOARD_PNG_WIDTH)
@@ -502,12 +569,46 @@ def cmd_fab(board: str) -> int:
     # build/export run with the parts engine off (no network lookups); do the availability check once, here
     source = paths.board_source(board)
     if source.exists():
-        print("checking part availability (tscircuit parts engine) ...")
-        warnings = tscircuit.availability_warnings(tscircuit.prepared_source(source, paths.work_dir(board) / "src"))
+        with _phase("part availability (tscircuit parts engine)"):
+            warnings = tscircuit.availability_warnings(tscircuit.prepared_source(source, paths.work_dir(board) / "src"))
         print("\n".join(f"  {w}" for w in warnings) if warnings else "  all parts available")
     pcb = paths.kicad_dir(board) / f"{board}.kicad_pcb"
-    for f in kicad.export_fab(pcb, paths.board_out(board) / "fab", paths.work_dir(board) / "fab"):
+    with _phase("fab exports (gerbers, BOM, CPL, PDF, renders)"):
+        fab_files = kicad.export_fab(pcb, paths.board_out(board) / "fab", paths.work_dir(board) / "fab")
+    for f in fab_files:
         print(f"  {f.relative_to(paths.ROOT)}")
+        _written(f)
+    for f in _write_bringup(board):
+        print(f"  {f.relative_to(paths.ROOT)}")
+        _written(f)
+    _write_index(board)
+    return 0
+
+
+def _write_bringup(board: str) -> list[Path]:
+    """The bring-up sheet and the firmware pin header into ``out/<board>/fab/``."""
+    project = fixes.KicadProject.load(paths.kicad_dir(board), board)
+    circuit = paths.raw_dir(board) / f"{board}.circuit.json"
+    data = bringup.collect(project, circuit if circuit.exists() else None)
+    fab = paths.board_out(board) / "fab"
+    fab.mkdir(parents=True, exist_ok=True)
+    sheet, header = fab / f"{board}-bringup.md", fab / f"{board}-pins.h"
+    sheet.write_text(bringup.render_sheet(board, data), encoding="utf-8")
+    written = [sheet]
+    if text := bringup.render_header(board, data):
+        header.write_text(text, encoding="utf-8")
+        written.append(header)
+    elif header.exists():
+        header.unlink()
+    return written
+
+
+def cmd_bringup(board: str) -> int:
+    with _phase("bring-up sheet + pin header"):
+        written = _write_bringup(board)
+    for f in written:
+        print(f"  {f.relative_to(paths.ROOT)}")
+        _written(f)
     _write_index(board)
     return 0
 
@@ -554,9 +655,13 @@ def cmd_rules(board: str) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="vibepcb", description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("new", "build", "fix", "route", "inspect", "check", "all", "fab", "publish"):
+    for name in ("new", "build", "fix", "route", "inspect", "check", "all", "fab", "bringup", "publish"):
         command_parser = sub.add_parser(name)
         command_parser.add_argument("board")
+        if name in ("build", "fix", "check", "all", "fab"):
+            command_parser.add_argument(
+                "--quiet", action="store_true", help="no stage log / live tsci output / summary (the old output)"
+            )
         if name in ("build", "all"):
             command_parser.add_argument("--fast", action="store_true", help="router effort 2x (quick experiments)")
         if name == "inspect":
@@ -587,6 +692,8 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("list")
     sub.add_parser("docs")
     args = parser.parse_args(argv)
+    _OUTPUTS.clear()
+    _set_verbose(quiet=getattr(args, "quiet", False))
 
     try:
         match args.command:
@@ -614,7 +721,14 @@ def main(argv: list[str] | None = None) -> int:
                     return cmd_inspect(args.board, args.area, args.net, args.layer, args.scale, args.source)
                 if command == "route":
                     return cmd_route(args.board, only=args.only, dry_run=args.dry_run, drc=args.drc)
-                handler = {"new": cmd_new, "fix": cmd_fix, "check": cmd_check, "fab": cmd_fab, "publish": cmd_publish}
+                handler = {
+                    "new": cmd_new,
+                    "fix": cmd_fix,
+                    "check": cmd_check,
+                    "fab": cmd_fab,
+                    "bringup": cmd_bringup,
+                    "publish": cmd_publish,
+                }
                 return handler[command](args.board)
     except (
         tscircuit.TscircuitError,
@@ -625,6 +739,8 @@ def main(argv: list[str] | None = None) -> int:
     ) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
+    finally:
+        _summary()
 
 
 if __name__ == "__main__":

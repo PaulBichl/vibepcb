@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from typing import TYPE_CHECKING
 
 from vibepcb import tscircuit
@@ -97,3 +98,17 @@ def test_prune_empty_stops_at_content_and_at_dist(tmp_path: Path) -> None:
     tscircuit._prune_empty(dist / "out" / "keep", dist)
     assert not dist.exists()
     assert tmp_path.exists()
+
+
+def test_run_streams_lines_to_the_handler() -> None:
+    lines: list[str] = []
+    cmd = [sys.executable, "-c", "import sys; print('one'); print('two', file=sys.stderr); sys.exit(3)"]
+    tscircuit.set_line_handler(lines.append)
+    try:
+        result = tscircuit._run(cmd)
+    finally:
+        tscircuit.set_line_handler(None)
+    assert sorted(lines) == ["one", "two"]
+    assert result.returncode == 3
+    assert "one" in result.stdout
+    assert tscircuit._run(cmd).stdout.strip() == "one"  # no handler: captured silently

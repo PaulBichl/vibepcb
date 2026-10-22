@@ -53,6 +53,12 @@ these from the board's config file into the KiCad project (:func:`fixes.apply_bo
     track_width = 0.1              #   all optional: track_width, clearance, via_diameter, via_drill,
     layers = ["bottom"]            #   layers (escape layers of balls that can't leave on top)
 
+    [testpoints]                   # house rule in `check`: every rail and GND needs a test point (vibepcb.testpoints)
+    required = ["power", "gnd", "RESET"]  # "power" / "gnd" = rails found by name + power symbols; others are
+                                   #   net-name patterns (* ?). Default ["power", "gnd"]; [] = rule off
+    ignore = ["VBUS_RAW"]          # nets exempt (patterns)
+    severity = "warning"           # or "error": a missing test point then fails `check`
+
 Net names: a net gets the name of its ``<net>``, else of a named ``<trace name="...">`` on it
 (see ``schgen``), so name the traces a rule should catch.
 """
@@ -62,7 +68,7 @@ from __future__ import annotations
 import tomllib
 from typing import TYPE_CHECKING, Any
 
-from vibepcb import paths, stackup
+from vibepcb import paths, stackup, testpoints
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -121,6 +127,7 @@ def validate(data: dict[str, Any], where: str = CONFIG_NAME) -> None:
         "pour",
         "stackup",
         "rules",
+        "testpoints",
     }
     if unknown := set(data) - known:
         msg = f"{where}: unknown section(s) {sorted(unknown)} (known: {sorted(known)})"
@@ -153,6 +160,10 @@ def validate(data: dict[str, Any], where: str = CONFIG_NAME) -> None:
             msg = f"{where}: netclass {name!r}: {e}"
             raise ConfigError(msg) from e
     _validate_rules(data.get("rules", {}), where)
+    try:
+        testpoints.validate(data.get("testpoints", {}), where)
+    except ValueError as e:
+        raise ConfigError(str(e)) from e
     if data.get("routing", {}).get("mode", "auto") not in ("auto", "manual"):
         msg = f'{where}: [routing] mode must be "auto" (tscircuit routes) or "manual" (routes.toml)'
         raise ConfigError(msg)

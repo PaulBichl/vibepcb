@@ -21,7 +21,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from vibepcb import fanout, rules, schgen, sexpr, stackup, tracks
+from vibepcb import fanout, rules, schgen, sexpr, stackup, testpoints, tracks
 from vibepcb.config import NETCLASS_KEYS
 from vibepcb.sexpr import Sym
 
@@ -1085,6 +1085,37 @@ def add_part_numbers(project: KicadProject) -> list[str]:
         if value_prop is not None and not value_prop[2] and "MPN" in parts[ref]:  # e.g. LEDs export no value
             value_prop[2] = parts[ref]["MPN"]
             changes.append(f"{ref}: Value = {value_prop[2]}")
+    return changes
+
+
+def exclude_testpoints_from_bom(project: KicadProject) -> list[str]:
+    """Keep ``<testpoint>`` pads out of the fab BOM and CPL: a bare pad is nothing to buy or place.
+
+    The export gives the test point a symbol "in BOM" and a footprint without attributes, so JLCPCB
+    would list it as a part. The symbol goes ``in_bom no``; the footprint gets
+    ``(attr board_only exclude_from_pos_files exclude_from_bom)`` (not DNP: the pad is meant to be on the board).
+    """
+    refs = {p.ref for p in testpoints.parts(project.pcb) if testpoints.is_test_point(p)}
+    changes = []
+    for symbol in sexpr.children(project.sch, "symbol"):
+        flag = sexpr.child(symbol, "in_bom")
+        if (sexpr.property_value(symbol, "Reference") or "") in refs and flag is not None and flag[1] != Sym("no"):
+            flag[1] = Sym("no")
+            changes.append(f"{sexpr.property_value(symbol, 'Reference')}: symbol out of the BOM")
+    wanted = [Sym("board_only"), Sym("exclude_from_pos_files"), Sym("exclude_from_bom")]
+    for fp in sexpr.children(project.pcb, "footprint"):
+        ref = sexpr.property_value(fp, "Reference") or ""
+        if ref not in refs:
+            continue
+        attr = sexpr.child(fp, "attr")
+        if attr is None:
+            props = [i for i, item in enumerate(fp) if sexpr.head(item) == "property"]
+            fp.insert(props[-1] + 1 if props else len(fp), [Sym("attr"), *wanted])
+        elif missing := [w for w in wanted if w not in attr]:
+            attr.extend(missing)
+        else:
+            continue
+        changes.append(f"{ref}: footprint board_only, out of BOM and CPL")
     return changes
 
 
@@ -3945,6 +3976,7 @@ FIXES: dict[str, Fix] = {
     "schematic_power_symbols": schematic_power_symbols,
     "drop_loose_power_symbols": drop_loose_power_symbols,
     "add_part_numbers": add_part_numbers,
+    "exclude_testpoints_from_bom": exclude_testpoints_from_bom,
     "link_footprint_library": link_footprint_library,
     "footprint_internal_clearance_rule": footprint_internal_clearance_rule,
     "zone_thermal_reliefs": zone_thermal_reliefs,

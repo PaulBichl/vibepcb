@@ -9,8 +9,12 @@ import subprocess
 import tempfile
 from collections import Counter
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from vibepcb.paths import ROOT
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 class TscircuitError(RuntimeError):
@@ -26,12 +30,38 @@ def _tsci() -> list[str]:
     return ["npx", "--no-install", "tsci"]
 
 
+# set by the CLI to show tsci's output live (line by line); without one the output is captured silently
+_line_handler: Callable[[str], None] | None = None
+
+
+def set_line_handler(handler: Callable[[str], None] | None) -> None:
+    """Receive every output line of the tsci subprocesses while they run (``None``: capture silently)."""
+    global _line_handler  # noqa: PLW0603
+    _line_handler = handler
+
+
+def _run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+    """Run a tsci command in the project root; stdout+stderr (merged) go to the line handler as they appear."""
+    if _line_handler is None:
+        return subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, check=False)
+    lines = []
+    with subprocess.Popen(
+        cmd, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace"
+    ) as proc:
+        if proc.stdout is not None:
+            for line in proc.stdout:
+                lines.append(line)
+                if text := line.rstrip():
+                    _line_handler(text)
+    return subprocess.CompletedProcess(cmd, proc.returncode, "".join(lines), "")
+
+
 def export(source: Path, fmt: str, output: Path) -> None:
     """``tsci export <source> -f <fmt> -o <output>``; raises with tsci's output on failure."""
     output.parent.mkdir(parents=True, exist_ok=True)
     # the parts engine looks up every part on the network on each run; `fab` checks availability once
     cmd = [*_tsci(), "export", str(source), "-f", fmt, "-o", str(output.resolve()), "--disable-parts-engine"]
-    result = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, check=False)
+    result = _run(cmd)
     if result.returncode != 0 or not output.exists():
         msg = f"tsci export -f {fmt} failed:\n{result.stdout}{result.stderr}"
         raise TscircuitError(msg)
@@ -97,7 +127,7 @@ def evaluate_unrouted(source: Path, output: Path, *, parts_engine: bool = False)
     cmd = [*_tsci(), "build", str(source), "--routing-disabled", "--ignore-errors"]
     if not parts_engine:
         cmd.append("--disable-parts-engine")
-    result = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, check=False)
+    result = _run(cmd)
     relative = source.resolve().relative_to(ROOT)
     circuit = (
         ROOT / "dist" / relative.parent / relative.name.removesuffix(".tsx").removesuffix(".circuit") / "circuit.json"
