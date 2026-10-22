@@ -1,7 +1,7 @@
 """Circuit verification in ``check``: simulations, required sims, netlist checks and the findings file.
 
 Two modes decide what an issue is: in *vibe* mode (default) failed / stale / skipped sims, missing required
-sims, ranges that are only assumed and open findings are warnings and the loop goes on; in *strict* mode
+sims, ranges that are only assumed, open findings and a missing / stale reviewer review are warnings and the loop goes on; in *strict* mode
 (``check --strict``, and ``fab`` needs a strict pass) each of them is an error. :func:`run` returns the
 summary lines and the number of issues; ``cmd_check`` appends the lines and fails on ``issues`` in strict mode.
 """
@@ -12,7 +12,7 @@ import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from vibepcb import findings, intent, netcheck, paths, sim
+from vibepcb import findings, intent, netcheck, paths, review, sim
 
 if TYPE_CHECKING:
     from vibepcb.sim import DeckResult, Defaults
@@ -111,5 +111,10 @@ def run(board: str, *, strict: bool = False) -> Report:
         for f in open_
     ]
     report.issues += len(open_)
+    line, problem = review.status(board, design)
+    report.lines.append(line)
+    if problem:
+        report.lines.append(f"  [{level}] {problem}")
+        report.issues += 1
     report.lines.append(f"Mode: {'strict' if strict else 'vibe'}; {report.issues} verification issue(s)")
     return report

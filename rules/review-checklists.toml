@@ -1,0 +1,63 @@
+# Reviewer-agent checklists (src/vibepcb/review.py, docs/REVIEW.md). Not a rule profile.
+#
+# One table per part type; `pcb review <board>` asks every item of a part's type for each part of that type
+# (item id "<ref>:<key>"), and the [board] items once (id "board:<key>"). The reviewer answers each with
+# ok / issue / unknown and cites the datasheet page it took the limit from.
+# Part types: regulator, mcu, ic (any other chip), connector, diode (incl. LEDs, TVS), transistor, crystal;
+# resistors, capacitors, inductors, fuses, switches and test points are covered by [board].
+
+[regulator]
+input-range = "Input range covers the supply (intent [supply]) at its worst case (USB 5.25 V, full battery, transients)."
+dropout = "LDO: dropout at the peak load leaves headroom between input minimum and output; switcher: duty-cycle limits allow the conversion."
+output-cap = "Output capacitor value, ESR and type are inside the stability section's limits, after MLCC DC-bias derating."
+input-cap = "Input capacitor as the datasheet recommends (value, type, placement next to VIN)."
+output-voltage = "Output voltage: fixed-voltage part number, or the feedback divider with the datasheet reference (tolerance included) gives the rail's voltage."
+control-pins = "EN / PG / SS / MODE pins as the datasheet requires (EN not floating, threshold vs. the driving rail, PG pull-up)."
+inductor = "Switchers: inductor value from the datasheet formula, saturation current above the peak switch current (write ok with 'n/a' for an LDO)."
+thermal = "Dissipation ((Vin - Vout) * I for an LDO, efficiency for a switcher) against the package's thermal resistance; exposed pad connected."
+current-budget = "The rail's current budget (intent) is below the part's rated output current with margin."
+
+[mcu]
+supply-pins = "Every VDD / VDDA / VCAP / VBAT / VREF pin connected and decoupled as the hardware design guide says; VDDA filtering."
+reset = "Reset pin: pull-up and capacitor per the datasheet, reachable from the debug header."
+boot = "Boot / strapping pins at the level for the intended boot mode at power-up."
+clock = "Crystal / oscillator: load capacitors computed from the crystal's CL and the pin capacitance; pins are the oscillator pins."
+debug = "Programming / debug interface (SWD, JTAG, UART bootloader, USB DFU) on the right pins and reachable (header or test points)."
+pin-functions = "Every used pin's function (alternate function, ADC channel, timer, 5 V tolerance) exists on that pin of this package."
+io-limits = "No pin driven above VDD + the allowed margin; total I/O current within the package limit."
+ground = "All ground pins and the exposed pad connected to GND."
+
+[ic]
+supply = "Supply pin(s) on a rail inside the recommended operating range; decoupling as the datasheet asks."
+abs-max = "No pin sees a voltage outside its absolute maximum rating (check every net the part touches)."
+control-pins = "Enable / reset / address / mode / strap pins tied to a defined level as intended (I2C address matches firmware expectations)."
+unused-pins = "Unused pins handled as the datasheet says (tied, left open, or pulled), exposed pad connected."
+interface = "Interface levels and pull-ups match the other side (I2C / SPI / UART voltage, open-drain pull-ups present)."
+
+[connector]
+pinout = "Pinout and pin 1 match the connector datasheet and the mating side (cable, host, other board)."
+current = "Power pins: the contacts' current rating covers the load; enough pins in parallel for supply and ground."
+protection = "Pins that leave the board have ESD / TVS protection where a user touches them; supply input reverse-polarity / overcurrent protection."
+levels = "Signal levels match both sides (3V3 vs. 5 V); series resistors / level shifting where the interface standard asks (USB CC 5.1 k, I2C pull-ups)."
+
+[diode]
+ratings = "Reverse voltage and forward current ratings above the circuit's worst case (LED: current from the series resistor and supply below the part's maximum)."
+orientation = "Orientation: anode / cathode on the intended nets (LED lights, protection diode blocks or clamps the right way)."
+
+[transistor]
+ratings = "Vds / Vce and Vgs / Vbe stay inside the absolute maximum ratings at the worst case (supply transients, gate driven from the highest rail)."
+current = "Continuous and pulse current within the ratings at the actual Rds(on) / Vce(sat) and temperature; safe operating area for linear or inrush operation."
+gate-drive = "Gate / base drive: the drive voltage fully enhances the part (Rds(on) specified at that Vgs), gate resistor / pull-down present, turns off when the driver is unpowered."
+orientation = "Pinout (G / D / S or B / C / E) and polarity (N vs. P channel, body diode direction) as the circuit needs."
+thermal = "Dissipation against the package's thermal resistance and the copper area under it."
+
+[crystal]
+load-caps = "Load capacitors match CL = C1*C2/(C1+C2) + stray (about 2-5 pF) for this crystal's CL."
+drive = "Drive level and ESR within the oscillator's limits (MCU datasheet: maximum ESR / gm margin)."
+
+[board]
+cap-ratings = "Capacitor voltage ratings vs. their nets after derating, and MLCC DC-bias capacitance loss, for the parts the script could not rate (no rating in the part text)."
+resistor-power = "Resistor power: dividers, current-sense and LED resistors dissipate within their package rating with margin."
+current-path = "Supply path (connector, fuse / PTC, traces, regulators) carries the intent's current budget; fuse hold / trip currents fit."
+intent = "The circuit does what intent.toml says (rails, voltages, current budget, supply); flag any assumption the design contradicts."
+sims = "Each sim deck's .measure lines prove what the deck claims; behavioural models cite datasheet values; ranges are sourced."

@@ -100,6 +100,10 @@ class RuleSet:
         return None if s is None else s.value
 
 
+# verification policy (vibepcb.sim) and reviewer checklists (vibepcb.review) live next to the profiles
+NOT_PROFILES = {"sim-defaults", "review-checklists"}
+
+
 def profile_dirs() -> list[Path]:
     out = [paths.ROOT / "rules"]
     if out[0] != TOOL_RULES_DIR:
@@ -108,8 +112,7 @@ def profile_dirs() -> list[Path]:
 
 
 def available() -> list[str]:
-    # sim-defaults.toml is the verification policy (vibepcb.sim), not a rule profile
-    return sorted({p.stem for d in profile_dirs() if d.is_dir() for p in d.glob("*.toml")} - {"sim-defaults"})
+    return sorted({p.stem for d in profile_dirs() if d.is_dir() for p in d.glob("*.toml")} - NOT_PROFILES)
 
 
 def load_profile(name: str) -> dict[str, Any]:

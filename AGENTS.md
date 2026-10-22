@@ -187,7 +187,9 @@ test in `tests/test_fixes.py` against the fixtures in `tests/data/`.
   what the board must do into `boards/<name>/intent.toml` (rails, voltages, current budget; `src/vibepcb/intent.py`).
   `check` also runs deterministic netlist checks into `boards/<name>/findings.toml` (accept a finding with
   `status = "accepted"` + `reason`). Vibe mode: warnings; `check --strict` fails on them and `fab` needs it.
-  Review workflow for a fresh-context agent: `docs/REVIEW.md`.
+  Before `fab`: `hatch run pcb review <name> --run` (a fresh-context reviewer checks every part against its
+  datasheets; `docs/REVIEW.md`). Its issues land in `findings.toml`: fix the board or accept them with a reason.
+  Never answer the review yourself: the designer must not grade its own board.
 
 ## Setup / environment
 

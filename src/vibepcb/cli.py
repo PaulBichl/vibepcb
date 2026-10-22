@@ -12,6 +12,8 @@ vibepcb all <board>     [--fast] [--quiet] build + fix + check
 vibepcb fab <board>     part availability check, gerbers/drill zip, BOM, pick-and-place, schematic PDF, 3D renders,
                         bring-up sheet + firmware pin header
 vibepcb bringup <board> out/<board>/fab/<board>-bringup.md (rails, test points, power-on checklist) + <board>-pins.h
+vibepcb review <board>  [--run | --merge] reviewer-agent package in out/<board>/.work/review/; --run starts a fresh
+                        reviewer ($VIBEPCB_REVIEWER, default `claude -p --agent pcb-reviewer`) and merges its answers
 vibepcb publish <board> boards/<board>/hardware/: schematic + layout PDF/PNG, renders, BOM, KiCad project (no fab files)
 vibepcb padtable <board> REF..  boards/<board>/pads.ts: pad positions from the placement build (pin plans)
 vibepcb rules <board>   the merged design / manufacturing rule profiles ([rules] in vibepcb.toml), each value with its source
@@ -30,7 +32,9 @@ import hashlib
 import importlib
 import json
 import os
+import shlex
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -56,6 +60,7 @@ from vibepcb import (
     proc,
     progress,
     ratsnest,
+    review,
     routes,
     rules,
     schgen,
@@ -670,6 +675,35 @@ def cmd_bringup(board: str) -> int:
     return 0
 
 
+def cmd_review(board: str, *, run: bool = False, merge: bool = False) -> int:
+    if not merge:
+        with _phase("review package"):
+            folder, work_items = review.write_package(board)
+        print(f"  {review.display_path(folder)}/: {len(work_items)} checklist item(s) to answer")
+        if not run:
+            print(
+                f"  reviewer (fresh context, e.g. the pcb-reviewer subagent): {review.reviewer_prompt(board)}\n"
+                f"  then: pcb review {board} --merge"
+            )
+            return 0
+        cmd = (
+            shlex.split(os.environ["VIBEPCB_REVIEWER"])
+            if os.environ.get("VIBEPCB_REVIEWER")
+            else review.DEFAULT_REVIEWER
+        )
+        if shutil.which(cmd[0]) is None:
+            print(f"error: reviewer command {cmd[0]!r} not found (set $VIBEPCB_REVIEWER)", file=sys.stderr)
+            return 1
+        with _phase("reviewer agent (a new session; minutes)"):
+            result = subprocess.run([*cmd, review.reviewer_prompt(board)], cwd=paths.ROOT, check=False)
+        if result.returncode != 0:
+            print(f"error: the reviewer exited with {result.returncode}", file=sys.stderr)
+            return 1
+    lines, _ = review.merge(board)  # open findings are for `check` to judge
+    print("\n".join(lines))
+    return 0
+
+
 def cmd_publish(board: str) -> int:
     """Copy what a visitor needs for a first look into ``boards/<board>/hardware/`` (committed):
     schematic PDF, layout PDF + PNGs, 3D renders, BOM and the KiCad project - no fab files."""
@@ -721,7 +755,7 @@ KICAD_COMMANDS = ("fix", "check", "all", "fab", "publish")  # the ones that run 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="vibepcb", description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("new", "build", "fix", "route", "inspect", "check", "all", "fab", "bringup", "publish"):
+    for name in ("new", "build", "fix", "route", "inspect", "check", "all", "fab", "bringup", "review", "publish"):
         command_parser = sub.add_parser(name)
         command_parser.add_argument("board")
         if name in ("check", "all"):
@@ -740,6 +774,10 @@ def main(argv: list[str] | None = None) -> int:
             command_parser.add_argument("--layer", action="append", help="copper layer to draw (repeatable)")
             command_parser.add_argument("--scale", type=float, default=40.0, help="pixels per mm")
             command_parser.add_argument("--source", choices=["current", "unrouted"], default="current")
+        if name == "review":
+            mode = command_parser.add_mutually_exclusive_group()
+            mode.add_argument("--run", action="store_true", help="start the reviewer agent, then merge its answers")
+            mode.add_argument("--merge", action="store_true", help="validate and record the answers already written")
         if name == "route":
             command_parser.add_argument("--only", help="route only nets matching this pattern")
             command_parser.add_argument("--dry-run", action="store_true", help="report, don't save")
@@ -802,6 +840,8 @@ def main(argv: list[str] | None = None) -> int:
                     return cmd_route(args.board, only=args.only, dry_run=args.dry_run, drc=args.drc)
                 if command == "check":
                     return cmd_check(args.board, strict=args.strict)
+                if command == "review":
+                    return cmd_review(args.board, run=args.run, merge=args.merge)
                 handler = {
                     "new": cmd_new,
                     "fix": cmd_fix,

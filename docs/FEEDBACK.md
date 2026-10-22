@@ -55,7 +55,7 @@ gain-bandwidth, ...) should cite the datasheet value, the same as the ranges.
 
 ### Review by an agent
 
-- **Separate reviewer with a fresh context.** It sees only the outputs (netlist, BOM, datasheet excerpts,
+- ~~**Separate reviewer with a fresh context.**~~ done: `pcb review <board> --run` (`review.py`, `.claude/agents/pcb-reviewer.md`, `docs/REVIEW.md`). It sees only the outputs (netlist, BOM, datasheet excerpts,
   assumption list), not the design conversation, so it can't just agree with itself. It derives limits from
   the datasheets independently; only disagreements with the designer agent reach the human.
 - **Deterministic netlist checks first.** With voltage-named nets (`+3V3`) a script can check, without an

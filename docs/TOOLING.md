@@ -113,6 +113,7 @@ docstring of `cli.py` doubles as `--help` text.
 | `fix <board>` | removes and re-creates `out/<board>/kicad/` from the raw zip (the footprint library `lib/footprints/tscircuit_builtin.pretty` is written from the footprints embedded in the board, `kicad.write_footprint_library`), renames the files to the board name, replaces the schematic with `schgen.write` (from the circuit JSON + the TSX sections), then runs `fixes.apply_all` and prints one line per change; exports `schematic.svg` (+ `.work/preview/schematic.png`, 4000 px) and refreshes `README.md` | `out/<board>/kicad/` | 0 (exceptions reported as `error:`, exit 1) |
 | `check <board> [--strict] [--quiet]` | `kicad-cli sch erc`, `kicad-cli pcb drc` (refills zones, saves the board), post-fill loop, sharp-corner, unlabelled-connector and test-point checks (`testpoints.py`, `[testpoints]` in `vibepcb.toml`), split crossings (warning: a track crossing the edge of a region pour on the layer next to it); prints the summary, writes it to `check.txt`, exports `board.svg`; then circuit verification (section 8.3: sims, required sims, netlist checks, `findings.toml`); `--strict` makes its issues errors | `out/<board>/check.txt`, `board.svg`, `.work/reports/`, modifies the KiCad PCB | 1 if ERC errors, DRC errors or sharp corners (strict: or a verification issue; test points with `severity = "error"`) |
 | `bringup <board>` | `bringup.collect` on the finished KiCad project (+ the circuit JSON for pin names): `fab/<board>-bringup.md` and `fab/<board>-pins.h` (section 9a); `fab` calls it too | `out/<board>/fab/` | 0 |
+| `review <board> [--run \| --merge]` | reviewer-agent package in `out/<board>/.work/review/` (`review.write_package`: parts with pins / nets, BOM fields, netlist, intent, sim decks, `PROMPT.md`, answer template `review.toml`, one item per checklist item of `rules/review-checklists.toml`); `--run` starts `$VIBEPCB_REVIEWER` (default `claude -p --agent pcb-reviewer`, a new session) and merges; `--merge` validates and records answers written another way (section 8.3) | `out/<board>/.work/review/`; on merge `boards/<board>/review.toml`, `findings.toml` | 1 if the reviewer fails or its answers are invalid |
 | `all <board> [--strict] [--fast] [--quiet]` | `build`, then `fix`, then `check`, short-circuiting on a non-zero result | all of the above | first non-zero, else `check`'s result |
 | `fab <board>` | refuses unless the last `check --strict` passed on this board (`check.json` `strict_passed` + board hash); part availability check once (parts engine, placement-only evaluation), then `kicad.export_fab` on `out/<board>/kicad/<board>.kicad_pcb`: one file per purpose (gerbers zip, JLCPCB BOM with MPN, CPL, schematic PDF, top/bottom renders), then `bringup`; intermediates in `.work/fab/` | `out/<board>/fab/` | 0 |
 | `publish <board>` | only if the last `check` passed on the current board (`.work/reports/check.json`, board hash): KiCad project without 3D models, BOM, schematic PDF, renders (`kicad.export_docs`), layout PDF (a page per copper layer) + front/back SVGs (`kicad.export_layout`) | `boards/<board>/hardware/` (committed) | 0 |
@@ -469,7 +470,8 @@ Answers "does the circuit do what it should", not "is the layout clean". Policy 
 | `intent.py` | `boards/<board>/intent.toml`: the agent's assumption list (supply, rails with voltage / tolerance / current / regulator / vref). Format in the module docstring. Source of net voltages and sim ranges |
 | `sim.py` | decks `boards/<board>/sim/*.cir`: `* range: <measure> <min> <max> source=<text>` and `* covers: <kind> <refs>` comment lines, `.measure` lines; value parsing (SPICE suffixes), deck-vs-board value comparison, `ngspice -b` run, range resolution |
 | `netcheck.py` | deterministic checks on the circuit JSON: cap rating vs net voltage, one I2C pull-up, power-pin decoupling, feedback divider vs vref, floating EN/RESET/BOOT; regulator detection |
-| `findings.py` | `boards/<board>/findings.toml` read / merge / write |
+| `findings.py` | `boards/<board>/findings.toml` read / merge / write (per `source`: `netcheck`, `review`) |
+| `review.py` | reviewer agent: package, part classification (element type, reference letters, regulator / MCU detection), answer validation, findings, record `boards/<board>/review.toml` with the netlist hash, `check`'s missing / stale status. Checklists: `rules/review-checklists.toml`; agent: `.claude/agents/pcb-reviewer.md`; workflow: `docs/REVIEW.md` |
 | `verify.py` | glue: runs the above, builds the summary lines, counts issues |
 
 Pass ranges come from (in order) a datasheet-sourced `* range:`, the intent (`vmax_<rail>`, `vmin_<rail>`,
@@ -484,6 +486,15 @@ Modes: **vibe** (default) prints every issue as `[warning]` (failed / stale / er
 fails. `fab` needs the last check to have been strict-clean. Findings: ids `<rule>:<what>`; `check` keeps the
 status / reason of ids it still finds and drops the others; entries with another `source` (the reviewer
 agent's, `docs/REVIEW.md`) are never touched; `accepted` needs a reason.
+
+Reviewer agent (`pcb review`): each part gets the checklist of its type (regulator, mcu, ic, connector, diode,
+transistor, crystal; passives are covered by the `[board]` items), ids `<ref>:<key>` / `board:<key>`. The
+reviewer answers each `ok` / `issue` / `unknown` with a datasheet `cite` (`ok` / `issue`) and a `text`
+(`issue` / `unknown`); merging refuses unanswered, unknown, duplicate items and pins the part does not
+have. `issue` / `unknown` become open `review:<item>` findings (status / reason kept per id). The record
+`boards/<board>/review.toml` holds all answers and a hash of the netlist (parts, values, part text, every pin's
+net; not the layout): `check` reports `review_missing` / `review_stale` as a verification issue, so a strict
+check and `fab` need a review of the current netlist. Re-packaging the same netlist keeps answers in progress.
 
 ---
 

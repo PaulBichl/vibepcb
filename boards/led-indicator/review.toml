@@ -1,0 +1,80 @@
+# Last reviewer-agent review (pcb review --merge); its issue / unknown answers are in findings.toml.
+hash = "2aefd1a5a1bfb864"  # netlist the review saw (review.netlist_hash)
+date = "2026-10-22 17:45 UTC"
+
+[[item]]
+id = "J1:pinout"
+verdict = "unknown"
+pin = ""
+cite = ""
+text = "J1 is a generic 2-pin header (pin 1 = VCC, pin 2 = GND) with no MPN / LCSC number and no description of the mating cable or host. I can't check pin 1 against a datasheet or the mating side; add the connector MPN and the mating pinout."
+
+[[item]]
+id = "J1:current"
+verdict = "unknown"
+pin = ""
+cite = "KENTO KT-0603-R spec A.1, p.2 Max parameter (IF 25 mA)"
+text = "The load is only the LED branch, at most 25 mA (D1's IF max), so any header contact will very likely be enough. J1 has no MPN, though, so I can't check its contact rating against a datasheet."
+
+[[item]]
+id = "J1:protection"
+verdict = "issue"
+pin = "VCC"
+cite = "KENTO KT-0603-R spec A.1, p.2 Max parameter (VR 5 V) and p.3 (IR max 1 uA at VR = 5 V)"
+text = "J1 is an unkeyed 2-pin header with no reverse-polarity protection. If the supply is plugged in backwards, almost the whole supply voltage lands across D1 in reverse (R1 drops about 0 V at IR <= 1 uA), and D1's VR max is 5 V. Fix: use a keyed connector, add a series diode, or put an anti-parallel diode across D1."
+
+[[item]]
+id = "J1:levels"
+verdict = "ok"
+pin = ""
+cite = "n/a: J1 carries only VCC and GND, no signal pins"
+text = ""
+
+[[item]]
+id = "D1:ratings"
+verdict = "unknown"
+pin = ""
+cite = "KENTO KT-0603-R spec A.1, p.2 Max parameter (IF 25 mA, Pd 55 mW, VR 5 V), p.3 (VF 1.6-2.4 V), p.4 Fig.3 derating"
+text = "VCC has no stated voltage (net name has none, no intent.toml). With R1 = 330 Ohm and VF min 1.6 V, IF stays under 25 mA only for VCC <= 9.8 V (5 V gives about 10.3 mA, which is fine). Fig.3 derates IF to about 5 mA at 85 C, so state VCC and the ambient temperature."
+
+[[item]]
+id = "D1:orientation"
+verdict = "ok"
+pin = "pin1"
+cite = "KENTO KT-0603-R spec A.1, p.1 polarity symbol and green cathode mark"
+text = "D1 pin1 (anode) is on LED_A from R1 and pin2 (cathode) is on GND, so the LED is forward-biased from VCC. Check that the footprint's cathode pad matches the green mark side when assembled."
+
+[[item]]
+id = "board:cap-ratings"
+verdict = "ok"
+pin = ""
+cite = "n/a: the board has no capacitors"
+text = ""
+
+[[item]]
+id = "board:resistor-power"
+verdict = "unknown"
+pin = ""
+cite = "KENTO KT-0603-R spec A.1, p.3 (VF min 1.6 V)"
+text = "R1 (330 Ohm, 0603) has no MPN and VCC has no stated voltage. At 5 V it dissipates about 35 mW, and it stays within 50 % of a typical 0603's 100 mW only up to VCC of about 5.7 V. Give VCC and the R1 part number to confirm."
+
+[[item]]
+id = "board:current-path"
+verdict = "ok"
+pin = ""
+cite = "n/a: no fuse or regulator; the only load is the LED branch, limited by D1 IF max 25 mA (KT-0603-R p.2)"
+text = ""
+
+[[item]]
+id = "board:intent"
+verdict = "unknown"
+pin = ""
+cite = ""
+text = "The review folder has no intent.toml, so the VCC voltage, the current budget and the intended LED brightness are not stated. Add intent.toml with the VCC range so the R1 / D1 values can be checked."
+
+[[item]]
+id = "board:sims"
+verdict = "ok"
+pin = ""
+cite = "n/a: no sim decks in the review folder and the board has no regulator"
+text = ""

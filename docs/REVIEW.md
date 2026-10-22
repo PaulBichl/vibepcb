@@ -2,80 +2,67 @@
 
 `check` verifies what a script can decide (simulations, rating / pull-up / decoupling / divider / floating-pin
 rules, see TOOLING.md 8.3). Everything that needs a datasheet is the reviewer's job. The reviewer is a separate
-agent with a fresh context, so it cannot just agree with the designer.
+agent with a fresh context, so it cannot just agree with the designer, and it sees only the design's outputs.
 
 ## Workflow
 
-1. Designer agent: builds the board, writes `intent.toml` (the assumption list), runs `pcb all <board>`.
-2. Reviewer agent (new session, no design conversation). It gets only:
-   - `out/<board>/.work/raw/<board>.netlist.txt` and `out/<board>/fab/<board>-bom.csv` (or the BOM from `pcb fab`)
-   - `boards/<board>/intent.toml`, `boards/<board>/findings.toml`, `boards/<board>/sim/*.cir`
-   - the datasheets of the parts (PDF excerpts, fetched by the reviewer itself, not quoted by the designer)
-3. The reviewer derives each limit from the datasheet on its own, then compares with the board. For every
-   checklist item below it adds one entry to `findings.toml` with `source = "review"`, citing reference and pin,
-   `status = "open"` when the board disagrees. Passing items are not written.
-4. Only disagreements reach the human: open findings. The designer fixes the TSX (finding disappears on the next
-   `check` only for deterministic ones; a review finding is set to `accepted` with a reason, or deleted when fixed).
-5. Before `fab`: `pcb check <board> --strict` must pass (no open findings, no failing / assumed sims).
-
-Entry format (see `src/vibepcb/findings.py`):
-
-```toml
-[[finding]]
-id = "review:U1:en-threshold"
-ref = "U1"
-pin = "EN"
-text = "EN high threshold is 1.2 V (datasheet p.6); it is tied to VIN (5 V) through R3, fine, but absolute max is 6 V"
-status = "open"
-reason = ""
-source = "review"
+```
+designer: pcb all <board>           build, fix, check (vibe mode: review_missing is a warning)
+          pcb review <board> --run  package -> new reviewer session -> answers merged
+          fix the board / accept findings with a reason, repeat
+          pcb check <board> --strict  needs a review of the current netlist, no open findings
+          pcb fab <board>
 ```
 
-## Checklists per part type
+1. `hatch run pcb review <board>` writes the package to `out/<board>/.work/review/`:
 
-Cite the datasheet page for each value you derive.
+   | File | Content |
+   |------|---------|
+   | `PROMPT.md` | the reviewer's task: inputs, answer rules, what it must not read |
+   | `parts.md` | every part: checklist type, value, MPN / LCSC, each pin's net |
+   | `netlist.txt` | tscircuit's readable netlist |
+   | `intent.toml`, `sim/*.cir` | the assumption list and the sim decks, if any |
+   | `checks.md` | what the deterministic checks already cover |
+   | `review.toml` | the answer template: one `[[item]]` per checklist item, question as a comment |
 
-### Voltage regulator (LDO, buck, boost)
+   The board source, `findings.toml` and the design conversation are not in it: the designer's reasoning must
+   not steer the reviewer.
+2. The reviewer, in a new session, fills `review.toml` from datasheets it looks up itself (by MPN / LCSC):
+   - `--run` does it in one step: `$VIBEPCB_REVIEWER` (default `claude -p --agent pcb-reviewer`, the agent in
+     `.claude/agents/pcb-reviewer.md`, tools Read / Grep / Glob / WebSearch / WebFetch / Write / Edit), then
+     merges. Another agent CLI: set `VIBEPCB_REVIEWER` to its non-interactive command; the prompt is appended
+     as the last argument.
+   - In a Claude Code session, the designer can instead spawn the `pcb-reviewer` subagent (fresh context, never a
+     fork) with the prompt `pcb review` prints, then run `pcb review <board> --merge`.
+3. Merging validates the answers (every item answered once, `ok` / `issue` cite a source, `issue` / `unknown`
+   say why, pins exist on the part) and refuses the file otherwise. `issue` and `unknown` answers become open
+   findings `review:<item id>` in `boards/<board>/findings.toml`; the full answers and the netlist hash go to
+   `boards/<board>/review.toml` (commit both).
+4. Only disagreements reach the human: open findings. The designer fixes the TSX and re-runs the review, or sets
+   a finding to `status = "accepted"` with a `reason`. A review finding keeps its status / reason across
+   re-reviews as long as the reviewer reports the same item; a fixed one disappears.
+5. A change to the netlist (parts, values, part numbers, connections; not the layout) makes the review stale:
+   `check` reports `review_stale`, and a strict check (so `fab`) needs a new review.
 
-- Input range includes the supply (intent `[supply]`), also at the worst case (USB 5.25 V, battery full).
-- Dropout at the peak load leaves headroom over the output (LDO).
-- Output capacitor: value, ESR and type allowed by the stability section (MLCC vs. tantalum), DC-bias derating.
-- Input capacitor as recommended; placement next to VIN.
-- Feedback divider gives the intended voltage with the datasheet reference (and tolerance); adjustable parts only.
-- EN / PG / SS pins handled as the datasheet requires (EN not floating, threshold vs. the driving rail).
-- Inductor (switchers): saturation current above the peak current, value from the datasheet formula.
-- Thermal: dissipation (Vin - Vout) * I against the package; exposed pad connected and soldered to copper.
-- Current budget in intent is below the part's limit with margin.
+## Answer format
 
-### MCU / processor
+```toml
+[[item]]
+# U1 (regulator): LDO: dropout at the peak load leaves headroom ...
+id = "U1:dropout"
+verdict = "issue"             # ok | issue | unknown
+pin = "VIN"                   # optional: a pin of the part, as in parts.md
+cite = "TLV75533 datasheet p.5, dropout 230 mV at 500 mA"
+text = "USB minimum 4.75 V - 3.3 V leaves 1.45 V: fine; but the 600 mA budget exceeds the 500 mA rating. Use TLV75733."
+```
 
-- Every VDD / VDDA / VCAP / VBAT pin has its decoupling as in the hardware design guide; VDDA filtering.
-- Reset: NRST pull-up and cap per datasheet; boot pins at the level for the intended boot mode.
-- Clock: crystal load capacitors from the crystal's CL and the pin capacitance, not from a rule of thumb.
-- Programming / debug header on the right pins (SWD / JTAG), pull-ups where required.
-- Pin functions used (alternate function, 5 V tolerance, ADC channel) exist on the chosen pins.
-- Total I/O current within the package limit; no pin driven above VDD + the allowed margin.
-- Exposed pad / ground pins connected.
+An item that does not apply (an inductor item for an LDO): `verdict = "ok"`, `cite = "n/a: <why>"`.
 
-### Connector / interface
+## Checklists
 
-- Pinout and pin 1 against the connector datasheet and the mating cable / host (USB, headers, FFC direction).
-- Power pins: the current the connector pins and contacts carry; polarity protection where a user plugs it in.
-- ESD / TVS on pins that leave the board; series resistors where the interface standard asks.
-- Signal levels match on both sides (3V3 vs 5 V); level shifters where they do not.
-- USB: CC pull-downs (5.1 k), shield handling, D+/D- order; I2C: pull-up value for bus speed and capacitance.
-- Silkscreen labels every pin (the `check` warns when missing).
-
-### Passives and protection
-
-- Capacitor voltage rating vs. the net after derating (the script covers parts with a known rating; check the
-  rest against the BOM part numbers) and DC-bias capacitance loss for MLCCs.
-- Resistor power for dividers / current-sense / LED resistors, LED current vs. the part's limit.
-- Fuse / PTC hold current above the load, trip below the source's limit.
-- Diodes: reverse voltage, forward current, orientation.
-
-## Simulations
-
-For each deck check that the `.measure` lines prove what the deck claims and that the behavioural model uses
-datasheet values (dropout, gain-bandwidth, ...) with the source in a comment. A range without `source=` is
-assumed: find the datasheet value or write down why it is the limit.
+`rules/review-checklists.toml`, one table per part type, one question per key; `<project>/rules/` overrides the
+tool's file. Part types (`review.classify`): the tscircuit element type first (pin header -> connector, diode /
+LED, crystal), then the reference letters (imported parts are all chips: J/P/CN -> connector, D -> diode,
+Q -> transistor, Y -> crystal, R/C/L/F/SW/TP -> board items), then chips: regulator (VIN + VOUT/FB/SW pins or a
+known family), MCU (4+ GPIO-like pin names), other IC. Resistors, capacitors, inductors, fuses, switches and test
+points are covered by the `[board]` items (ratings, power, current path, intent, sims).

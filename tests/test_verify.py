@@ -443,7 +443,7 @@ def test_run_vibe_and_strict(project: Path) -> None:
     assert "[warning] sim_missing: regulator U1" in text
     assert "[warning] finding: floating:U1:3 [U1.EN]" in text
     assert "Mode: vibe" in text
-    assert vibe.issues == 2
+    assert vibe.issues == 3  # + review_missing
     assert (project / "findings.toml").exists()
     strict = verify.run("b", strict=True)
     assert "[error] finding: floating:U1:3" in "\n".join(strict.lines)
@@ -456,7 +456,7 @@ def test_run_vibe_and_strict(project: Path) -> None:
         encoding="utf-8",
     )
     again = verify.run("b", strict=True)
-    assert again.issues == 1
+    assert again.issues == 2  # missing sim + review_missing
     assert "1 accepted" in "\n".join(again.lines)
 
 

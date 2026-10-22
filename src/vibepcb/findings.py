@@ -9,11 +9,12 @@
     text = "I2C_SDA has no pull-up resistor to a supply net"
     status = "open"                # open | accepted
     reason = ""                    # accepted needs a reason ("pull-ups are on the sensor board")
-    source = "netcheck"            # netcheck (written by `check`) | review (added by hand / by the reviewer agent)
+    source = "netcheck"            # netcheck (written by `check`) | review (`pcb review --merge`) | anything else (by hand)
 
 ``check`` merges the deterministic findings (:mod:`vibepcb.netcheck`) into the file: a finding it still finds
-keeps its status and reason, a new one is added as ``open``, one it no longer finds is dropped. Entries with
-another ``source`` (the reviewer agent's checklist items, see docs/REVIEW.md) are never touched. An
+keeps its status and reason, a new one is added as ``open``, one it no longer finds is dropped. ``pcb review --merge``
+does the same for ``source = "review"`` (the reviewer agent's issue / unknown answers, docs/REVIEW.md). Entries
+with any other ``source`` (written by hand) are never touched. An
 ``accepted`` finding without a reason still counts as open. Open findings are warnings in vibe mode and fail
 ``check --strict``.
 """
@@ -58,7 +59,7 @@ class Finding:
 
     def line(self) -> str:
         where = f"{self.ref}.{self.pin}" if self.pin else self.ref
-        return f"{self.id} [{where}]: {self.text}"
+        return f"{self.id} [{where}]: {self.text}" if where else f"{self.id}: {self.text}"
 
 
 def findings_path(board: str) -> Path:
@@ -103,11 +104,11 @@ def load(board: str) -> list[Finding]:
         raise FindingsError(msg) from exc
 
 
-def merge(existing: list[Finding], found: list[Finding]) -> list[Finding]:
-    """Hand-written entries as they are; deterministic ones as ``found`` now, with the status and reason
-    the file already holds for the same id."""
-    kept = {f.id: f for f in existing if f.source == AUTO}
-    merged = [f for f in existing if f.source != AUTO]
+def merge(existing: list[Finding], found: list[Finding], source: str = AUTO) -> list[Finding]:
+    """Entries of other sources as they are; those of ``source`` (``netcheck``, or ``review`` from
+    :mod:`vibepcb.review`) as ``found`` now, with the status and reason the file already holds for the same id."""
+    kept = {f.id: f for f in existing if f.source == source}
+    merged = [f for f in existing if f.source != source]
     for finding in sorted(found, key=lambda f: f.id):
         old = kept.get(finding.id)
         merged.append(replace(finding, status=old.status, reason=old.reason) if old else finding)
