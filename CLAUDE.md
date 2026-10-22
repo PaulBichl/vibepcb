@@ -159,7 +159,13 @@ test in `tests/test_fixes.py` against the fixtures in `tests/data/`.
   crash, #4663). Use `[escape.<ref>]`. Saved paths, if ever needed: group-relative coordinates, the first
   point within 1e-4 mm of the pad, every connection of the chip covered.
 - SPICE: chips have no models, so per-board ngspice decks with behavioural models live in
-  `boards/<name>/sim/*.cir` (`ngspice -b <deck>`).
+  `boards/<name>/sim/*.cir`; `check` runs them (`ngspice -b`) and judges the `.measure` results against
+  `* range: <measure> <min> <max> source=datasheet:...` lines (a range without a source is "assumed"; the deck's
+  R/C/L must equal the board's values; every regulator needs a deck with `* covers: powerup <ref>`). Write
+  what the board must do into `boards/<name>/intent.toml` (rails, voltages, current budget; `src/vibepcb/intent.py`).
+  `check` also runs deterministic netlist checks into `boards/<name>/findings.toml` (accept a finding with
+  `status = "accepted"` + `reason`). Vibe mode: warnings; `check --strict` fails on them and `fab` needs it.
+  Review workflow for a fresh-context agent: `docs/REVIEW.md`.
 
 ## Setup / environment
 

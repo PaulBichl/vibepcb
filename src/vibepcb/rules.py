@@ -108,7 +108,8 @@ def profile_dirs() -> list[Path]:
 
 
 def available() -> list[str]:
-    return sorted({p.stem for d in profile_dirs() if d.is_dir() for p in d.glob("*.toml")})
+    # sim-defaults.toml is the verification policy (vibepcb.sim), not a rule profile
+    return sorted({p.stem for d in profile_dirs() if d.is_dir() for p in d.glob("*.toml")} - {"sim-defaults"})
 
 
 def load_profile(name: str) -> dict[str, Any]:
