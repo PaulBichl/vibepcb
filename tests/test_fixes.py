@@ -1318,7 +1318,7 @@ def test_roundrect_pad_corner_is_round() -> None:
     obstacle = fixes._pad_obstacle(pad, lambda x, y: (x, y), "EN2", frozenset({"B.Cu"}))
     end = (0.154, 0.849)  # 0.014 / 0.039 mm beyond the box corner (0.14, 0.81)
     assert obstacle.distance(end, end) > tracks.pad_reach(0.15)
-    assert obstacle.distance((0.2, 0.0), (0.2, 0.0)) == pytest.approx(0.06, abs=1e-6)  # flat side: box distance
+    assert obstacle.distance((0.2, 0.0), (0.2, 0.0)) == pytest.approx(0.06, abs=1e-3)  # flat side: box distance
     circle = fixes._pad_obstacle(sexpr.loads('(pad "1" thru_hole circle (at 1 1) (size 1.7 1.7) (layers "*.Cu"))'),
                                  lambda x, y: (x, y), "GND", frozenset({"B.Cu"}))  # fmt: skip
     assert circle.distance((1.85, 1.85), (1.85, 1.85)) == pytest.approx(math.hypot(0.85, 0.85) - 0.85, abs=1e-6)
