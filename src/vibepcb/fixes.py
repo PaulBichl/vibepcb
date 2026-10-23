@@ -3277,6 +3277,19 @@ def reroute_tracks(project: KicadProject) -> list[str]:
                     new_points = candidate
                     break
                 log.debug("reroute %s %s %s-%s: route rejected", run.net, run.layer, start, goal)
+            if new_points is not None:
+                # the new route must join what the old run joined: the net's pads as connected as before
+                mine_ids = {id(s) for s in run.segs}
+                net_segs = copper.segs_by_net.get(run.net, [])
+                pads, vias = copper.pads_by_net.get(run.net, []), copper.vias_by_net.get(run.net, [])
+                rebuilt = [s for s in net_segs if id(s) not in mine_ids] + [
+                    tracks.Seg(p, q, width, run.layer, run.net) for p, q in itertools.pairwise(new_points)
+                ]
+                if not tracks.still_connected(
+                    tracks.pad_groups(pads, vias, net_segs), tracks.pad_groups(pads, vias, rebuilt)
+                ):
+                    log.debug("reroute %s %s: new route would split the net", run.net, run.layer)
+                    new_points = None
             if new_points is None:
                 project.reroute_failed[key] = fingerprint
                 continue
