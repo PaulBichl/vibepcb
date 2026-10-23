@@ -796,7 +796,8 @@ def redundant(segs: list[Seg]) -> list[int]:
 def dangling(segs: list[Seg], connected: Callable[[Point, Seg], bool]) -> list[int]:
     """Indices of tracks that are (or, once their neighbours go, become) loose at one end."""
     alive = set(range(len(segs)))
-    index = BoxIndex(_boxes(segs))
+    boxes = _boxes(segs)
+    index = BoxIndex(boxes)
 
     def touches(p: Point, s: Seg, others: Iterable[int]) -> bool:
         """End p of s lies on another track, or another track's end lies on s right at p."""
@@ -810,15 +811,24 @@ def dangling(segs: list[Seg], connected: Callable[[Point, Seg], bool]) -> list[i
             for j in others
         )
 
-    changed = True
-    while changed:
-        changed = False
-        for i in sorted(alive):
-            s = segs[i]
-            others = [j for j in set(index.at(s.a, i) + index.at(s.b, i)) if j in alive]
-            if not all(connected(p, s) or touches(p, s, others) for p in (s.a, s.b)):
-                alive.discard(i)
-                changed = True
+    # worklist: a track that goes can only loosen tracks with an end on it - their boxes overlap its box - so
+    # only those are looked at again (re-scanning every track after each removal was quadratic on long chains)
+    todo = sorted(alive)
+    queued = set(todo)
+    while todo:
+        i = todo.pop()
+        queued.discard(i)
+        if i not in alive:
+            continue
+        s = segs[i]
+        near = set(index.at(s.a, i) + index.at(s.b, i))
+        others = [j for j in near if j in alive]
+        if not all(connected(p, s) or touches(p, s, others) for p in (s.a, s.b)):
+            alive.discard(i)
+            for j in index.overlapping(*boxes[i]):
+                if j in alive and j not in queued:
+                    todo.append(j)
+                    queued.add(j)
     return sorted(set(range(len(segs))) - alive)
 
 

@@ -1714,6 +1714,22 @@ class _Copper:
         return out
 
     @functools.cached_property
+    def via_index_by_net(self) -> dict[str, tracks.BoxIndex]:
+        """Per net, the vias' copper boxes (same order as ``vias_by_net``): a point tests only the vias around it."""
+        return {
+            net: tracks.BoxIndex([(c[0] - r, c[1] - r, c[0] + r, c[1] + r) for c, r in vias])
+            for net, vias in self.vias_by_net.items()
+        }
+
+    def _vias_at(self, p: tracks.Point, net: str) -> list[tuple[tracks.Point, float]]:
+        index = self.via_index_by_net.get(net)
+        if index is None:
+            return []
+        vias = self.vias_by_net[net]
+        e = tracks.EPS
+        return [vias[i] for i in index.overlapping(p[0] - e, p[1] - e, p[0] + e, p[1] + e)]
+
+    @functools.cached_property
     def segs_by_net(self) -> dict[str, list[tracks.Seg]]:
         out: dict[str, list[tracks.Seg]] = {}
         for s in self.segs:
@@ -1722,7 +1738,7 @@ class _Copper:
 
     def on_pad_or_via(self, p: tracks.Point, net: str, layer: str) -> bool:
         """Whether a point (a polyline node) lies on a pad or via of its net (no width involved)."""
-        if any(net == v_net and math.dist(p, c) <= r + tracks.EPS for _, c, r, v_net in self.vias):
+        if any(math.dist(p, c) <= r + tracks.EPS for c, r in self._vias_at(p, net)):
             return True
         return any(layer in o.layers and o.distance(p, p) <= tracks.EPS for o in self.pads_by_net.get(net, []))
 
@@ -1731,7 +1747,7 @@ class _Copper:
 
         A pad takes any track end inside it; a via a track end inside it (see :func:`tracks.via_takes`).
         """
-        if any(math.dist(p, c) <= r - tracks.EPS for c, r in self.vias_by_net.get(s.net, [])):
+        if any(math.dist(p, c) <= r - tracks.EPS for c, r in self._vias_at(p, s.net)):
             return True
         index = self.pad_index_by_net.get(s.net)
         if index is None:
