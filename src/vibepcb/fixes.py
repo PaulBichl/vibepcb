@@ -1916,6 +1916,37 @@ def _drop_zero_length_segments(project: KicadProject) -> int:
     return len(points)
 
 
+def _drop_closed_loops(project: KicadProject) -> int:
+    """Remove polylines that leave a pad or via and come back into the same one; returns how many.
+
+    The router sometimes leaves such a loop (bench-psu rev C: six pieces out of a via and back, with a 70 degree
+    bend). It connects nothing the pad or via doesn't connect already, but none of the other steps touch it:
+    the loop opener works on junctions, the rerouter skips runs whose ends share an anchor. A loop goes only
+    if the net's pads stay as connected as before (a pad centre lying on its body would still count).
+    """
+    copper = _copper(project.pcb)
+    gone: dict[str, set[int]] = {}
+    dropped = 0
+    for run in tracks.chains(copper.segs, copper.on_pad_or_via):
+        a, b = run.points[0], run.points[-1]
+        if len(run.segs) < 2 or not copper.same_anchor(a, b, run.net, run.layer):
+            continue
+        if all(copper.same_anchor(a, q, run.net, run.layer) for q in run.points):
+            continue  # a stub inside the anchor's copper: nothing of its own
+        segs = copper.segs_by_net.get(run.net, [])
+        removed = gone.setdefault(run.net, set())
+        mine = {id(s) for s in run.segs}
+        pads, vias = copper.pads_by_net.get(run.net, []), copper.vias_by_net.get(run.net, [])
+        now = [s for s in segs if id(s) not in removed]
+        after = [s for s in now if id(s) not in mine]
+        if tracks.still_connected(tracks.pad_groups(pads, vias, now), tracks.pad_groups(pads, vias, after)):
+            removed |= mine
+            for s in run.segs:
+                _drop(project.pcb, _source(s))
+            dropped += 1
+    return dropped
+
+
 def clean_tracks(project: KicadProject) -> list[str]:
     """Straighten tscircuit's tracks and take out every corner sharper than 135 degrees.
 
@@ -1932,6 +1963,7 @@ def clean_tracks(project: KicadProject) -> list[str]:
     clearance, edge_clearance = _design_clearances(project)
     min_width = _design_min_track_width(project)
     totals = {"duplicates": 0, "dropped": 0, "fixed": 0, "left": 0, "kept": 0}
+    loops = _drop_closed_loops(project)  # first: the rounds would reshape a loop's corners instead
     for _ in range(CLEAN_ROUNDS):  # a round's own edits can leave new duplicates/corners
         changed, last = _clean_round(project, clearance, edge_clearance, min_width)
         for key, value in last.items():
@@ -1939,6 +1971,8 @@ def clean_tracks(project: KicadProject) -> list[str]:
         if not changed:
             break
     changes = []
+    if loops:
+        changes.append(f"tracks: removed {loops} loop(s) leaving a pad or via and coming back into it")
     if dropped := _drop_zero_length_segments(project):
         changes.append(f"tracks: removed {dropped} zero-length track segment(s)")
     if totals["duplicates"]:

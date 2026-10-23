@@ -1291,3 +1291,21 @@ def test_clean_tracks_drops_zero_length_segments(project: fixes.KicadProject) ->
     changes = fixes.clean_tracks(project)
     assert "tracks: removed 1 zero-length track segment(s)" in changes
     assert not any(s is point for s in sexpr.children(project.pcb, "segment"))
+
+
+def test_clean_tracks_drops_a_loop_back_into_the_same_via(project: fixes.KicadProject) -> None:
+    net = fixes._net_node(project.pcb, "VCC") or [Sym("net"), Sym("1")]
+    via = sexpr.loads('(via (at 130 130) (size 0.6) (drill 0.3) (layers "F.Cu" "B.Cu") (uuid "v"))')
+    via.insert(len(via) - 1, copy.deepcopy(net))
+    project.pcb.append(via)
+    loop = [((130, 130), (131, 131)), ((131, 131), (131, 132.5)), ((131, 132.5), (130.1, 130.2))]
+    for k, (a, b) in enumerate(loop):
+        seg = sexpr.loads(
+            f'(segment (start {a[0]} {a[1]}) (end {b[0]} {b[1]}) (width 0.15) (layer "F.Cu") (uuid "l{k}"))'
+        )
+        seg.insert(len(seg) - 1, copy.deepcopy(net))
+        project.pcb.append(seg)
+    before = len(list(sexpr.children(project.pcb, "segment")))
+    changes = fixes.clean_tracks(project)
+    assert any("loop(s) leaving a pad or via" in c for c in changes)
+    assert len(list(sexpr.children(project.pcb, "segment"))) <= before - 3
