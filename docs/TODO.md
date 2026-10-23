@@ -11,6 +11,19 @@
   imports (see AGENTS.md); wire `<autoroutingphase pcbTracePaths>` so unchanged placements
   skip the routing pass.
 - **`check` post-fill speed**: not profiled yet (minutes on a 238-part board).
+- **Schematic improvements** (`schgen.py`; seen on bench-psu rev C, 2026-10-23):
+  - Parts placed by a TSX sub-component (`<Channel>`, `<Controls>`) fall out of their section: the "output
+    channels" block holds only the two op-amps, the ~150 channel / front-panel parts land in one huge untitled
+    block. Group a component's parts under the section of the place it is used, one sub-block per instance
+    (CH1 / CH2).
+  - No signal flow: parts are scattered in a grid, almost everything is joined by net labels, hardly any wires.
+    Lay out power chains left to right (in -> regulator -> out) and draw short wires to the passives of a pin.
+  - Auto-named nets reach the sheet (`Net-(R125-Pad1)`, `Net-(D15-Pad1)`): name them from the pins they join, or
+    draw a wire instead of a label for two-pin nets.
+  - Block titles overflow into the neighbouring block ("MCU ... antenna at the +x edge"); size blocks to their
+    title or wrap it.
+  - Poor sheet use: A1 with the drawing in the lower two thirds and a lot of empty space; tiny text at print size.
+    Split into several sheets (one per section) or pack the blocks.
 
 ## Agent-directed routing (next big topic)
 
