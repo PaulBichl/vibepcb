@@ -1922,9 +1922,12 @@ def _drop_closed_loops(project: KicadProject) -> int:
     The router sometimes leaves such a loop (bench-psu rev C: six pieces out of a via and back, with a 70 degree
     bend). It connects nothing the pad or via doesn't connect already, but none of the other steps touch it:
     the loop opener works on junctions, the rerouter skips runs whose ends share an anchor. A loop goes only
-    if the net's pads stay as connected as before (a pad centre lying on its body would still count).
+    if the net's pads stay as connected as before; where its end was a pad's only connection (the end cap
+    reaching a pad next to the via), a straight piece from the anchor into that pad replaces it.
     """
     copper = _copper(project.pcb)
+    clearance, edge_clearance = _design_clearances(project)
+    obstacles = copper.obstacles()
     gone: dict[str, set[int]] = {}
     dropped = 0
     for run in tracks.chains(copper.segs, copper.on_pad_or_via):
@@ -1939,11 +1942,32 @@ def _drop_closed_loops(project: KicadProject) -> int:
         pads, vias = copper.pads_by_net.get(run.net, []), copper.vias_by_net.get(run.net, [])
         now = [s for s in segs if id(s) not in removed]
         after = [s for s in now if id(s) not in mine]
-        if tracks.still_connected(tracks.pad_groups(pads, vias, now), tracks.pad_groups(pads, vias, after)):
-            removed |= mine
-            for s in run.segs:
-                _drop(project.pcb, _source(s))
-            dropped += 1
+        before = tracks.pad_groups(pads, vias, now)
+        stub: tracks.Seg | None = None
+        if not tracks.still_connected(before, tracks.pad_groups(pads, vias, after)):
+            # the loop's end was a pad's connection (its cap reaching a pad next to the via): a straight piece
+            # from the anchor into that pad replaces the loop, if it keeps its clearances
+            width = min(s.width for s in run.segs)
+            for pad in sorted(pads, key=lambda o: o.distance(a, a)):
+                piece = tracks.Seg(a, pad.centre, width, run.layer, run.net)
+                fits = all(
+                    o.distance(a, pad.centre) >= clearance + width / 2
+                    for o in obstacles
+                    if o.net != run.net and run.layer in o.layers
+                ) and all(e.distance(a, pad.centre) >= edge_clearance + width / 2 for e in copper.edges)
+                if fits and tracks.still_connected(before, tracks.pad_groups(pads, vias, [*after, piece])):
+                    stub = piece
+                    break
+            if stub is None:
+                continue
+        removed |= mine
+        index = min(project.pcb.index(_source(s)) for s in run.segs)
+        template = _source(run.segs[0])
+        for s in run.segs:
+            _drop(project.pcb, _source(s))
+        if stub is not None:
+            project.pcb.insert(index, _segment_node(template, stub.a, stub.b, stub.width))
+        dropped += 1
     return dropped
 
 
@@ -3860,7 +3884,10 @@ def apply_post_fill(
             changes += [f"second pass: {c}" for c in second]
             if not second:
                 break
-        if dropped := _drop_zero_length_segments(project):  # left by a step after the last clean_tracks
+        # left by a step after the last clean_tracks (reroute_tracks, remove_antennas)
+        if loops := _drop_closed_loops(project):
+            changes.append(f"tracks: removed {loops} loop(s) leaving a pad or via and coming back into it")
+        if dropped := _drop_zero_length_segments(project):
             changes.append(f"tracks: removed {dropped} zero-length track segment(s)")
         sexpr.dump(project.pcb, project.pcb_path)
     return changes
