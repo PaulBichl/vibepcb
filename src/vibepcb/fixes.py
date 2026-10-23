@@ -2728,8 +2728,8 @@ def _snap_one_end(project: KicadProject, clearance: float, edge_clearance: float
     obstacles = copper.obstacles()
     for s in copper.segs:
         for k, (end, far) in enumerate(((s.a, s.b), (s.b, s.a))):
-            if copper.on_pad_or_via(end, s.net, s.layer):
-                continue
+            if copper.on_pad_or_via(end, s.net, s.layer) or copper.attached(end, s):
+                continue  # the end is a pad's or via's connection (its cap may just reach a pad): moving it cuts that
             same = [t for t in copper.segs_by_net.get(s.net, []) if t is not s and t.layer == s.layer]
             if any(min(math.dist(end, t.a), math.dist(end, t.b)) <= 1e-6 for t in same):
                 continue  # already meets a track end exactly
@@ -2797,8 +2797,8 @@ def _square_tees_pass(project: KicadProject, clearance: float, edge_clearance: f
         if id(s) in touched:
             continue
         for k, (end, far) in enumerate(((s.a, s.b), (s.b, s.a))):
-            if copper.on_pad_or_via(end, s.net, s.layer):
-                continue
+            if copper.on_pad_or_via(end, s.net, s.layer) or copper.attached(end, s):
+                continue  # the end is a pad's or via's connection (its cap may just reach a pad): moving it cuts that
             same = [t for t in copper.segs_by_net.get(s.net, []) if t is not s and t.layer == s.layer]
             sharing = [t for t in same if min(math.dist(end, t.a), math.dist(end, t.b)) <= tracks.EPS]
             if any(id(t) in touched for t in sharing):

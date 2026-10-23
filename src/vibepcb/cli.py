@@ -459,6 +459,40 @@ def _pad_spots(result: kicad.CheckResult) -> set[tuple[str, tuple[float, float]]
     return {(net, (round(x, 3), round(y, 3))) for net, (x, y) in result.unconnected_pads()}
 
 
+def _stitch_pour_gaps(
+    project: Path, board: str, pcb: Path, reports: Path, drc: kicad.CheckResult
+) -> tuple[kicad.CheckResult, list[str]]:
+    """Stitching vias where the refilled pour no longer reaches: pads first, then cut-off pour pieces; each kept
+    only if KiCad then reports fewer unconnected items. Returns the new DRC result and the changes."""
+    out: list[str] = []
+    if pads := drc.unconnected_pads():  # pads their pour can't reach: a via to the net's plane
+        loaded, stitched = fixes.KicadProject.load(project, board), pcb.read_bytes()
+        changes = fixes.stitch_unconnected_pads(loaded, pads)
+        if any("stitching via" in c for c in changes):
+            loaded.save()
+            fewer = kicad.run_drc(pcb, reports / "drc.json")
+            if fewer.unconnected < drc.unconnected:
+                drc = fewer
+            else:
+                pcb.write_bytes(stitched)
+                drc = kicad.run_drc(pcb, reports / "drc.json")
+        out += changes
+    if drc.unconnected:  # pour pieces cut off by tracks: a stitching via each into the plane below
+        loaded, stitched = fixes.KicadProject.load(project, board), pcb.read_bytes()
+        changes = fixes.stitch_pour_islands(loaded)
+        if changes:
+            loaded.save()
+            fewer = kicad.run_drc(pcb, reports / "drc.json")
+            if fewer.unconnected < drc.unconnected:
+                drc = fewer
+                out += changes
+            else:
+                pcb.write_bytes(stitched)
+                drc = kicad.run_drc(pcb, reports / "drc.json")
+                out.append(f"{len(changes)} stitching via(s) for pour pieces undone (no fewer unconnected items)")
+    return drc, out
+
+
 def cmd_check(board: str, *, strict: bool = False) -> int:
     project, reports = paths.kicad_dir(board), paths.reports_dir(board)
     pcb = project / f"{board}.kicad_pcb"
@@ -485,6 +519,11 @@ def cmd_check(board: str, *, strict: bool = False) -> int:
         if not changes:
             break
         drc = kicad.run_drc(pcb, reports / "drc.json")
+        if drc.unconnected > before or _pad_spots(drc) - before_pads:
+            # pour pieces / pads the pruned tracks used to reach: stitch them before judging the attempt (judged
+            # without, every attempt failed on losses the stitching after the loop would have repaired)
+            drc, stitched = _stitch_pour_gaps(project, board, pcb, reports, drc)
+            changes += stitched
         if drc.unconnected > before and attempt == POST_FILL_ATTEMPTS - 1:  # last resort: broken nets go back
             loaded = fixes.KicadProject.load(project, board)
             loaded.before_track_fixes = sexpr.loads(backup.decode("utf-8"))
@@ -503,35 +542,9 @@ def cmd_check(board: str, *, strict: bool = False) -> int:
         print(f"  post-fill: gave up after {POST_FILL_ATTEMPTS} attempts, board left as filled")
         drc = kicad.run_drc(pcb, reports / "drc.json")
     print(f"  time: post-fill up to here {time.monotonic() - post_fill_started:.0f} s")
-    if pads := drc.unconnected_pads():  # pads their pour can't reach: a via to the net's plane
-        loaded, stitched = fixes.KicadProject.load(project, board), pcb.read_bytes()
-        changes = fixes.stitch_unconnected_pads(loaded, pads)
-        if any("stitching via" in c for c in changes):
-            loaded.save()
-            fewer = kicad.run_drc(pcb, reports / "drc.json")
-            if fewer.unconnected < drc.unconnected:
-                drc = fewer
-            else:
-                pcb.write_bytes(stitched)
-                drc = kicad.run_drc(pcb, reports / "drc.json")
-        for change in changes:
-            print(f"  post-fill: {change}")
-    if drc.unconnected:  # pour pieces cut off by tracks: a stitching via each into the plane below
-        loaded, stitched = fixes.KicadProject.load(project, board), pcb.read_bytes()
-        changes = fixes.stitch_pour_islands(loaded)
-        if changes:
-            loaded.save()
-            fewer = kicad.run_drc(pcb, reports / "drc.json")
-            if fewer.unconnected < drc.unconnected:
-                drc = fewer
-                for change in changes:
-                    print(f"  post-fill: {change}")
-            else:
-                pcb.write_bytes(stitched)
-                drc = kicad.run_drc(pcb, reports / "drc.json")
-                print(
-                    f"  post-fill: {len(changes)} stitching via(s) for pour pieces undone (no fewer unconnected items)"
-                )
+    drc, stitched = _stitch_pour_gaps(project, board, pcb, reports, drc)
+    for change in stitched:
+        print(f"  post-fill: {change}")
     loaded = fixes.KicadProject.load(project, board)
     corners = fixes.sharp_corners(loaded)
     unpoured = fixes.unpoured_copper_layers(loaded)
