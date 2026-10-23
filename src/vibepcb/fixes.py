@@ -2555,7 +2555,24 @@ def _relocate_via_rerouting(
         for step in VIA_MOVE_STEPS_MM
         for k in range(VIA_MOVE_DIRECTIONS)
     ]
-    spots = [q for q in spots if all(o.distance(q, q) >= radius + clearance for o in others_all)][:VIA_REROUTE_SPOTS]
+    # only obstacles whose box comes within reach of a spot can be too close to it (testing every obstacle of
+    # the board for every spot dominated `check` on a crowded board)
+    all_index = tracks.BoxIndex([o.box for o in others_all])
+    reach = radius + clearance
+
+    def spot_free(q: tracks.Point) -> bool:
+        hits = all_index.overlapping(q[0] - reach, q[1] - reach, q[0] + reach, q[1] + reach)
+        return all(others_all[i].distance(q, q) >= reach for i in hits)
+
+    spots = [q for q in spots if spot_free(q)][:VIA_REROUTE_SPOTS]
+    by_layer: dict[str, tuple[list[tracks.Obstacle], list[tracks.Obstacle], tracks.BoxIndex]] = {}
+    for layer in {r.layer for r in runs}:  # per layer once, not per spot and run
+        near_l = [o for o in others_all if layer in o.layers]
+        by_layer[layer] = (
+            near_l,
+            [e for e in copper.edges if layer in e.layers],
+            tracks.BoxIndex([o.box for o in near_l]),
+        )
     for q in spots:
         new_runs = []
         for r in runs:
@@ -2568,10 +2585,9 @@ def _relocate_via_rerouting(
             far, rest = pts[k], pts[k + 1 :]
             width = max(s.width for s in r.segs)
             half = width / 2
-            near = [o for o in others_all if r.layer in o.layers]
-            edges = [e for e in copper.edges if r.layer in e.layers]
-            index = tracks.BoxIndex([o.box for o in near])
+            near, edges, index = by_layer[r.layer]
             need = clearance + half + REROUTE_GRID_MARGIN_MM
+            memo: dict[tuple[int, int], bool] = {}
             box = (min(q[0], far[0]) - 3, min(q[1], far[1]) - 3, max(q[0], far[0]) + 3, max(q[1], far[1]) + 3)
 
             def free(
@@ -2582,14 +2598,18 @@ def _relocate_via_rerouting(
                 need: float = need,
                 half: float = half,
                 box: tuple[float, float, float, float] = box,
+                memo: dict[tuple[int, int], bool] = memo,
             ) -> bool:
                 x, y = pt
                 if not (box[0] <= x <= box[2] and box[1] <= y <= box[3]):
                     return False
-                hits = index.overlapping(x - need, y - need, x + need, y + need)
-                return all(near[i].distance(pt, pt) >= need for i in hits) and all(
-                    e.distance(pt, pt) >= edge_clearance + half for e in edges
-                )
+                key = (round(x * 1000), round(y * 1000))
+                if key not in memo:  # every grid node is asked once per heading: remember
+                    hits = index.overlapping(x - need, y - need, x + need, y + need)
+                    memo[key] = all(near[i].distance(pt, pt) >= need for i in hits) and all(
+                        e.distance(pt, pt) >= edge_clearance + half for e in edges
+                    )
+                return memo[key]
 
             def fits(
                 a: tracks.Point,
