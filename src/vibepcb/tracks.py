@@ -554,6 +554,9 @@ def _connect(pads: list[Obstacle], vias: list[tuple[Point, float]], segs: list[S
     boxes = _boxes(segs)
     seg_index = BoxIndex(boxes)
     pad_index = BoxIndex([p.box for p in pads])
+    # a via a track takes (via_takes) has its copper box overlapping the track's box: only those are tested
+    # (testing every via against every track made `check` take hours on a board with hundreds of GND vias)
+    via_index = BoxIndex([(c[0] - r, c[1] - r, c[0] + r, c[1] + r) for c, r in vias])
     centres = [p.centre for p in pads]
 
     def find(i: int) -> int:
@@ -580,7 +583,8 @@ def _connect(pads: list[Obstacle], vias: list[tuple[Point, float]], segs: list[S
                 any(pad.distance(e, e) <= ON_EDGE_MM for e in (s.a, s.b)) or on_track_body(centres[i], s.a, s.b, half)
             ):
                 union(node, i)
-        for v, (centre, radius) in enumerate(vias):
+        for v in via_index.overlapping(sx0, sy0, sx1, sy1):
+            centre, radius = vias[v]
             if via_takes(centre, radius, s):
                 union(node, n_pads + v)
         for e in (s.a, s.b):
