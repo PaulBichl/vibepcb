@@ -3587,20 +3587,47 @@ def remove_antennas(project: KicadProject, *, filled_zones: bool = False) -> lis
             via_out.add(id(node))
     # a "loose" end may still carry a pad: KiCad also connects a pad whose centre lies on the track's body (a track
     # crossing the pad, both ends beyond it). Per net, nothing goes if the net's pads would be less connected.
-    gone_ids = {id(s) for s in removed_segs}
-    for net in {s.net for s in removed_segs} | {v[3] for v in copper.vias if id(v[0]) in via_out}:
-        pads = copper.pads_by_net.get(net, [])
-        segs = copper.segs_by_net.get(net, [])
-        vias = [v for v in copper.vias if v[3] == net]
-        before = tracks.pad_groups(pads, [(c, r) for _, c, r, _ in vias], segs)
-        after = tracks.pad_groups(
-            pads,
-            [(c, r) for node, c, r, _ in vias if id(node) not in via_out],
-            [s for s in segs if id(s) not in gone_ids],
-        )
-        if not tracks.still_connected(before, after):
-            gone_ids -= {id(s) for s in segs}
-            via_out -= {id(node) for node, _, _, _ in vias}
+    candidates_segs, candidates_vias = {id(s) for s in removed_segs}, set(via_out)
+    gone_ids: set[int] = set()
+    via_out = set()
+    for net in {s.net for s in removed_segs} | {v[3] for v in copper.vias if id(v[0]) in candidates_vias}:
+        net_pads = copper.pads_by_net.get(net, [])
+        net_segs = copper.segs_by_net.get(net, [])
+        net_via_list = [v for v in copper.vias if v[3] == net]
+
+        def groups(
+            seg_out: set[int],
+            v_out: set[int],
+            pads: list[tracks.Obstacle] = net_pads,
+            segs: list[tracks.Seg] = net_segs,
+            vias: list[tuple[list[Node], tracks.Point, float, str]] = net_via_list,
+        ) -> list[set[int]]:
+            return tracks.pad_groups(
+                pads,
+                [(c, r) for node, c, r, _ in vias if id(node) not in v_out],
+                [s for s in segs if id(s) not in seg_out],
+            )
+
+        before = groups(set(), set())
+        cand_s = {id(s) for s in net_segs} & candidates_segs
+        cand_v = {id(v[0]) for v in net_via_list} & candidates_vias
+        if tracks.still_connected(before, groups(cand_s, cand_v)):
+            gone_ids |= cand_s
+            via_out |= cand_v
+            continue
+        # one at a time: what can go without splitting the pads goes, the rest stays
+        seg_out: set[int] = set()
+        v_out: set[int] = set()
+        # in board order (ids differ run to run; the result must not)
+        order = [("s", id(s)) for s in net_segs if id(s) in cand_s] + [
+            ("v", id(v[0])) for v in net_via_list if id(v[0]) in cand_v
+        ]
+        for kind, item in order:
+            trial = (seg_out | {item}, v_out) if kind == "s" else (seg_out, v_out | {item})
+            if tracks.still_connected(before, groups(*trial)):
+                seg_out, v_out = trial
+        gone_ids |= seg_out
+        via_out |= v_out
     removed_segs = [s for s in removed_segs if id(s) in gone_ids]
     for s in removed_segs:
         _drop(project.pcb, _source(s))
