@@ -1322,3 +1322,31 @@ def test_roundrect_pad_corner_is_round() -> None:
     circle = fixes._pad_obstacle(sexpr.loads('(pad "1" thru_hole circle (at 1 1) (size 1.7 1.7) (layers "*.Cu"))'),
                                  lambda x, y: (x, y), "GND", frozenset({"B.Cu"}))  # fmt: skip
     assert circle.distance((1.85, 1.85), (1.85, 1.85)) == pytest.approx(math.hypot(0.85, 0.85) - 0.85, abs=1e-6)
+
+
+def test_remove_antennas_bridges_a_one_layer_via(project: fixes.KicadProject) -> None:
+    # bench-psu rev C: two F.Cu tracks meet only through a via (one ending at its centre, one 0.2 mm off it) -
+    # KiCad flags the via as dangling (one layer); without it the tracks would not touch
+    net = fixes._net_node(project.pcb, "VCC") or [Sym("net"), Sym("1")]
+    pads = [o for o in fixes._copper(project.pcb).pads_by_net["VCC"] if "F.Cu" in o.layers][:2]
+    assert len(pads) == 2
+    (ax, ay), (bx, by) = pads[0].centre, pads[1].centre
+    cx, cy = (ax + bx) / 2, (ay + by) / 2 + 3
+    via = sexpr.loads(f'(via (at {cx} {cy}) (size 0.5) (drill 0.3) (layers "F.Cu" "B.Cu") (uuid "vb"))')
+    via.insert(len(via) - 1, copy.deepcopy(net))
+    project.pcb.append(via)
+    for k, (a, b) in enumerate((((ax, ay), (cx, cy)), ((bx, by), (cx + 0.2, cy)))):
+        seg = sexpr.loads(
+            f'(segment (start {a[0]} {a[1]}) (end {b[0]} {b[1]}) (width 0.15) (layer "F.Cu") (uuid "b{k}"))'
+        )
+        seg.insert(len(seg) - 1, copy.deepcopy(net))
+        project.pcb.append(seg)
+    fixes.remove_antennas(project)
+    copper = fixes._copper(project.pcb)
+    assert all(math.dist(c, (cx, cy)) > 1e-6 for c, _ in copper.vias_by_net.get("VCC", []))  # the via went
+    pieces = {
+        (round(s.a[0], 3), round(s.a[1], 3), round(s.b[0], 3), round(s.b[1], 3)) for s in copper.segs_by_net["VCC"]
+    }
+    assert (round(cx + 0.2, 3), round(cy, 3), round(cx, 3), round(cy, 3)) in pieces  # bridged to the centre
+    groups = tracks.pad_groups(copper.pads_by_net["VCC"], copper.vias_by_net.get("VCC", []), copper.segs_by_net["VCC"])
+    assert any({0, 1} <= g or len(g) >= 2 for g in groups)

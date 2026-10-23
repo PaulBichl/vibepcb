@@ -3572,6 +3572,9 @@ def remove_antennas(project: KicadProject, *, filled_zones: bool = False) -> lis
         island_vias |= {id(net_vias[v][0]) for v in vias_i}
     alive = [s for s in copper.segs if all(s is not r for r in removed_segs)]
     via_out: set[int] = set()
+    # a via on one layer only may still be what joins that layer's tracks ending inside it: they get a short piece
+    # to its centre (inside its copper) when it goes
+    bridges: dict[int, list[tuple[tracks.Seg, tracks.Seg]]] = {}  # via id -> (bridge, the track it extends)
     for node, centre, radius, net in copper.vias:
         if id(node) in island_vias:
             via_out.add(id(node))
@@ -3585,6 +3588,13 @@ def remove_antennas(project: KicadProject, *, filled_zones: bool = False) -> lis
         }
         if len(layers) < 2:
             via_out.add(id(node))
+            bridges[id(node)] = [
+                (tracks.Seg(end, centre, s.width, s.layer, net), s)
+                for s in alive
+                if s.net == net and s.layer in layers
+                for end in (s.a, s.b)
+                if 1e-6 < math.dist(end, centre) <= radius - tracks.EPS
+            ]
     # a "loose" end may still carry a pad: KiCad also connects a pad whose centre lies on the track's body (a track
     # crossing the pad, both ends beyond it). Per net, nothing goes if the net's pads would be less connected.
     candidates_segs, candidates_vias = {id(s) for s in removed_segs}, set(via_out)
@@ -3602,11 +3612,9 @@ def remove_antennas(project: KicadProject, *, filled_zones: bool = False) -> lis
             segs: list[tracks.Seg] = net_segs,
             vias: list[tuple[list[Node], tracks.Point, float, str]] = net_via_list,
         ) -> list[set[int]]:
-            return tracks.pad_groups(
-                pads,
-                [(c, r) for node, c, r, _ in vias if id(node) not in v_out],
-                [s for s in segs if id(s) not in seg_out],
-            )
+            kept = [s for s in segs if id(s) not in seg_out]
+            kept += [b for v in v_out for b, s in bridges.get(v, []) if id(s) not in seg_out]
+            return tracks.pad_groups(pads, [(c, r) for node, c, r, _ in vias if id(node) not in v_out], kept)
 
         before = groups(set(), set())
         cand_s = {id(s) for s in net_segs} & candidates_segs
@@ -3632,8 +3640,13 @@ def remove_antennas(project: KicadProject, *, filled_zones: bool = False) -> lis
     for s in removed_segs:
         _drop(project.pcb, _source(s))
     removed_vias = 0
+    gone_now = {id(s) for s in removed_segs}
     for node, _, _, _ in copper.vias:
         if id(node) in via_out:
+            for bridge, s in bridges.get(id(node), []):
+                if id(s) not in gone_now:
+                    index = project.pcb.index(_source(s))
+                    project.pcb.insert(index + 1, _segment_node(_source(s), bridge.a, bridge.b, bridge.width))
             project.pcb.remove(node)
             removed_vias += 1
     changes = []
