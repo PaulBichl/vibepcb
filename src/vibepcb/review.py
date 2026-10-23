@@ -30,14 +30,13 @@ import shutil
 import tomllib
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from vibepcb import bringup, findings, intent, netcheck, paths, rules, sim
 from vibepcb.config import ConfigError
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from vibepcb.netcheck import Design
 
 CHECKLISTS_NAME = "review-checklists.toml"
@@ -67,21 +66,31 @@ PREFIX_KINDS = {
     **dict.fromkeys(("Y", "XTAL", "OSC"), "crystal"),
     **dict.fromkeys(("R", "C", "L", "FB", "F", "TP", "SW", "S", "BTN", "K", "H", "MH", "FID", "BZ"), "passive"),
 }
-DEFAULT_REVIEWER = [
-    "claude",
-    "-p",
-    "--agent",
-    "pcb-reviewer",
-    "--allowedTools",
-    "Read",
-    "Grep",
-    "Glob",
-    "WebSearch",
-    "WebFetch",
-    "Write",
-    "Edit",
-    "--",
-]
+REVIEWER_AGENT = "pcb-reviewer"
+REVIEWER_TOOLS = ["Read", "Grep", "Glob", "WebSearch", "WebFetch", "Write", "Edit"]
+TOOL_AGENT_FILE = Path(__file__).resolve().parents[2] / ".claude" / "agents" / f"{REVIEWER_AGENT}.md"
+
+
+def agent_definition(path: Path) -> dict[str, dict[str, Any]]:
+    """``{name: {description, prompt, tools}}`` for ``claude --agents`` from an agent file (frontmatter + body)."""
+    text = path.read_text(encoding="utf-8")
+    _, head, body = text.split("---", 2)
+    fields = dict(line.split(":", 1) for line in head.strip().splitlines() if ":" in line)
+    name = fields.get("name", REVIEWER_AGENT).strip()
+    tools = [x.strip() for x in fields.get("tools", "").split(",") if x.strip()] or REVIEWER_TOOLS
+    return {name: {"description": fields.get("description", "").strip(), "prompt": body.strip(), "tools": tools}}
+
+
+def reviewer_command() -> list[str]:
+    """``claude -p`` with the reviewer agent passed inline (``--agents``): project repos have no agent file of their
+    own, so a bare ``--agent pcb-reviewer`` was not found there. A project's ``.claude/agents/pcb-reviewer.md``
+    overrides the tool's."""
+    own = paths.ROOT / ".claude" / "agents" / f"{REVIEWER_AGENT}.md"
+    definition = agent_definition(own if own.exists() else TOOL_AGENT_FILE)
+    return [
+        "claude", "-p", "--agents", json.dumps(definition), "--agent", REVIEWER_AGENT,
+        "--allowedTools", *REVIEWER_TOOLS, "--",
+    ]  # fmt: skip
 
 
 class ReviewError(ConfigError):

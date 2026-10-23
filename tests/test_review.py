@@ -247,3 +247,14 @@ def test_cli_review_run_with_a_fake_reviewer(board: Path, monkeypatch: pytest.Mo
     assert cli.main(["review", "b", "--run"]) == 0
     assert review.record_path("b").exists()
     assert findings.load("b") == []
+
+
+def test_reviewer_command_passes_the_agent_inline() -> None:
+    cmd = review.reviewer_command()
+    assert cmd[:2] == ["claude", "-p"]
+    definition = json.loads(cmd[cmd.index("--agents") + 1])
+    assert set(definition) == {"pcb-reviewer"}
+    agent = definition["pcb-reviewer"]
+    assert "datasheet" in agent["prompt"]
+    assert "WebSearch" in agent["tools"]
+    assert cmd[cmd.index("--agent") + 1] == "pcb-reviewer"

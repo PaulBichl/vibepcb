@@ -707,7 +707,7 @@ def cmd_review(board: str, *, run: bool = False, merge: bool = False) -> int:
         cmd = (
             shlex.split(os.environ["VIBEPCB_REVIEWER"])
             if os.environ.get("VIBEPCB_REVIEWER")
-            else review.DEFAULT_REVIEWER
+            else review.reviewer_command()
         )
         if shutil.which(cmd[0]) is None:
             print(f"error: reviewer command {cmd[0]!r} not found (set $VIBEPCB_REVIEWER)", file=sys.stderr)
