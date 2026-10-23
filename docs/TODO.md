@@ -10,7 +10,16 @@
 - **Route cache replay**: tscircuit saves route paths only for boards without custom-symbol
   imports (see AGENTS.md); wire `<autoroutingphase pcbTracePaths>` so unchanged placements
   skip the routing pass.
-- **`check` post-fill speed**: not profiled yet (minutes on a 238-part board).
+- **`check` post-fill speed**: profiled on bench-psu rev C (2026-10-23, stack sampling); fixed: via index in
+  `_connect`, segments-only rebuild in clean rounds, reroute failure memo, per-net via index, `dangling` worklist,
+  `relocate_vias` spot index (hours -> ~3.5 min per post-fill). Open: `check` repeats the whole post-fill up to 4
+  times when a connection is lost; the `keep_near` retries only change `prune_pour_tracks`, so when its changes
+  equal the previous attempt's the rest repeats identically (rev C: 4 identical rounds, ~4 min each). Run the
+  prune first and skip the attempt when it matches; better, find which step loses the connection.
+- **Config keepouts invisible to the router**: `[keepout.*]` areas (`block` tracks / vias) reach only the KiCad
+  project, so tscircuit routes through them and `check` reports `items_not_allowed` (bench-psu rev C: 9 errors in
+  a mounting-hole keepout). Write them as `<keepout>` elements into the prepared TSX copy
+  (`tscircuit.prepared_source`), so the router avoids them too.
 - **Schematic improvements** (`schgen.py`; seen on bench-psu rev C, 2026-10-23):
   - Parts placed by a TSX sub-component (`<Channel>`, `<Controls>`) fall out of their section: the "output
     channels" block holds only the two op-amps, the ~150 channel / front-panel parts land in one huge untitled
