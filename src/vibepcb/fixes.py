@@ -1812,6 +1812,41 @@ def _with_new_segments(copper: _Copper, pcb: list[Node]) -> _Copper:
     return dataclasses.replace(copper, segs=_segments(pcb, copper.names))
 
 
+def _pad_obstacle(
+    pad: list[Node], to_board: Callable[[float, float], tuple[float, float]], net: str, layers: frozenset[str]
+) -> tracks.Obstacle:
+    """A pad's copper as KiCad sees it: circles and ovals round, rounded rectangles with their corner radius
+    (``roundrect_rratio`` x the short side), everything else (rect, custom) its bounding box.
+
+    The box alone overstated a rounded pad's corners: a track end 0.04 mm off a roundrect pad's box corner
+    counted as connected, KiCad (measuring the real corner, 0.1 mm away) did not (bench-psu rev C, INA226).
+    """
+    shape = str(pad[3])
+    size = sexpr.child(pad, "size")
+    w, h = _num(size, 1), _num(size, 2)
+    if sexpr.child(pad, "primitives") is None and shape in ("circle", "oval", "roundrect") and w > 0 and h > 0:
+        pad_at = sexpr.child(pad, "at")
+        angle = math.radians(_num(pad_at, 3))
+        px, py = to_board(_num(pad_at, 1), _num(pad_at, 2))
+
+        def board(u: float, v: float) -> tuple[float, float]:
+            return px + u * math.cos(angle) + v * math.sin(angle), py - u * math.sin(angle) + v * math.cos(angle)
+
+        if shape == "circle":
+            return tracks.Obstacle(net, layers, ((px, py),), w / 2)
+        if shape == "oval":
+            r = min(w, h) / 2
+            half = (w - h) / 2 if w >= h else (h - w) / 2
+            ends = ((-half, 0.0), (half, 0.0)) if w >= h else ((0.0, -half), (0.0, half))
+            return tracks.Obstacle(net, layers, (board(*ends[0]), board(*ends[1])), r)
+        ratio = _num(sexpr.child(pad, "roundrect_rratio"), 1, 0.25)
+        r = min(max(ratio, 0.0), 0.5) * min(w, h)
+        hw, hh = max(w / 2 - r, 1e-4), max(h / 2 - r, 1e-4)
+        corners = tuple(board(u, v) for u, v in ((-hw, -hh), (hw, -hh), (hw, hh), (-hw, hh)))
+        return tracks.Obstacle(net, layers, corners, r, polygon=True)
+    return tracks.Obstacle(net, layers, tuple(_pad_corners(pad, to_board)), polygon=True)
+
+
 def _copper(pcb: list[Node], *, filled_zones: bool = False) -> _Copper:
     names = _net_names(pcb)
     segs = _segments(pcb, names)
@@ -1828,9 +1863,7 @@ def _copper(pcb: list[Node], *, filled_zones: bool = False) -> _Copper:
             if layers:
                 if str(pad[3]) in ("rect", "roundrect") and sexpr.child(pad, "primitives") is None:
                     rect_pads.add(len(pads))
-                pads.append(
-                    tracks.Obstacle(_net_of(pad, names), layers, tuple(_pad_corners(pad, to_board)), polygon=True)
-                )
+                pads.append(_pad_obstacle(pad, to_board, _net_of(pad, names), layers))
     edges = []
     for g in pcb:
         if (
@@ -3518,7 +3551,8 @@ def remove_antennas(project: KicadProject, *, filled_zones: bool = False) -> lis
     """Delete track stubs with a loose end and vias that connect fewer than two layers.
 
     A loose end is one that touches no pad, via, other track of its net or (for a poured
-    net) its zone. Removal repeats until nothing is left dangling.
+    net) its zone. Removal repeats until nothing is left dangling. Nothing of a net goes if its
+    pads would be less connected afterwards (a track crossing a pad's centre carries it).
     """
     copper = _copper(project.pcb, filled_zones=filled_zones)
 
@@ -3536,15 +3570,11 @@ def remove_antennas(project: KicadProject, *, filled_zones: bool = False) -> lis
             continue  # a poured net's islands may hang on the pour: dangling() and KiCad judge those
         removed_segs += [s for k, s in enumerate(segs) if k in segs_i and all(s is not r for r in removed_segs)]
         island_vias |= {id(net_vias[v][0]) for v in vias_i}
-    for s in removed_segs:
-        _drop(project.pcb, _source(s))
     alive = [s for s in copper.segs if all(s is not r for r in removed_segs)]
-
-    removed_vias = 0
+    via_out: set[int] = set()
     for node, centre, radius, net in copper.vias:
         if id(node) in island_vias:
-            project.pcb.remove(node)
-            removed_vias += 1
+            via_out.add(id(node))
             continue
         layers = {
             layer
@@ -3554,6 +3584,29 @@ def remove_antennas(project: KicadProject, *, filled_zones: bool = False) -> lis
             or any(o.net == net and layer in o.layers and o.distance(centre, centre) <= radius for o in copper.pads)
         }
         if len(layers) < 2:
+            via_out.add(id(node))
+    # a "loose" end may still carry a pad: KiCad also connects a pad whose centre lies on the track's body (a track
+    # crossing the pad, both ends beyond it). Per net, nothing goes if the net's pads would be less connected.
+    gone_ids = {id(s) for s in removed_segs}
+    for net in {s.net for s in removed_segs} | {v[3] for v in copper.vias if id(v[0]) in via_out}:
+        pads = copper.pads_by_net.get(net, [])
+        segs = copper.segs_by_net.get(net, [])
+        vias = [v for v in copper.vias if v[3] == net]
+        before = tracks.pad_groups(pads, [(c, r) for _, c, r, _ in vias], segs)
+        after = tracks.pad_groups(
+            pads,
+            [(c, r) for node, c, r, _ in vias if id(node) not in via_out],
+            [s for s in segs if id(s) not in gone_ids],
+        )
+        if not tracks.still_connected(before, after):
+            gone_ids -= {id(s) for s in segs}
+            via_out -= {id(node) for node, _, _, _ in vias}
+    removed_segs = [s for s in removed_segs if id(s) in gone_ids]
+    for s in removed_segs:
+        _drop(project.pcb, _source(s))
+    removed_vias = 0
+    for node, _, _, _ in copper.vias:
+        if id(node) in via_out:
             project.pcb.remove(node)
             removed_vias += 1
     changes = []

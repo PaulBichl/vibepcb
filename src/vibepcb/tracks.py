@@ -54,7 +54,7 @@ class Seg:
 
 @dataclass
 class Obstacle:
-    """Copper of some net: a capsule (``points`` = 1-2 points, ``radius``) or a convex polygon."""
+    """Copper of some net: a capsule (``points`` = 1-2 points, ``radius``) or a convex polygon (grown by ``radius``)."""
 
     net: str
     layers: frozenset[str]
@@ -85,11 +85,11 @@ class Obstacle:
         )
         if gap > FAR_MM:
             return gap
-        if self.polygon:
+        if self.polygon:  # with a radius: the polygon grown by it (a rounded rectangle pad)
             if _in_convex(a, self.points) or _in_convex(b, self.points):
                 return 0.0
             ring = list(zip(self.points, self.points[1:] + self.points[:1], strict=True))
-            return min(seg_seg_distance(a, b, p, q) for p, q in ring)
+            return max(0.0, min(seg_seg_distance(a, b, p, q) for p, q in ring) - self.radius)
         p, q = self.points[0], self.points[-1]
         return max(0.0, seg_seg_distance(a, b, p, q) - self.radius)
 

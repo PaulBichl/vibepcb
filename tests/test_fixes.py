@@ -1309,3 +1309,16 @@ def test_clean_tracks_drops_a_loop_back_into_the_same_via(project: fixes.KicadPr
     changes = fixes.clean_tracks(project)
     assert any("loop(s) leaving a pad or via" in c for c in changes)
     assert len(list(sexpr.children(project.pcb, "segment"))) <= before - 3
+
+
+def test_roundrect_pad_corner_is_round() -> None:
+    # INA226 pad of bench-psu rev C: 0.28 x 1.62 mm roundrect, ratio 0.5 (corner radius 0.14 mm); a 0.15 mm track
+    # ending 0.04 mm off the box corner does not reach the real copper (KiCad: unconnected)
+    pad = sexpr.loads('(pad "3" smd roundrect (at 0 0 0) (size 0.28 1.62) (layers "B.Cu") (roundrect_rratio 0.5))')
+    obstacle = fixes._pad_obstacle(pad, lambda x, y: (x, y), "EN2", frozenset({"B.Cu"}))
+    end = (0.154, 0.849)  # 0.014 / 0.039 mm beyond the box corner (0.14, 0.81)
+    assert obstacle.distance(end, end) > tracks.pad_reach(0.15)
+    assert obstacle.distance((0.2, 0.0), (0.2, 0.0)) == pytest.approx(0.06, abs=1e-6)  # flat side: box distance
+    circle = fixes._pad_obstacle(sexpr.loads('(pad "1" thru_hole circle (at 1 1) (size 1.7 1.7) (layers "*.Cu"))'),
+                                 lambda x, y: (x, y), "GND", frozenset({"B.Cu"}))  # fmt: skip
+    assert circle.distance((1.85, 1.85), (1.85, 1.85)) == pytest.approx(math.hypot(0.85, 0.85) - 0.85, abs=1e-6)
