@@ -2888,8 +2888,8 @@ def _square_tees_pass(project: KicadProject, clearance: float, edge_clearance: f
         if id(s) in touched:
             continue
         for k, (end, far) in enumerate(((s.a, s.b), (s.b, s.a))):
-            if copper.on_pad_or_via(end, s.net, s.layer) or copper.attached(end, s):
-                continue  # the end is a pad's or via's connection (its cap may just reach a pad): moving it cuts that
+            if copper.on_pad_or_via(end, s.net, s.layer):
+                continue
             same = [t for t in copper.segs_by_net.get(s.net, []) if t is not s and t.layer == s.layer]
             sharing = [t for t in same if min(math.dist(end, t.a), math.dist(end, t.b)) <= tracks.EPS]
             if any(id(t) in touched for t in sharing):
@@ -2940,6 +2940,16 @@ def _square_tees_pass(project: KicadProject, clearance: float, edge_clearance: f
                 continue
             node = sexpr.child(_source(s), ("start", "end")[k])
             assert node is not None
+            # the end may also be a pad's connection (its cap reaching the pad): keep the move only if the net's
+            # pads stay as connected as before
+            pads, vias = copper.pads_by_net.get(s.net, []), copper.vias_by_net.get(s.net, [])
+            net_segs = copper.segs_by_net.get(s.net, [])
+            moved = tracks.Seg(foot, far, s.width, s.layer, s.net)
+            if not tracks.still_connected(
+                tracks.pad_groups(pads, vias, net_segs),
+                tracks.pad_groups(pads, vias, [moved if o is s else o for o in net_segs]),
+            ):
+                continue
             node[1:3] = [Sym(_mm(foot[0])), Sym(_mm(foot[1]))]
             changes.append(f"{s.net} at ({_mm(end[0])}, {_mm(end[1])}): T-junction squared ({angle:.0f} -> 90 deg)")
             touched |= {id(s), id(body)}
