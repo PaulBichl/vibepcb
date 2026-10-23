@@ -3750,22 +3750,39 @@ def sharp_corners(project: KicadProject) -> list[tuple[str, tracks.Point, float]
 
 
 def apply_post_fill(
-    project: KicadProject, keep_near: list[tracks.Point] | None = None, only_near: list[tracks.Point] | None = None
+    project: KicadProject,
+    keep_near: list[tracks.Point] | None = None,
+    only_near: list[tracks.Point] | None = None,
+    progress: Callable[[str], None] | None = None,
 ) -> list[str]:
-    """Fixes that need KiCad's zone fill (run by ``check`` after the refill); saves when anything changed."""
-    changes = prune_pour_tracks(project, keep_near, only_near)
+    """Fixes that need KiCad's zone fill (run by ``check`` after the refill); saves when anything changed.
+
+    ``progress`` gets one line per step (pass, step, seconds, changes): the loop can run for minutes.
+    """
+
+    def timed(label: str, step: Callable[[], list[str]]) -> list[str]:
+        started = time.monotonic()
+        out = step()
+        if progress is not None:
+            progress(f"{label}: {len(out)} change(s), {time.monotonic() - started:.0f} s")
+        return out
+
+    changes = timed("post-fill prune_pour_tracks", lambda: prune_pour_tracks(project, keep_near, only_near))
     if changes:  # the pruned GND tracks leave room for corners that had none before
-        for _ in range(POST_FILL_PASSES):  # each step can leave work for an earlier one: repeat until quiet
-            second = (
-                snap_near_ends(project)
-                + clean_tracks(project)
-                + separate_ends_on_pads(project)
-                + square_tees(project)
-                + push_tracks_clear(project)
-                + relocate_vias(project)
-                + reroute_tracks(project)
-                + remove_antennas(project, filled_zones=True)
-            )
+        steps: list[tuple[str, Callable[[], list[str]]]] = [
+            ("snap_near_ends", lambda: snap_near_ends(project)),
+            ("clean_tracks", lambda: clean_tracks(project)),
+            ("separate_ends_on_pads", lambda: separate_ends_on_pads(project)),
+            ("square_tees", lambda: square_tees(project)),
+            ("push_tracks_clear", lambda: push_tracks_clear(project)),
+            ("relocate_vias", lambda: relocate_vias(project)),
+            ("reroute_tracks", lambda: reroute_tracks(project)),
+            ("remove_antennas", lambda: remove_antennas(project, filled_zones=True)),
+        ]
+        for k in range(1, POST_FILL_PASSES + 1):  # each step can leave work for an earlier one: repeat until quiet
+            second = []
+            for name, step in steps:
+                second += timed(f"post-fill pass {k}/{POST_FILL_PASSES} {name}", step)
             changes += [f"second pass: {c}" for c in second]
             if not second:
                 break

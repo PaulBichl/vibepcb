@@ -476,7 +476,12 @@ def cmd_check(board: str, *, strict: bool = False) -> int:
     acute = drc.spots_of("track_angle")  # the fallback prunes only the tracks at acute angles
     for attempt in range(POST_FILL_ATTEMPTS):
         only = acute if attempt >= POST_FILL_ATTEMPTS // 2 else None
-        changes = fixes.apply_post_fill(fixes.KicadProject.load(project, board), keep, only)
+        changes = fixes.apply_post_fill(
+            fixes.KicadProject.load(project, board),
+            keep,
+            only,
+            progress=_STAGES.say,  # one line per post-fill step (no-op with --quiet)
+        )
         if not changes:
             break
         drc = kicad.run_drc(pcb, reports / "drc.json")
