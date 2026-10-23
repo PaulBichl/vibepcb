@@ -1283,3 +1283,11 @@ def test_thermal_vias_config() -> None:
         config.validate({"thermal_vias": {"U3": {"grid": 3}}})
     with pytest.raises(config.ConfigError, match="positive"):
         config.validate({"thermal_vias": {"U3": {"drill": 0}}})
+
+
+def test_clean_tracks_drops_zero_length_segments(project: fixes.KicadProject) -> None:
+    point = sexpr.loads('(segment (start 120 120) (end 120 120) (width 0.15) (layer "F.Cu") (net 1) (uuid "z"))')
+    project.pcb.append(point)
+    changes = fixes.clean_tracks(project)
+    assert "tracks: removed 1 zero-length track segment(s)" in changes
+    assert not any(s is point for s in sexpr.children(project.pcb, "segment"))

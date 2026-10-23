@@ -1899,6 +1899,22 @@ def _segment_node(template: list[Node], a: tracks.Point, b: tracks.Point, width:
 CLEAN_ROUNDS = 3
 
 
+def _seg_points(seg: list[Node]) -> tuple[tuple[str, str], tuple[str, str]]:
+    """Start and end of a segment as the file writes them (exact: equal text = the same point)."""
+    s, e = sexpr.child(seg, "start"), sexpr.child(seg, "end")
+    return (str(s[1]), str(s[2])) if s else ("", ""), (str(e[1]), str(e[2])) if e else ("", "")
+
+
+def _drop_zero_length_segments(project: KicadProject) -> int:
+    """Remove zero-length segments; returns how many. Such a piece connects nothing the items at its point don't
+    connect anyway, and KiCad reports it as crossing any other net's track nearby (its direction is undefined);
+    a via-end snap can collapse a short piece to one."""
+    points = [s for s in sexpr.children(project.pcb, "segment") if _seg_points(s)[0] == _seg_points(s)[1]]
+    for s in points:
+        project.pcb.remove(s)
+    return len(points)
+
+
 def clean_tracks(project: KicadProject) -> list[str]:
     """Straighten tscircuit's tracks and take out every corner sharper than 135 degrees.
 
@@ -1922,6 +1938,8 @@ def clean_tracks(project: KicadProject) -> list[str]:
         if not changed:
             break
     changes = []
+    if dropped := _drop_zero_length_segments(project):
+        changes.append(f"tracks: removed {dropped} zero-length track segment(s)")
     if totals["duplicates"]:
         changes.append(
             f"tracks: removed {totals['duplicates']} track segment(s) lying inside other copper of their net"
@@ -3786,6 +3804,8 @@ def apply_post_fill(
             changes += [f"second pass: {c}" for c in second]
             if not second:
                 break
+        if dropped := _drop_zero_length_segments(project):  # left by a step after the last clean_tracks
+            changes.append(f"tracks: removed {dropped} zero-length track segment(s)")
         sexpr.dump(project.pcb, project.pcb_path)
     return changes
 
