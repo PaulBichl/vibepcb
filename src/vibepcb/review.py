@@ -365,7 +365,8 @@ def validate(answers: list[Answer], work_items: list[Item], design: Design) -> l
             names = {p.name.upper() for p in design.pins_of(item.ref)} | {
                 p.number.upper() for p in design.pins_of(item.ref)
             }
-            if a.pin.upper() not in names:
+            # a pin group by its common name counts too ("GND" for GND1..GND20, "VS" for VS_POS)
+            if a.pin.upper() not in names and not any(n.startswith(a.pin.upper()) for n in names):
                 problems.append(f"{a.id}: {item.ref} has no pin {a.pin!r}")
     problems += [f"{i}: not answered" for i in wanted if i not in seen]
     return problems

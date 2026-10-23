@@ -103,6 +103,9 @@ def test_validate() -> None:
     assert "board:sims: ok needs a cite (datasheet + page, or 'n/a: <why>')" in problems
     assert "U9:x: not a checklist item of this board" in problems
     ok = [review.Answer("U1:dropout", "ok", pin="vin", cite="p.5"), review.Answer("board:sims", "ok", cite="n/a")]
+    assert (
+        review.validate([review.Answer("U1:dropout", "ok", pin="V", cite="p.5"), ok[1]], work, design) == []
+    )  # VIN, VOUT
     assert review.validate(ok, work, design) == []
     assert review.validate(ok[:1], work, design) == ["board:sims: not answered"]
 
