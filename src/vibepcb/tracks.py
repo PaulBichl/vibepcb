@@ -22,6 +22,19 @@ type Box = tuple[float, float, float, float]  # xmin, ymin, xmax, ymax
 
 EPS = 0.01  # mm: points closer than this are the same point (tracks are >= 0.1 mm wide)
 ON_EDGE_MM = 0.001  # a track end this close outside a pad is on its edge: KiCad connects it
+PAD_CAP_MARGIN_MM = EPS  # safety margin below KiCad's limit (end cap reaching the pad's copper)
+
+
+def pad_reach(width: float) -> float:
+    """How far outside a pad's copper a track end may lie and still connect to it.
+
+    KiCad connects a pad to a track whose round end cap overlaps the pad: the end within half the
+    track width of the pad (verified on bench-psu rev C: a 0.475 mm track ending 0.22 mm short of an
+    INA226 pad is connected; shortened to 0.26 mm short it is not). Kept a little below that limit.
+    """
+    return max(ON_EDGE_MM, width / 2 - PAD_CAP_MARGIN_MM)
+
+
 SPIKE_DEG = 10.0  # a polyline that turns back by more than 170 deg is a spike
 MIN_CORNER_DEG = 135.0  # interior angle: 180 = straight, 135 = a 45 deg bend
 CORNER_TOLERANCE_DEG = 0.5
@@ -522,7 +535,7 @@ def pad_groups(
 ) -> list[set[int]]:
     """Which of one net's pads are joined by its tracks and vias (pours not counted).
 
-    Connections as KiCad makes them: a track end inside a pad or a pad centre on a track
+    Connections as KiCad makes them: a track end whose end cap reaches a pad (:func:`pad_reach`) or a pad centre on a track
     (of a layer it is on); a track over a via's centre or ending on the via's copper
     (:func:`via_takes`); a track end on another track of the same layer; a via inside a pad.
     ``anchors``: indices of vias that count like pads (vias into a plane of the net: a pad's
@@ -580,7 +593,8 @@ def _connect(pads: list[Obstacle], vias: list[tuple[Point, float]], segs: list[S
         for i in pad_index.overlapping(sx0, sy0, sx1, sy1):
             pad = pads[i]
             if s.layer in pad.layers and (
-                any(pad.distance(e, e) <= ON_EDGE_MM for e in (s.a, s.b)) or on_track_body(centres[i], s.a, s.b, half)
+                any(pad.distance(e, e) <= pad_reach(s.width) for e in (s.a, s.b))
+                or on_track_body(centres[i], s.a, s.b, half)
             ):
                 union(node, i)
         for v in via_index.overlapping(sx0, sy0, sx1, sy1):

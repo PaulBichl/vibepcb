@@ -1745,7 +1745,8 @@ class _Copper:
     def attached(self, p: tracks.Point, s: tracks.Seg) -> bool:
         """Whether track end p of s connects to a pad or via the way KiCad sees it.
 
-        A pad takes any track end inside it; a via a track end inside it (see :func:`tracks.via_takes`).
+        A pad takes a track end whose end cap reaches its copper (:func:`tracks.pad_reach`); a via a track end
+        inside it (see :func:`tracks.via_takes`).
         """
         if any(math.dist(p, c) <= r - tracks.EPS for c, r in self._vias_at(p, s.net)):
             return True
@@ -1753,8 +1754,8 @@ class _Copper:
         if index is None:
             return False
         pads = self.pads_by_net[s.net]
-        # a point outside a pad's bounding box (plus the edge tolerance) is never on the pad
-        e = tracks.ON_EDGE_MM
+        # a point outside a pad's bounding box plus the track's reach (its end cap) never connects to the pad
+        e = tracks.pad_reach(s.width)
         return any(
             s.layer in pads[i].layers and pads[i].distance(p, p) <= e
             for i in index.overlapping(p[0] - e, p[1] - e, p[0] + e, p[1] + e)
@@ -2065,13 +2066,21 @@ COLLAPSE_BRANCH_MM = 1.0  # a junction may move to the far end of a branch this 
 def _open_junctions(project: KicadProject, clearance: float, edge_clearance: float) -> int:
     """Move junctions (3+ tracks meeting, not on a pad/via) whose branches meet at an acute angle.
 
-    All tracks meeting there move their common end together, so nothing disconnects;
-    each moved track must keep its clearances (``tracks.move_junction``).
+    All tracks meeting there move their common end together; each moved track must keep its
+    clearances (``tracks.move_junction``). A move is undone if the net's pads are less connected
+    afterwards: moving an end swings the track's body, and a pad counts as attached when its centre
+    lies on a track's body (bench-psu rev C: a USB-C pad lost its only track that way).
     """
     copper = _copper(project.pcb)
     obstacles = copper.obstacles()
     moved = 0
     touched: set[int] = set()
+    before_groups: dict[str, list[set[int]]] = {}
+
+    def net_groups(net: str) -> list[set[int]]:
+        segs = [s for s in _segments(project.pcb, copper.names) if s.net == net]
+        return tracks.pad_groups(copper.pads_by_net.get(net, []), copper.vias_by_net.get(net, []), segs)
+
     for (net, layer, _), users in tracks.junctions(copper.segs).items():
         j = copper.segs[users[0][0]].b if users[0][1] else copper.segs[users[0][0]].a
         others = [copper.segs[i].a if end else copper.segs[i].b for i, end in users]
@@ -2111,14 +2120,27 @@ def _open_junctions(project: KicadProject, clearance: float, edge_clearance: flo
                     break
         if q is None:
             continue
-        touched.update(i for i, _ in users)
+        if net not in before_groups:
+            before_groups[net] = net_groups(net)
+        undo: list[tuple[list[Node], list[Node]]] = []  # (node, its old values)
+        dropped: tuple[int, list[Node]] | None = None
         for i, end in users:
             if i == collapsed:
-                _drop(project.pcb, _source(copper.segs[i]))
+                seg_node = _source(copper.segs[i])
+                dropped = (project.pcb.index(seg_node), seg_node)
+                _drop(project.pcb, seg_node)
                 continue
             node = sexpr.child(_source(copper.segs[i]), ("start", "end")[end])
             if node is not None:
+                undo.append((node, node[1:]))
                 node[1:] = [Sym(_mm(q[0])), Sym(_mm(q[1]))]
+        if not tracks.still_connected(before_groups[net], net_groups(net)):
+            for node, old in undo:
+                node[1:] = old
+            if dropped is not None:
+                project.pcb.insert(*dropped)
+            continue
+        touched.update(i for i, _ in users)
         moved += 1
     return moved
 

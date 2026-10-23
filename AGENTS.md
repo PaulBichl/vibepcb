@@ -124,7 +124,7 @@ test in `tests/test_fixes.py` against the fixtures in `tests/data/`.
   Keep that distinction when writing values (`Sym("1.6")` vs `"VCC"`).
 - Which export/router quirks are already handled, and why: table in
   [docs/TOOLING.md](docs/TOOLING.md#52-table-of-all-fixes). Every track change is verified against
-  KiCad's connection rules (pad: track end inside it or pad centre on the track; via: via centre on the track or a track end inside it, copper overlap is not enough;
+  KiCad's connection rules (pad: the track's end cap reaching its copper, i.e. the end within half the track width, or pad centre on the track; via: via centre on the track or a track end inside it, copper overlap is not enough;
   track-track: end to end), net by net, else polyline by polyline.
 - `check` refills zones with KiCad and saves the board (tscircuit's pour is a
   mosaic with floating islands). The KiCad 10 save writes `(net "NAME")` without

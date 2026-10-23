@@ -187,3 +187,17 @@ def test_via_takes_follows_kicad_not_copper_overlap() -> None:
     assert tracks.via_takes(via, 0.2, over_centre)
     assert tracks.via_takes(via, 0.2, end_inside)
     assert not tracks.via_takes(via, 0.2, end_just_outside)
+
+
+def test_pad_takes_a_track_whose_end_cap_reaches_it() -> None:
+    # INA226 pad of bench-psu rev C: 0.28 x 1.62 mm, a 0.475 mm track ending 0.22 mm short of its edge (KiCad:
+    # connected); 0.26 mm short (end cap no longer reaching it) is not
+    x0, x1, y0, y1 = 94.86, 95.14, 109.58, 111.2
+    pad = tracks.Obstacle("OUT2", frozenset({"B.Cu"}), ((x0, y0), (x1, y0), (x1, y1), (x0, y1)), polygon=True)
+    other = tracks.Obstacle(
+        "OUT2", frozenset({"B.Cu"}), ((93.9, 109.6), (94.3, 109.6), (94.3, 111.2), (93.9, 111.2)), polygon=True
+    )
+    for end, joined in ((94.64, True), (94.60, False)):
+        seg = tracks.Seg((94.1, 110.39), (end, 110.39), 0.475, "B.Cu", "OUT2")
+        groups = tracks.pad_groups([other, pad], [], [seg])
+        assert (len(groups) == 1) is joined, end

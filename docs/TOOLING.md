@@ -383,7 +383,7 @@ Per net it:
    the board-edge clearance (`_design_clearances` reads the default net class / rules,
    falling back to 0.2 mm and 0.5 mm);
 4. verifies connectivity with `pad_groups` / `still_connected`, which follow KiCad's rules
-   (pad: track end inside it or pad centre on the track; via: via centre on the track;
+   (pad: track end within half its width of the pad copper, or pad centre on the track; via: via centre on the track;
    track-track: end to end). If a net's connectivity breaks, it falls back to per-polyline
    decisions, and a polyline that cannot be cleaned without cutting a connection is left as routed.
 
