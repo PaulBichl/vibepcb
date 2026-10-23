@@ -8,6 +8,7 @@ there was nothing to do). Register new fixes in ``FIXES``; they run in order.
 from __future__ import annotations
 
 import copy
+import dataclasses
 import datetime
 import functools
 import importlib
@@ -50,6 +51,8 @@ class KicadProject:
     before_track_fixes: list[Node] | None = None  # board copy taken by apply_all (see restore_nets)
     config: dict[str, Any] = field(default_factory=dict)  # boards/<board>/vibepcb.toml (see vibepcb.config)
     routes: dict[str, Any] = field(default_factory=dict)  # boards/<board>/routes.toml (see vibepcb.routes)
+    # reroute_tracks: run key -> fingerprint of the copper around it when no route was found (see there)
+    reroute_failed: dict[tuple[Any, ...], tuple[Any, ...]] = field(default_factory=dict)
 
     @classmethod
     def load(cls, directory: Path, stem: str) -> KicadProject:
@@ -1772,9 +1775,8 @@ KEEPOUT_VIA_NET = "<via-keepout>"  # keepout areas that only forbid vias
 KEEPOUT_INSET_MM = 0.09  # <= any board clearance (fab minimum): copper never ends up inside the keepout
 
 
-def _copper(pcb: list[Node], *, filled_zones: bool = False) -> _Copper:
-    names = _net_names(pcb)
-    segs = [
+def _segments(pcb: list[Node], names: dict[str, str]) -> list[tracks.Seg]:
+    return [
         tracks.Seg(
             (_num(sexpr.child(s, "start"), 1), _num(sexpr.child(s, "start"), 2)),
             (_num(sexpr.child(s, "end"), 1), _num(sexpr.child(s, "end"), 2)),
@@ -1785,6 +1787,17 @@ def _copper(pcb: list[Node], *, filled_zones: bool = False) -> _Copper:
         )
         for s in sexpr.children(pcb, "segment")
     ]
+
+
+def _with_new_segments(copper: _Copper, pcb: list[Node]) -> _Copper:
+    """``copper`` after only track segments changed: pads, vias, outline, zones and keepouts are kept, the
+    segments are read again (rebuilding the whole model after every net made `check` take many minutes)."""
+    return dataclasses.replace(copper, segs=_segments(pcb, copper.names))
+
+
+def _copper(pcb: list[Node], *, filled_zones: bool = False) -> _Copper:
+    names = _net_names(pcb)
+    segs = _segments(pcb, names)
     vias = []
     for v in sexpr.children(pcb, "via"):
         at = sexpr.child(v, "at")
@@ -2091,8 +2104,8 @@ def _clean_round(
     stale = False
     copper = _copper(project.pcb)
     for net in sorted({s.net for s in copper.segs}):
-        if stale:  # earlier nets moved
-            copper, stale = _copper(project.pcb), False
+        if stale:  # earlier nets' segments were replaced (only segments: see _with_new_segments)
+            copper, stale = _with_new_segments(copper, project.pcb), False
         segs = copper.segs_by_net.get(net, [])
         pads = copper.pads_by_net.get(net, [])
         vias = copper.vias_by_net.get(net, [])
@@ -2916,6 +2929,27 @@ def reroute_tracks(project: KicadProject) -> list[str]:
                 and o.box[3] > y0 - far
             ]
             edges = [e for e in copper.edges if run.layer in e.layers]
+            # the search depends only on the run, its width and the copper (any net) within reach: a run that
+            # found no route with exactly this surrounding finds none again - skip it (later post-fill passes
+            # retried every hopeless run with dozens of exhaustive grid searches)
+            fingerprint = (
+                tuple(tracks._key(p) for p in pts),
+                round(width * 1000),
+                tuple(
+                    sorted(
+                        (
+                            o.net,
+                            tuple(sorted(o.layers)),
+                            tuple(tracks._key(q) for q in o.points),
+                            round(o.radius * 1000),
+                        )
+                        for o in obstacles
+                        if o.box[0] < x1 + far and o.box[2] > x0 - far and o.box[1] < y1 + far and o.box[3] > y0 - far
+                    )
+                ),
+            )
+            if project.reroute_failed.get(key) == fingerprint:
+                continue
             mine = {id(s) for s in run.segs}
 
             def fits(
@@ -3067,6 +3101,7 @@ def reroute_tracks(project: KicadProject) -> list[str]:
                     break
                 log.debug("reroute %s %s %s-%s: route rejected", run.net, run.layer, start, goal)
             if new_points is None:
+                project.reroute_failed[key] = fingerprint
                 continue
             template = _source(run.segs[0])
             index = min(project.pcb.index(_source(s)) for s in run.segs)
