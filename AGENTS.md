@@ -176,6 +176,11 @@ test in `tests/test_fixes.py` against the fixtures in `tests/data/`.
   split it over both corners next to the partner, not around one corner.
 - Check display/connector footprints' orientation against the datasheet in the 3D render
   (`fab` top PNG): a dip12 7-segment rotated 90 deg passed every check but read sideways.
+- Differential pairs (USB, LVDS): tscircuit's `<differentialpair>` only matches lengths, its router doesn't couple the
+  tracks. Draw the pair as two named `<trace pcbPath={[...]}>` (points `{x, y, via, fromLayer, toLayer}`, ending in the
+  target port selector) side by side at the netclass gap; the router routes the rest around it. The points are
+  relative to the `from` part's centre, not its pin (`pcbPathRelativeTo` was ignored on bench-psu): check the result
+  with a routing-disabled evaluation (`tscircuit.evaluate_unrouted`) before a full build.
 - BGA: don't let tscircuit's router into a ball field (it tangles: 199 acute angles on a 54-ball SDRAM) and
   don't use its fanout (dogbone + pour crashes, tscircuit/core#4660; saved `pcbTracePaths` + `routeRemaining`
   crash, #4663). Use `[escape.<ref>]`. Saved paths, if ever needed: group-relative coordinates, the first
