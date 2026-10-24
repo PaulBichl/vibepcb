@@ -271,12 +271,27 @@ def test_place_reference_designators_bottom_side(project: fixes.KicadProject) ->
     assert [Sym("justify"), Sym("mirror")] in effects  # bottom text stays mirrored
     font = sexpr.child(effects, "font")
     assert font is not None
-    assert sexpr.child(font, "size") == [Sym("size"), Sym("0.8"), Sym("0.8")]
+    size = Sym(fixes._mm(fixes.REF_TEXT_SIZE_BOTTOM_MM))
+    assert sexpr.child(font, "size") == [Sym("size"), size, size]  # the crowded side gets smaller text
     at = sexpr.child(geometry.prop, "at")
     x, y = fixes._fp_to_board(fp)(fixes._num(at, 1), fixes._num(at, 2))
-    box = fixes._text_box(x, y, geometry.ref, fixes.REF_TEXT_SIZE_MM, fixes._num(at, 3))
+    box = fixes._text_box(x, y, geometry.ref, fixes.REF_TEXT_SIZE_BOTTOM_MM, fixes._num(at, 3))
     assert not any(fixes._overlaps(box, keepout) for keepout in geometry.keepouts)
     assert fixes.place_reference_designators(project) == []  # idempotent
+
+
+def test_place_reference_designators_least_covered_spot(project: fixes.KicadProject) -> None:
+    # the bottom cap sits in a dense via field: no candidate is free, so the reference still moves off
+    # tscircuit's offset to the candidate covering the fewest items, and the report says so
+    fp = sexpr.loads(BOTTOM_CAP)
+    project.pcb.append(fp)
+    fx, fy = fixes._num(sexpr.child(fp, "at"), 1), fixes._num(sexpr.child(fp, "at"), 2)
+    project.pcb += [
+        sexpr.loads(f"(via (at {fx + i * 0.8:.2f} {fy + j * 0.8:.2f}) (size 0.6) (drill 0.3) (layers F.Cu B.Cu) (net 2))")
+        for i in range(-8, 9) for j in range(-8, 9) if abs(i) > 2 or abs(j) > 1
+    ]  # fmt: skip
+    changes = fixes.place_reference_designators(project)
+    assert any(c.startswith("C9: reference at") and "no free spot: covers" in c for c in changes)
 
 
 ZONE = """(zone (net 2) (net_name "GND") (layer "F.Cu") (hatch edge 0.5)
@@ -766,6 +781,28 @@ def test_push_tracks_clear_slides_a_pad_end(project: fixes.KicadProject) -> None
     assert 91.98 + fixes.PAD_EDGE_MARGIN_MM <= x < 92.73  # moved away from the via, still in the pad
     end, nxt_start = sexpr.child(piece, "end"), sexpr.child(nxt, "start")
     assert end == ["end", *nxt_start[1:]] if nxt_start is not None else False  # neighbour followed
+    assert fixes.push_tracks_clear(project) == []
+
+
+def test_push_tracks_clear_necks_a_wedged_piece(project: fixes.KicadProject) -> None:
+    # a short VCC piece between two GND vias, 0.08 mm short of room for its 0.2 mm width on each side:
+    # no push clears both, so it necks down (and stays centred)
+    clearance, _ = fixes._design_clearances(project)
+    h = 0.3 + clearance + 0.08  # via radius + clearance + room for a 0.16 mm track
+    vias = [
+        sexpr.loads(f"(via (at 65 {60 + dy:.4f}) (size 0.6) (drill 0.3) (layers F.Cu B.Cu) (net 2))") for dy in (h, -h)
+    ]
+    pieces = [
+        sexpr.loads(f"(segment (start {a} 60) (end {b} 60) (width 0.2) (layer F.Cu) (net 1))")
+        for a, b in ((61, 64.6), (64.6, 65.4), (65.4, 69))
+    ]
+    project.pcb += [*vias, *pieces]
+    changes = fixes.push_tracks_clear(project)
+    assert any("necked" in c for c in changes)
+    width = sexpr.child(pieces[1], "width")
+    assert width is not None
+    assert fixes._design_min_track_width(project) <= float(str(width[1])) <= 0.16
+    assert [sexpr.child(p, "width") for p in (pieces[0], pieces[2])] == [["width", Sym("0.2")]] * 2
     assert fixes.push_tracks_clear(project) == []
 
 

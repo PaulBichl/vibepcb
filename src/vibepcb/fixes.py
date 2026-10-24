@@ -1265,7 +1265,12 @@ def router_clearance_tolerance(project: KicadProject) -> list[str]:
     return [f"{dru.name}: copper clearance >= {_mm(clearance)} mm"]
 
 
-REF_TEXT_SIZE_MM = 0.8  # common fab minimum for legible silkscreen
+REF_TEXT_SIZE_MM = 0.8  # common fab minimum for legible silkscreen (JLCPCB asks >= 1.0 mm)
+# bottom references: the back of a two-sided board is densely packed (all the electronics); 0.65 mm with the
+# 0.15 mm stroke stays readable under a loupe and roughly halves the references that find no free spot
+REF_TEXT_SIZE_BOTTOM_MM = 0.65
+REF_GAPS_MM = (0.05, 0.35, 0.7, 1.1)  # text box to courtyard
+REF_SHIFTS_MM = (0.0, -0.5, 0.5, -1.0, 1.0, -1.5, 1.5, -2.0, 2.0, -2.5, 2.5)  # along the courtyard side
 REF_TEXT_THICKNESS_MM = 0.15
 REF_CLEARANCE_MM = 0.15  # text box to pads / silk / other text
 REF_EDGE_CLEARANCE_MM = 0.3
@@ -1396,8 +1401,8 @@ def _ref_candidates(body: Box, w: float, h: float) -> list[tuple[float, float, f
     xmin, ymin, xmax, ymax = body
     cx, cy = (xmin + xmax) / 2, (ymin + ymax) / 2
     out = []
-    for gap in (0.05, 0.35, 0.7):
-        for shift in (0.0, -0.5, 0.5, -1.0, 1.0, -1.5, 1.5):
+    for gap in REF_GAPS_MM:
+        for shift in REF_SHIFTS_MM:
             out += [
                 (cx + shift, ymin - gap - h / 2, 0.0),  # above
                 (cx + shift, ymax + gap + h / 2, 0.0),  # below
@@ -1448,8 +1453,8 @@ def _fixed_obstacles(pcb: list[Node], footprints: list[_Footprint], side: str = 
     return obstacles
 
 
-def _set_ref_font(text: list[Node]) -> bool:
-    """Reference text to REF_TEXT_SIZE_MM, centred (bottom text stays mirrored); returns whether the size changed."""
+def _set_ref_font(text: list[Node], size_mm: float = REF_TEXT_SIZE_MM) -> bool:
+    """Reference text to ``size_mm``, centred (bottom text stays mirrored); returns whether the size changed."""
     effects = sexpr.child(text, "effects")
     font = None if effects is None else sexpr.child(effects, "font")
     if effects is None or font is None:
@@ -1459,7 +1464,7 @@ def _set_ref_font(text: list[Node]) -> bool:
     if mirrored:
         effects.append([Sym("justify"), Sym("mirror")])
     changed = False
-    size, thickness = Sym(_mm(REF_TEXT_SIZE_MM)), Sym(_mm(REF_TEXT_THICKNESS_MM))
+    size, thickness = Sym(_mm(size_mm)), Sym(_mm(REF_TEXT_THICKNESS_MM))
     for key, value in (("size", [size, size]), ("thickness", [thickness])):
         node = sexpr.child(font, key)
         if node is None:
@@ -1477,9 +1482,10 @@ def place_reference_designators(project: KicadProject) -> list[str]:
 
     tscircuit writes 0.4 mm references (below every fab's minimum) at a fixed offset, so
     they land on pads, on neighbours' silkscreen, on each other or beyond the board edge.
-    Each reference gets 0.8 mm text, placed at the first candidate around its courtyard
+    Each reference gets 0.8 mm text (0.65 mm on the crowded bottom side), placed at the first candidate around its courtyard
     that stays inside the board and clear of pads, vias, holes, silkscreen, board-level text
-    and references already placed; parts' bodies (courtyards) are avoided when possible.
+    and references already placed; parts' bodies (courtyards) are avoided when possible. Where no
+    candidate is free, the one covering the fewest of those things is taken (reported).
     Top and bottom parts are placed separately, each against its own side's silkscreen and pads.
     """
     pcb = project.pcb
@@ -1501,25 +1507,34 @@ def _place_side_references(pcb: list[Node], board: Box, side: str) -> list[str]:
     hard = _fixed_obstacles(pcb, footprints, side) + [box for geo in footprints for box in geo.keepouts]
     changes = []
     placed: list[Box] = []
-    h = REF_TEXT_SIZE_MM + REF_TEXT_THICKNESS_MM
+    size = REF_TEXT_SIZE_MM if side == "F" else REF_TEXT_SIZE_BOTTOM_MM
+    h = size + REF_TEXT_THICKNESS_MM
     for geo in sorted(footprints, key=lambda geo: _natural_key(geo.ref)):
-        resized = _set_ref_font(geo.prop)
-        w = len(geo.ref) * REF_TEXT_SIZE_MM * CHAR_ADVANCE + REF_TEXT_THICKNESS_MM
+        resized = _set_ref_font(geo.prop, size)
+        w = len(geo.ref) * size * CHAR_ADVANCE + REF_TEXT_THICKNESS_MM
         bodies = [other.body for other in footprints if other is not geo]
         choice = None
         for obstacles in (hard + placed + bodies, hard + placed):  # avoid other parts' bodies if possible
             for x, y, angle in _ref_candidates(geo.body, w, h):
-                box = _text_box(x, y, geo.ref, REF_TEXT_SIZE_MM, angle)
+                box = _text_box(x, y, geo.ref, size, angle)
                 inside = board[0] <= box[0] and board[1] <= box[1] and box[2] <= board[2] and box[3] <= board[3]
                 if inside and not any(_overlaps(box, o) for o in obstacles):
                     choice = (x, y, angle, box)
                     break
             if choice is not None:
                 break
-        if choice is None:
-            if resized:
-                changes.append(f"{geo.ref}: reference resized, no free spot found - check by eye")
-            continue
+        crowded = 0
+        if choice is None:  # no free spot: the candidate covering the fewest things beats tscircuit's fixed offset
+            scored = []
+            for x, y, angle in _ref_candidates(geo.body, w, h):
+                box = _text_box(x, y, geo.ref, size, angle)
+                if board[0] <= box[0] and board[1] <= box[1] and box[2] <= board[2] and box[3] <= board[3]:
+                    scored.append((sum(_overlaps(box, o) for o in hard + placed), (x, y, angle, box)))
+            if not scored:
+                if resized:
+                    changes.append(f"{geo.ref}: reference resized, no spot inside the board - check by eye")
+                continue
+            crowded, choice = min(scored, key=lambda c: c[0])
         x, y, angle, box = choice
         placed.append(_grow(box, REF_CLEARANCE_MM))
         at, fp_at = sexpr.child(geo.prop, "at"), sexpr.child(geo.node, "at")
@@ -1533,7 +1548,8 @@ def _place_side_references(pcb: list[Node], board: Box, side: str) -> list[str]:
         ]
         if at is not None and [str(v) for v in at] != [str(v) for v in local]:
             at[:] = local
-            changes.append(f"{geo.ref}: reference at ({_mm(x)}, {_mm(y)}) {angle:g} deg")
+            note = f", no free spot: covers {crowded} item(s) - check by eye" if crowded else ""
+            changes.append(f"{geo.ref}: reference at ({_mm(x)}, {_mm(y)}) {angle:g} deg{note}")
         elif resized:
             changes.append(f"{geo.ref}: reference resized")
     return changes
@@ -3311,6 +3327,7 @@ def reroute_tracks(project: KicadProject) -> list[str]:
     return changes
 
 
+NECK_MAX_LEN_MM = 1.0  # longer pieces are not narrowed (a power track keeps its width over any real length)
 PUSH_STEPS_MM = tuple(round(0.02 * k, 2) for k in range(1, 16))  # up to 0.3 mm
 
 
@@ -3322,10 +3339,13 @@ def push_tracks_clear(project: KicadProject) -> list[str]:
     there, no pad or via) or lie on a pad of its net moves perpendicular to itself, its
     neighbours following, in small steps up to 0.3 mm, either side; an end on a pad must stay
     inside it (KiCad still connects it), every changed piece must keep the clearance and no
-    corner may get sharper than 135 deg (or than it was).
+    corner may get sharper than 135 deg (or than it was). A piece of at most
+    :data:`NECK_MAX_LEN_MM` wedged between two obstacles, where no push clears both, is necked
+    down (widest width first, to the board's minimum track width) and pushed as little as needed.
     """
     clearance, edge_clearance = _design_clearances(project)
-    changes = []
+    min_width = _design_min_track_width(project)
+    changes: list[str] = []
     for _ in range(3):  # a push can open room for the next one
         copper = _copper(project.pcb)
         obstacles = copper.obstacles()
@@ -3376,48 +3396,70 @@ def push_tracks_clear(project: KicadProject) -> list[str]:
                 for end, p, q in ((ends[0], s.a, s.b), (ends[1], s.b, s.a))
                 if not isinstance(end, tracks.Obstacle)
             ]
-            for step in PUSH_STEPS_MM:
-                done = False
-                for sign in (1, -1):
-                    off = (normal[0] * step * sign, normal[1] * step * sign)
-                    na = (s.a[0] + off[0], s.a[1] + off[1])
-                    nb = (s.b[0] + off[0], s.b[1] + off[1])
-                    if not ok(na, nb, s.width):
+
+            def attempt(
+                step: float,
+                sign: int,
+                width: float,
+                s: tracks.Seg = s,
+                ends: list[tuple[tracks.Seg, tracks.Point] | tracks.Obstacle] = ends,
+                normal: tuple[float, float] = normal,
+                corners: list[float] = corners,
+                ok: Callable[..., bool] = ok,
+            ) -> bool:
+                off = (normal[0] * step * sign, normal[1] * step * sign)
+                na = (s.a[0] + off[0], s.a[1] + off[1])
+                nb = (s.b[0] + off[0], s.b[1] + off[1])
+                if not ok(na, nb, width):
+                    return False
+                new_corners, moves = [], [(s, s.a, na), (s, s.b, nb)]
+                for end, old_p, new_p, other in ((ends[0], s.a, na, nb), (ends[1], s.b, nb, na)):
+                    if isinstance(end, tracks.Obstacle):  # stays inside its pad, clear of the edge
+                        m = PAD_EDGE_MARGIN_MM
+                        probes = ((new_p[0] + m, new_p[1]), (new_p[0] - m, new_p[1]),
+                                  (new_p[0], new_p[1] + m), (new_p[0], new_p[1] - m))  # fmt: skip
+                        if any(end.distance(q, q) > 0 for q in probes):
+                            return False
                         continue
-                    fits_ends, new_corners, moves = True, [], [(s, s.a, na), (s, s.b, nb)]
-                    for end, old_p, new_p, other in ((ends[0], s.a, na, nb), (ends[1], s.b, nb, na)):
-                        if isinstance(end, tracks.Obstacle):  # stays inside its pad, clear of the edge
-                            m = PAD_EDGE_MARGIN_MM
-                            if any(
-                                end.distance(q, q) > 0
-                                for q in (
-                                    (new_p[0] + m, new_p[1]),
-                                    (new_p[0] - m, new_p[1]),
-                                    (new_p[0], new_p[1] + m),
-                                    (new_p[0], new_p[1] - m),
-                                )
-                            ):
-                                fits_ends = False
-                            continue
-                        t, far = end
-                        if not ok(far, new_p, t.width):
-                            fits_ends = False
-                        new_corners.append(tracks.interior_angle(far, new_p, other))
-                        moves.append((t, old_p, new_p))
-                    # no corner sharper than 135 deg, or than it already was
-                    floor = min(tracks.MIN_CORNER_DEG, *corners)
-                    if not fits_ends or (new_corners and min(new_corners) < floor - 1e-6):
-                        continue
-                    for seg, old, new_point in moves:
-                        key = "start" if math.dist(seg.a, old) <= tracks.EPS else "end"
-                        node = sexpr.child(_source(seg), key)
-                        assert node is not None
-                        node[1:3] = [Sym(_mm(new_point[0])), Sym(_mm(new_point[1]))]
-                    changes.append(f"{s.net} track at ({_mm(s.a[0])}, {_mm(s.a[1])}) pushed {step} mm clear")
-                    done = pushed = True
-                    break
-                if done:
-                    break
+                    t, far = end
+                    if step and not ok(far, new_p, t.width):
+                        return False
+                    new_corners.append(tracks.interior_angle(far, new_p, other))
+                    moves.append((t, old_p, new_p))
+                # no corner sharper than 135 deg, or than it already was
+                if new_corners and min(new_corners) < min(tracks.MIN_CORNER_DEG, *corners) - 1e-6:
+                    return False
+                for seg, old, new_point in moves:
+                    key = "start" if math.dist(seg.a, old) <= tracks.EPS else "end"
+                    node = sexpr.child(_source(seg), key)
+                    assert node is not None
+                    node[1:3] = [Sym(_mm(new_point[0])), Sym(_mm(new_point[1]))]
+                where = f"{s.net} track at ({_mm(s.a[0])}, {_mm(s.a[1])})"
+                if width < s.width:
+                    width_node = sexpr.child(_source(s), "width")
+                    assert width_node is not None
+                    width_node[1] = Sym(_mm(width))
+                    changes.append(f"{where} necked {_mm(s.width)} -> {_mm(width)} mm"
+                                   + (f", pushed {step} mm" if step else ""))  # fmt: skip
+                else:
+                    changes.append(f"{where} pushed {step} mm clear")
+                return True
+
+            pushed = any(attempt(step, sign, s.width) for step in PUSH_STEPS_MM for sign in (1, -1))
+            if not pushed and math.dist(s.a, s.b) <= NECK_MAX_LEN_MM:
+                # wedged between two obstacles: neck the short piece down (like a router next to a pad),
+                # widest width first, the smallest push that clears it
+                widths = []
+                w = math.floor(s.width * 100 - 1e-6) / 100
+                while w >= min_width - 1e-9:
+                    widths.append(round(w, 2))
+                    w -= 0.01
+                pushed = any(
+                    attempt(step, sign, w)
+                    for w in widths
+                    for step in (0.0, *PUSH_STEPS_MM)
+                    for sign in ((1,) if step == 0 else (1, -1))
+                )
             if pushed:
                 break  # copper changed: rebuild before the next one
         if not pushed:
