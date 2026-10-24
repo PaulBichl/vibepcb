@@ -12,8 +12,10 @@
     source = "netcheck"            # netcheck (written by `check`) | review (`pcb review --merge`) | anything else (by hand)
 
 ``check`` merges the deterministic findings (:mod:`vibepcb.netcheck`) into the file: a finding it still finds
-keeps its status and reason (unless its text changed: an acceptance answers what the finding said, so it is reopened
-with the old reason kept after :data:`REOPENED`), a new one is added as ``open``, one it no longer finds is dropped. ``pcb review --merge``
+keeps its status and reason (unless it changed: an acceptance answers what the finding said, so it is reopened
+with the old reason kept after :data:`REOPENED`; a deterministic finding changes with its text, a review finding
+with its verdict - issue vs. undecided - since the reviewer words every run anew), a new one is added as ``open``,
+one it no longer finds is dropped. ``pcb review --merge``
 does the same for ``source = "review"`` (the reviewer agent's issue / unknown answers, docs/REVIEW.md). Entries
 with any other ``source`` (written by hand) are never touched. An
 ``accepted`` finding without a reason still counts as open. Open findings are warnings in vibe mode and fail
@@ -36,6 +38,7 @@ if TYPE_CHECKING:
 FINDINGS_NAME = "findings.toml"
 AUTO = "netcheck"
 STATUSES = ("open", "accepted")
+UNDECIDED = "(reviewer could not decide)"  # vibepcb.review's suffix of an "unknown" answer
 REOPENED = "previously accepted, before the finding text changed: "
 KEYS = ("id", "ref", "pin", "text", "status", "reason", "source")
 
@@ -109,20 +112,28 @@ def load(board: str) -> list[Finding]:
 def merge(existing: list[Finding], found: list[Finding], source: str = AUTO) -> list[Finding]:
     """Entries of other sources as they are; those of ``source`` (``netcheck``, or ``review`` from
     :mod:`vibepcb.review`) as ``found`` now, with the status and reason the file already holds for the same id.
-    An accepted finding whose text changed is reopened (a new review may raise a different objection under the
-    same id); its old reason stays, after :data:`REOPENED`, for the designer to update."""
+    An accepted finding that changed (:func:`_changed`) is reopened; its old reason stays, after
+    :data:`REOPENED`, for the designer to update."""
     kept = {f.id: f for f in existing if f.source == source}
     merged = [f for f in existing if f.source != source]
     for finding in sorted(found, key=lambda f: f.id):
         old = kept.get(finding.id)
         if old is None:
             merged.append(finding)
-        elif old.text != finding.text and old.status == "accepted":
+        elif old.status == "accepted" and _changed(old, finding):
             reason = old.reason.removeprefix(REOPENED)
             merged.append(replace(finding, status="open", reason=f"{REOPENED}{reason}" if reason else ""))
         else:
             merged.append(replace(finding, status=old.status, reason=old.reason))
     return merged
+
+
+def _changed(old: Finding, new: Finding) -> bool:
+    """Whether an accepted finding says something new: its text (deterministic sources) or, for the reviewer's
+    free-text answers, its verdict."""
+    if new.source == "review":
+        return old.text.endswith(UNDECIDED) != new.text.endswith(UNDECIDED)
+    return old.text != new.text
 
 
 def dumps(findings: list[Finding]) -> str:

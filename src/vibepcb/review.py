@@ -379,9 +379,7 @@ def to_findings(answers: list[Answer], work_items: list[Item]) -> list[findings.
         if a.verdict == "ok":
             continue
         text = (
-            a.text
-            + (f" [{a.cite}]" if a.cite else "")
-            + (" (reviewer could not decide)" if a.verdict == "unknown" else "")
+            a.text + (f" [{a.cite}]" if a.cite else "") + (f" {findings.UNDECIDED}" if a.verdict == "unknown" else "")
         )
         out.append(findings.Finding(f"{SOURCE}:{a.id}", refs.get(a.id, ""), a.pin, text, source=SOURCE))
     return out

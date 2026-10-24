@@ -305,6 +305,15 @@ def test_findings_merge_reopens_changed_text() -> None:
     assert again.reason == findings.REOPENED + "on the sensor board"  # the prefix is not stacked
 
 
+def test_findings_merge_review_reopens_on_verdict_only() -> None:
+    old = [findings.Finding("r", "U1", "EN", "worded once", "accepted", "fine", "review")]
+    (same,) = findings.merge(old, [findings.Finding("r", "U1", "EN", "worded again", source="review")], "review")
+    assert (same.status, same.text) == ("accepted", "worded again")
+    undecided = findings.Finding("r", "U1", "EN", f"maybe {findings.UNDECIDED}", source="review")
+    (changed,) = findings.merge(old, [undecided], "review")
+    assert changed.status == "open"
+
+
 def test_blocking_needs_a_reason() -> None:
     assert findings.Finding("a", "U1", "", "t").blocking
     assert findings.Finding("a", "U1", "", "t", "accepted", "").blocking
