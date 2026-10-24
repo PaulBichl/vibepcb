@@ -752,6 +752,30 @@ def test_square_tees(project: fixes.KicadProject) -> None:
     assert fixes.square_tees(project) == []
 
 
+def test_widen_thin_vias(project: fixes.KicadProject) -> None:
+    # a manual-path via (0.4 mm pad, 0.3 mm drill: 0.05 mm ring) in open space grows to the net class size; one
+    # wedged next to another net's via grows only as far as the clearance allows
+    def mine(changes: list[str]) -> list[str]:
+        return [c for c in changes if "(70, 70)" in c or "(80, 70)" in c]
+
+    free = sexpr.loads("(via (at 70 70) (size 0.4) (drill 0.3) (layers F.Cu B.Cu) (net 1))")
+    project.pcb.append(free)
+    assert len(mine(fixes.widen_thin_vias(project))) == 1
+    size = sexpr.child(free, "size")
+    assert size is not None
+    assert float(str(size[1])) == fixes._design_via(project)[0]
+    assert mine(fixes.widen_thin_vias(project)) == []  # idempotent
+    clearance, _ = fixes._design_clearances(project)
+    tight = sexpr.loads("(via (at 80 70) (size 0.4) (drill 0.3) (layers F.Cu B.Cu) (net 1))")
+    x = 80 + 0.25 + clearance + 0.3 + 0.01
+    gnd = sexpr.loads(f"(via (at {x:.3f} 70) (size 0.6) (drill 0.3) (layers F.Cu B.Cu) (net 2))")
+    project.pcb += [tight, gnd]
+    assert len(mine(fixes.widen_thin_vias(project))) == 1
+    size = sexpr.child(tight, "size")
+    assert size is not None
+    assert float(str(size[1])) == 0.5  # drill + 2 x 0.1 mm ring: room for that, not for the class's 0.6
+
+
 def test_push_tracks_clear(project: fixes.KicadProject) -> None:
     assert fixes.push_tracks_clear(project) == []
     # a VCC zig-zag whose middle piece passes 0.1 mm from a GND via (needs 0.2 mm + half width)

@@ -2538,6 +2538,44 @@ def merge_duplicate_vias(project: KicadProject) -> list[str]:
     return changes
 
 
+def widen_thin_vias(project: KicadProject) -> list[str]:
+    """Grow vias whose annular ring is below the board's minimum to the Default net class's via size.
+
+    A trace's manual ``pcbPath`` via gets tscircuit's 0.4 mm pad on a 0.3 mm drill (a 0.05 mm ring; the path syntax
+    has no size). Each such via grows to the net class diameter, else to drill + 2 x the minimum ring, as far as its
+    clearance to other nets' copper allows; one that can't grow is reported.
+    """
+    try:
+        data = json.loads(project.pcb_path.with_suffix(".kicad_pro").read_text(encoding="utf-8"))
+        min_ring = float(data["board"]["design_settings"]["rules"]["min_via_annular_width"])
+    except (OSError, ValueError, KeyError):
+        min_ring = DEFAULT_MIN_ANNULAR_MM
+    clearance, _ = _design_clearances(project)
+    design_diameter, _ = _design_via(project)
+    changes = []
+    copper = _copper(project.pcb)
+    obstacles = copper.obstacles()
+    for node, centre, radius, net in copper.vias:
+        drill = _via_drill(node)
+        if radius - drill / 2 >= min_ring - 1e-6:
+            continue
+        others = [o for o in obstacles if o.net != net]
+        where = f"via {net} at ({_mm(centre[0])}, {_mm(centre[1])})"
+        for diameter in sorted({max(design_diameter, drill + 2 * min_ring), drill + 2 * min_ring}, reverse=True):
+            if all(o.distance(centre, centre) >= clearance + diameter / 2 - 1e-6 for o in others):
+                size = sexpr.child(node, "size")
+                assert size is not None
+                size[1:] = [Sym(_mm(diameter))]
+                changes.append(f"{where}: {_mm(2 * radius)} -> {_mm(diameter)} mm (annular ring >= {_mm(min_ring)})")
+                break
+        else:
+            changes.append(f"{where}: annular ring {_mm(radius - drill / 2)} mm, no room to grow - check")
+    return changes
+
+
+DEFAULT_MIN_ANNULAR_MM = 0.1
+
+
 def _via_span(node: list[Node]) -> int:
     layers = sexpr.child(node, "layers")
     names = [] if layers is None else [str(x) for x in layers[1:]]
@@ -4467,6 +4505,7 @@ FIXES: dict[str, Fix] = {
     "repair_zero_width_tracks": repair_zero_width_tracks,
     "drop_tracks_inside_pads": drop_tracks_inside_pads,
     "merge_duplicate_vias": merge_duplicate_vias,
+    "widen_thin_vias": widen_thin_vias,
     "plane_pad_vias": plane_pad_vias,
     "relocate_vias": relocate_vias,
     "snap_near_ends": snap_near_ends,
