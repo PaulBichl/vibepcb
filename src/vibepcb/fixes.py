@@ -1499,6 +1499,17 @@ def place_reference_designators(project: KicadProject) -> list[str]:
     changes = []
     for side in ("F", "B"):
         changes += _place_side_references(pcb, board, side)
+    # KiCad's default minimum text height (0.8 mm) would flag every bottom reference: the design rule follows the
+    # size chosen here, so DRC still catches text smaller than that
+    pro = project.pcb_path.with_suffix(".kicad_pro")
+    if pro.exists():
+        data = json.loads(pro.read_text(encoding="utf-8"))
+        rules = data.setdefault("board", {}).setdefault("design_settings", {}).setdefault("rules", {})
+        smallest = min(REF_TEXT_SIZE_MM, REF_TEXT_SIZE_BOTTOM_MM)
+        if rules.get("min_text_height") != smallest:
+            rules["min_text_height"] = smallest
+            pro.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+            changes.append(f"{pro.name}: min text height {_mm(smallest)} mm (bottom references)")
     return changes
 
 

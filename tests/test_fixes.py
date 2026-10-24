@@ -258,6 +258,7 @@ BOTTOM_CAP = """(footprint "tscircuit:capacitor_cap0603" (layer B.Cu) (at 100 10
 
 
 def test_place_reference_designators_bottom_side(project: fixes.KicadProject) -> None:
+    project.pcb_path.with_suffix(".kicad_pro").write_text("{}", encoding="utf-8")
     project.pcb.append(sexpr.loads(BOTTOM_CAP))
     changes = fixes.place_reference_designators(project)
     assert any(c.startswith("C9: reference at") for c in changes)
@@ -276,6 +277,8 @@ def test_place_reference_designators_bottom_side(project: fixes.KicadProject) ->
     at = sexpr.child(geometry.prop, "at")
     x, y = fixes._fp_to_board(fp)(fixes._num(at, 1), fixes._num(at, 2))
     box = fixes._text_box(x, y, geometry.ref, fixes.REF_TEXT_SIZE_BOTTOM_MM, fixes._num(at, 3))
+    pro = json.loads(project.pcb_path.with_suffix(".kicad_pro").read_text(encoding="utf-8"))
+    assert pro["board"]["design_settings"]["rules"]["min_text_height"] == fixes.REF_TEXT_SIZE_BOTTOM_MM
     assert not any(fixes._overlaps(box, keepout) for keepout in geometry.keepouts)
     assert fixes.place_reference_designators(project) == []  # idempotent
 
