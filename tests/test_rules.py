@@ -71,6 +71,19 @@ def test_board_netclass_overrides_profile_class(profiles: Path) -> None:
     assert rules.netclasses(cfg) == {"HV": {"nets": ["VBAT"], "clearance": 0.6, "track_width": 0.5}}
 
 
+def test_board_impedance_netclass_is_solved(profiles: Path) -> None:
+    # impedance net classes carry a layer name and target ohms: merge solves them into widths instead of reading floats
+    cfg = {
+        "rules": {"profiles": ["fab"]},
+        "stackup": {"preset": "jlc04161h-7628"},
+        "netclass": {"USB": {"nets": ["USB_D*"], "impedance_diff": 90, "diff_pair_gap": 0.2, "layer": "F.Cu"}},
+    }
+    usb = rules.netclasses(cfg)["USB"]
+    assert usb["diff_pair_gap"] == 0.2
+    assert 0.3 < usb["diff_pair_width"] < 0.34
+    assert "layer" not in usb
+
+
 def test_rules_config_validation() -> None:
     config.validate({"rules": {"profiles": ["jlcpcb-4l"], "override": {"min_clearance": 0.15}}})
     with pytest.raises(config.ConfigError, match="unknown key"):

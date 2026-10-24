@@ -28,8 +28,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from vibepcb import paths
-from vibepcb.config import NETCLASS_KEYS, RULE_CLASS_KEYS, RULE_KEYS, RULE_MIN_KEYS, ConfigError
+from vibepcb import paths, stackup
+from vibepcb.config import IMPEDANCE_KEYS, NETCLASS_KEYS, RULE_CLASS_KEYS, RULE_KEYS, RULE_MIN_KEYS, ConfigError
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -177,7 +177,10 @@ def merge(cfg: Mapping[str, Any]) -> RuleSet | None:
         rule = rs.netclasses.setdefault(cls_name, NetClassRule([], "board"))
         if cls.get("nets"):
             rule.nets, rule.nets_source = [str(p) for p in cls["nets"]], "board"
-        rule.values.update({k: Setting(float(v), "board") for k, v in cls.items() if k != "nets"})
+        values = {k: float(v) for k, v in cls.items() if k not in ("nets", *IMPEDANCE_KEYS)}
+        if {"impedance", "impedance_diff"} & set(cls):  # widths solved from the stack-up (config checked it has one)
+            values.update(stackup.netclass_widths(stackup.from_config(cfg["stackup"]), cls)[0])
+        rule.values.update({k: Setting(v, "board") for k, v in values.items()})
     _check(rs)
     return rs
 
