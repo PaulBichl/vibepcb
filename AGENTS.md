@@ -209,6 +209,7 @@ test in `tests/test_fixes.py` against the fixtures in `tests/data/`.
 | `hatch run pcb new <name>` | Scaffold `boards/<name>/index.circuit.tsx` |
 | `hatch run pcb all <name>` | build + fix + check |
 | `hatch run pcb publish <name>` | review set for GitHub in `boards/<name>/hardware/` (needs a passing `check`; no fab files) |
+| `hatch run pcb cost <name> [--qty N]` | Batch cost, hand-assembled: BOM priced at LCSC (min order, multiples, stock) + bare boards (`[cost] pcb_usd` from a jlcpcb.com quote, else a labelled estimate; JLCPCB's quote API is not public) |
 | `hatch run pcb rules <name>` | Merged design / manufacturing rule profiles of a board, each value's source |
 | `hatch run pcb list` | List boards |
 | `hatch run pcb doctor` | Check the setup (tools, KiCad version, patches, network); exit 1 on FAIL |

@@ -64,6 +64,10 @@ these from the board's config file into the KiCad project (:func:`fixes.apply_bo
     ignore = ["VBUS_RAW"]          # nets exempt (patterns)
     severity = "warning"           # or "error": a missing test point then fails `check`
 
+    [cost]                         # `pcb cost`: hand-assembled batch, parts from LCSC (vibepcb.cost)
+    qty = 5                        #   boards (default 5); spare = 0.1 extra parts (fraction, default 0)
+    pcb_usd = 31.4                 #   bare-board price of a jlcpcb.com quote (else a labelled estimate)
+
 Net names: a net gets the name of its ``<net>``, else of a named ``<trace name="...">`` on it
 (see ``schgen``), so name the traces a rule should catch.
 """
@@ -100,6 +104,7 @@ RULE_MIN_KEYS = (
 RULE_CLASS_KEYS = ("track_width", "clearance", "via_diameter", "via_drill")
 RULE_KEYS = (*RULE_MIN_KEYS, *RULE_CLASS_KEYS, "board_thickness")
 NETCLASS_KEYS = ("track_width", "clearance", "via_diameter", "via_drill", "diff_pair_width", "diff_pair_gap")
+COST_KEYS = ("qty", "spare", "pcb_usd")  # vibepcb.cost
 IMPEDANCE_KEYS = ("impedance", "impedance_diff", "layer")  # solved into NETCLASS_KEYS (vibepcb.stackup)
 
 
@@ -135,6 +140,7 @@ def validate(data: dict[str, Any], where: str = CONFIG_NAME) -> None:
         "rules",
         "testpoints",
         "thermal_vias",
+        "cost",
     }
     if unknown := set(data) - known:
         msg = f"{where}: unknown section(s) {sorted(unknown)} (known: {sorted(known)})"
@@ -171,6 +177,7 @@ def validate(data: dict[str, Any], where: str = CONFIG_NAME) -> None:
         testpoints.validate(data.get("testpoints", {}), where)
     except ValueError as e:
         raise ConfigError(str(e)) from e
+    _validate_cost(data.get("cost", {}), where)
     if data.get("routing", {}).get("mode", "auto") not in ("auto", "manual"):
         msg = f'{where}: [routing] mode must be "auto" (tscircuit routes) or "manual" (routes.toml)'
         raise ConfigError(msg)
@@ -214,6 +221,19 @@ def validate(data: dict[str, Any], where: str = CONFIG_NAME) -> None:
     for name, group in data.get("length_group", {}).items():
         if not group.get("nets") or "max_skew" not in group:
             msg = f"{where}: length_group {name!r} needs nets = [...] and max_skew"
+            raise ConfigError(msg)
+
+
+def _validate_cost(cost: dict[str, Any], where: str) -> None:
+    if bad := set(cost) - set(COST_KEYS):
+        msg = f"{where}: [cost]: unknown key(s) {sorted(bad)} (known: {', '.join(COST_KEYS)})"
+        raise ConfigError(msg)
+    if "qty" in cost and (not isinstance(cost["qty"], int) or isinstance(cost["qty"], bool) or cost["qty"] < 1):
+        msg = f"{where}: [cost] qty must be a whole number >= 1"
+        raise ConfigError(msg)
+    for key in ("spare", "pcb_usd"):
+        if key in cost and (not isinstance(cost[key], int | float) or cost[key] < 0):
+            msg = f"{where}: [cost] {key} must be a number >= 0"
             raise ConfigError(msg)
 
 

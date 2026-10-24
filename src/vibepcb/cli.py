@@ -14,6 +14,7 @@ vibepcb fab <board>     part availability check, gerbers/drill zip, BOM, pick-an
 vibepcb bringup <board> out/<board>/fab/<board>-bringup.md (rails, test points, power-on checklist) + <board>-pins.h
 vibepcb review <board>  [--run | --merge] reviewer-agent package in out/<board>/.work/review/; --run starts a fresh
                         reviewer ($VIBEPCB_REVIEWER, default `claude -p --agent pcb-reviewer`) and merges its answers
+vibepcb cost <board>    [--qty N] batch cost, hand-assembled: parts priced at LCSC + bare boards -> out/<board>/cost.txt
 vibepcb publish <board> boards/<board>/hardware/: schematic + layout PDF/PNG, renders, BOM, KiCad project (no fab files)
 vibepcb padtable <board> REF..  boards/<board>/pads.ts: pad positions from the placement build (pin plans)
 vibepcb rules <board>   the merged design / manufacturing rule profiles ([rules] in vibepcb.toml), each value with its source
@@ -48,6 +49,7 @@ from vibepcb import board as board_model
 from vibepcb import (
     bringup,
     config,
+    cost,
     doctor,
     fanout,
     fixes,
@@ -616,6 +618,8 @@ def _write_index(board: str) -> None:
         lines.append(f"- **Fab** (JLCPCB upload: gerbers zip, BOM, CPL): {files}")
     else:
         lines.append(f"- **Fab**: not made yet - `hatch run pcb fab {board}` (only for a board that passes check)")
+    if (out / "cost.txt").exists():
+        lines.append("- **Cost** (hand-assembled batch, LCSC parts + bare boards): [cost.txt](cost.txt)")
     lines += ["", "Internals (tscircuit output, JSON reports, PNG previews for the agent) are in `.work/`."]
     (out / "README.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -767,7 +771,26 @@ def cmd_rules(board: str) -> int:
     return 0
 
 
-KICAD_COMMANDS = ("fix", "check", "all", "fab", "publish")  # the ones that run kicad-cli
+def cmd_cost(board: str, qty: int | None = None) -> int:
+    pcb = paths.kicad_dir(board) / f"{board}.kicad_pcb"
+    if not pcb.exists():
+        print(f"error: no KiCad project - run `pcb fix {board}` first", file=sys.stderr)
+        return 1
+    settings = dict(config.load(board).get("cost", {}))
+    if qty is not None:
+        settings["qty"] = qty
+    with _phase("BOM (kicad-cli) + LCSC prices"):
+        bom = kicad.export_bom(pcb, paths.work_dir(board) / "cost" / f"{board}-bom.csv")
+        text = cost.render(board, cost.estimate(pcb, bom, settings))
+    target = paths.board_out(board) / "cost.txt"
+    target.write_text(text, encoding="utf-8")
+    print(text, end="")
+    _written(target)
+    _write_index(board)
+    return 0
+
+
+KICAD_COMMANDS = ("fix", "check", "all", "fab", "publish", "cost")  # the ones that run kicad-cli
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -814,6 +837,9 @@ def main(argv: list[str] | None = None) -> int:
     score_parser.add_argument("boards", nargs="+", help="boards to compare (e.g. `clone` variants)")
     for p in (ratsnest_parser, score_parser):
         p.add_argument("--source", choices=["current", "unrouted"], default="current")
+    cost_parser = sub.add_parser("cost")
+    cost_parser.add_argument("board")
+    cost_parser.add_argument("--qty", type=int, help="boards to build (default: [cost] qty, else 5)")
     sub.add_parser("rules").add_argument("board")
     sub.add_parser("list")
     sub.add_parser("docs")
@@ -835,6 +861,8 @@ def main(argv: list[str] | None = None) -> int:
                 return cmd_doctor()
             case "rules":
                 return cmd_rules(args.board)
+            case "cost":
+                return cmd_cost(args.board, args.qty)
             case "clone":
                 return cmd_clone(args.board, args.new)
             case "padtable":
