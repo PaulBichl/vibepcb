@@ -327,7 +327,8 @@ def test_place_reference_designators(project: fixes.KicadProject) -> None:
         effects = sexpr.child(text, "effects")
         font = None if effects is None else sexpr.child(effects, "font")
         assert font is not None
-        assert sexpr.child(font, "size") == [Sym("size"), Sym("0.8"), Sym("0.8")]
+        size = Sym(fixes._mm(fixes.REF_TEXT_SIZE_MM))
+        assert sexpr.child(font, "size") == [Sym("size"), size, size]
         x, y = fixes._fp_to_board(fp)(fixes._num(at, 1), fixes._num(at, 2))
         box = fixes._text_box(x, y, geometry.ref, fixes.REF_TEXT_SIZE_MM, fixes._num(at, 3))
         assert not any(fixes._overlaps(box, keepout) for keepout in geometry.keepouts), geometry.ref

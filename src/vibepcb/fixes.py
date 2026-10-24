@@ -1265,7 +1265,7 @@ def router_clearance_tolerance(project: KicadProject) -> list[str]:
     return [f"{dru.name}: copper clearance >= {_mm(clearance)} mm"]
 
 
-REF_TEXT_SIZE_MM = 0.8  # common fab minimum for legible silkscreen (JLCPCB asks >= 1.0 mm)
+REF_TEXT_SIZE_MM = 1.0  # top references: JLCPCB asks >= 1.0 mm for legible silkscreen
 # bottom references: the back of a two-sided board is densely packed (all the electronics); 0.65 mm with the
 # 0.15 mm stroke stays readable under a loupe and roughly halves the references that find no free spot
 REF_TEXT_SIZE_BOTTOM_MM = 0.65
@@ -1482,7 +1482,7 @@ def place_reference_designators(project: KicadProject) -> list[str]:
 
     tscircuit writes 0.4 mm references (below every fab's minimum) at a fixed offset, so
     they land on pads, on neighbours' silkscreen, on each other or beyond the board edge.
-    Each reference gets 0.8 mm text (0.65 mm on the crowded bottom side), placed at the first candidate around its courtyard
+    Each reference gets 1.0 mm text (0.65 mm on the crowded bottom side), placed at the first candidate around its courtyard
     that stays inside the board and clear of pads, vias, holes, silkscreen, board-level text
     and references already placed; parts' bodies (courtyards) are avoided when possible. Where no
     candidate is free, the one covering the fewest of those things is taken (reported).
