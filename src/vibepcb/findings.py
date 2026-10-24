@@ -12,7 +12,8 @@
     source = "netcheck"            # netcheck (written by `check`) | review (`pcb review --merge`) | anything else (by hand)
 
 ``check`` merges the deterministic findings (:mod:`vibepcb.netcheck`) into the file: a finding it still finds
-keeps its status and reason, a new one is added as ``open``, one it no longer finds is dropped. ``pcb review --merge``
+keeps its status and reason (unless its text changed: an acceptance answers what the finding said, so it is reopened
+with the old reason kept after :data:`REOPENED`), a new one is added as ``open``, one it no longer finds is dropped. ``pcb review --merge``
 does the same for ``source = "review"`` (the reviewer agent's issue / unknown answers, docs/REVIEW.md). Entries
 with any other ``source`` (written by hand) are never touched. An
 ``accepted`` finding without a reason still counts as open. Open findings are warnings in vibe mode and fail
@@ -35,6 +36,7 @@ if TYPE_CHECKING:
 FINDINGS_NAME = "findings.toml"
 AUTO = "netcheck"
 STATUSES = ("open", "accepted")
+REOPENED = "previously accepted, before the finding text changed: "
 KEYS = ("id", "ref", "pin", "text", "status", "reason", "source")
 
 
@@ -106,12 +108,20 @@ def load(board: str) -> list[Finding]:
 
 def merge(existing: list[Finding], found: list[Finding], source: str = AUTO) -> list[Finding]:
     """Entries of other sources as they are; those of ``source`` (``netcheck``, or ``review`` from
-    :mod:`vibepcb.review`) as ``found`` now, with the status and reason the file already holds for the same id."""
+    :mod:`vibepcb.review`) as ``found`` now, with the status and reason the file already holds for the same id.
+    An accepted finding whose text changed is reopened (a new review may raise a different objection under the
+    same id); its old reason stays, after :data:`REOPENED`, for the designer to update."""
     kept = {f.id: f for f in existing if f.source == source}
     merged = [f for f in existing if f.source != source]
     for finding in sorted(found, key=lambda f: f.id):
         old = kept.get(finding.id)
-        merged.append(replace(finding, status=old.status, reason=old.reason) if old else finding)
+        if old is None:
+            merged.append(finding)
+        elif old.text != finding.text and old.status == "accepted":
+            reason = old.reason.removeprefix(REOPENED)
+            merged.append(replace(finding, status="open", reason=f"{REOPENED}{reason}" if reason else ""))
+        else:
+            merged.append(replace(finding, status=old.status, reason=old.reason))
     return merged
 
 

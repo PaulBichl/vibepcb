@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -284,15 +285,24 @@ def test_findings_merge_and_roundtrip(tmp_path: Path) -> None:
         findings.Finding("gone", "U2", "", "fixed since"),
         findings.Finding("review:1", "U3", "EN", "checklist item", "open", "", "review"),
     ]
-    new = [findings.Finding("a", "U1", "VDD", "new text"), findings.Finding("b", "R1", "1", "fresh")]
+    new = [findings.Finding("a", "U1", "VDD", "old text"), findings.Finding("b", "R1", "1", "fresh")]
     merged = findings.merge(old, new)
     assert [f.id for f in merged] == ["review:1", "a", "b"]  # hand-written first, "gone" dropped
     assert merged[1].status == "accepted"
     assert merged[1].reason == "on the sensor board"
-    assert merged[1].text == "new text"
     assert merged[2].status == "open"
     parsed = findings.parse(__import__("tomllib").loads(findings.dumps(merged)))
     assert parsed == merged
+
+
+def test_findings_merge_reopens_changed_text() -> None:
+    old = [findings.Finding("a", "U1", "VDD", "old text", "accepted", "on the sensor board")]
+    (merged,) = findings.merge(old, [findings.Finding("a", "U1", "VDD", "new text")])
+    assert (merged.text, merged.status) == ("new text", "open")
+    assert merged.reason == findings.REOPENED + "on the sensor board"
+    assert merged.blocking
+    (again,) = findings.merge([replace(merged, status="accepted")], [findings.Finding("a", "U1", "VDD", "newer")])
+    assert again.reason == findings.REOPENED + "on the sensor board"  # the prefix is not stacked
 
 
 def test_blocking_needs_a_reason() -> None:
