@@ -32,7 +32,7 @@ def test_shipped_profiles_load() -> None:
     rs = rules.merge({"rules": {"profiles": ["jlcpcb-4l", "ipc-class3", "hv-60v"]}})
     assert rs is not None
     assert rs.values["min_clearance"] == rules.Setting(0.13, "ipc-class3")
-    assert rs.values["min_via_drill"] == rules.Setting(0.15, "jlcpcb-4l")
+    assert rs.values["min_via_drill"] == rules.Setting(0.3, "jlcpcb-4l")  # the standard price class
     assert rs.netclasses["HV60"].values["clearance"].value == 0.6
 
 

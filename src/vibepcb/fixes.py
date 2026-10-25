@@ -2539,11 +2539,13 @@ def merge_duplicate_vias(project: KicadProject) -> list[str]:
 
 
 def widen_thin_vias(project: KicadProject) -> list[str]:
-    """Grow vias whose annular ring is below the board's minimum to the Default net class's via size.
+    """Bring vias below the Default net class size (drill) or the board's minimum annular ring up to the class via.
 
-    A trace's manual ``pcbPath`` via gets tscircuit's 0.4 mm pad on a 0.3 mm drill (a 0.05 mm ring; the path syntax
-    has no size). Each such via grows to the net class diameter, else to drill + 2 x the minimum ring, as far as its
-    clearance to other nets' copper allows; one that can't grow is reported.
+    A trace's manual ``pcbPath`` via gets tscircuit's 0.3 mm pad on a 0.2 mm drill (the path syntax has no size): a
+    ring below the minimum, and a drill that puts the whole board into the fab's smaller-via price class (JLCPCB:
+    0.2 mm vs. the standard 0.3 mm). Such a via gets the class drill and the class diameter, else drill + 2 x the
+    minimum ring, as far as its clearance to other nets' copper and the hole-to-hole minimum allow; one that can't
+    grow is reported.
     """
     try:
         data = json.loads(project.pcb_path.with_suffix(".kicad_pro").read_text(encoding="utf-8"))
@@ -2551,25 +2553,38 @@ def widen_thin_vias(project: KicadProject) -> list[str]:
     except (OSError, ValueError, KeyError):
         min_ring = DEFAULT_MIN_ANNULAR_MM
     clearance, _ = _design_clearances(project)
-    design_diameter, _ = _design_via(project)
+    design_diameter, design_drill = _design_via(project)
+    hole_gap = _min_hole_to_hole(project)
     changes = []
     copper = _copper(project.pcb)
     obstacles = copper.obstacles()
     for node, centre, radius, net in copper.vias:
         drill = _via_drill(node)
-        if radius - drill / 2 >= min_ring - 1e-6:
+        if radius - drill / 2 >= min_ring - 1e-6 and drill >= design_drill - 1e-6:
             continue
+        new_drill = max(drill, design_drill)
         others = [o for o in obstacles if o.net != net]
+        holes_ok = all(
+            math.dist(centre, c) >= (new_drill + _via_drill(n)) / 2 + hole_gap - 1e-6
+            for n, c, _, _ in copper.vias
+            if n is not node and math.dist(centre, c) > tracks.EPS
+        )
         where = f"via {net} at ({_mm(centre[0])}, {_mm(centre[1])})"
-        for diameter in sorted({max(design_diameter, drill + 2 * min_ring), drill + 2 * min_ring}, reverse=True):
-            if all(o.distance(centre, centre) >= clearance + diameter / 2 - 1e-6 for o in others):
-                size = sexpr.child(node, "size")
+        for diameter in sorted(
+            {max(design_diameter, new_drill + 2 * min_ring), new_drill + 2 * min_ring}, reverse=True
+        ):
+            if holes_ok and all(o.distance(centre, centre) >= clearance + diameter / 2 - 1e-6 for o in others):
+                size, hole = sexpr.child(node, "size"), sexpr.child(node, "drill")
                 assert size is not None
+                assert hole is not None
                 size[1:] = [Sym(_mm(diameter))]
-                changes.append(f"{where}: {_mm(2 * radius)} -> {_mm(diameter)} mm (annular ring >= {_mm(min_ring)})")
+                hole[1:] = [Sym(_mm(new_drill))]
+                changes.append(
+                    f"{where}: {_mm(2 * radius)} / {_mm(drill)} -> {_mm(diameter)} / {_mm(new_drill)} mm (diameter / drill)"
+                )
                 break
         else:
-            changes.append(f"{where}: annular ring {_mm(radius - drill / 2)} mm, no room to grow - check")
+            changes.append(f"{where}: {_mm(2 * radius)} / {_mm(drill)} mm, no room for the class via - check")
     return changes
 
 

@@ -8,8 +8,8 @@ description = "JLCPCB 6 layer, standard process"
 
 min_track_width = 0.09            # 3.5 mil trace
 min_clearance = 0.09              # 3.5 mil spacing
-min_via_drill = 0.15              # via hole (0.1 only on boards <= 1.0 mm; holes < 0.3 mm may cost extra)
-min_via_diameter = 0.25           # via pad
+min_via_drill = 0.30              # via hole: the standard price class (0.15-0.25 mm cost extra; override per board only on purpose)
+min_via_diameter = 0.45           # via pad for a 0.3 mm hole (order form: 0.3 mm / (0.4 / 0.45 mm))
 min_via_annular_ring = 0.05       # "via diameter >= hole + 0.1 mm" (0.15 preferred)
 min_hole_to_hole = 0.20           # via hole to via hole
 min_pad_hole_to_hole = 0.45       # PTH pad hole to PTH pad hole (KiCad custom rule)

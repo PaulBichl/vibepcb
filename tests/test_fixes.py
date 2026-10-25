@@ -758,12 +758,13 @@ def test_widen_thin_vias(project: fixes.KicadProject) -> None:
     def mine(changes: list[str]) -> list[str]:
         return [c for c in changes if "(70, 70)" in c or "(80, 70)" in c]
 
-    free = sexpr.loads("(via (at 70 70) (size 0.4) (drill 0.3) (layers F.Cu B.Cu) (net 1))")
+    free = sexpr.loads("(via (at 70 70) (size 0.3) (drill 0.2) (layers F.Cu B.Cu) (net 1))")
     project.pcb.append(free)
     assert len(mine(fixes.widen_thin_vias(project))) == 1
-    size = sexpr.child(free, "size")
+    size, drill = sexpr.child(free, "size"), sexpr.child(free, "drill")
     assert size is not None
-    assert float(str(size[1])) == fixes._design_via(project)[0]
+    assert drill is not None
+    assert (float(str(size[1])), float(str(drill[1]))) == fixes._design_via(project)  # the class via, drill too
     assert mine(fixes.widen_thin_vias(project)) == []  # idempotent
     clearance, _ = fixes._design_clearances(project)
     tight = sexpr.loads("(via (at 80 70) (size 0.4) (drill 0.3) (layers F.Cu B.Cu) (net 1))")
@@ -1069,8 +1070,8 @@ def test_apply_rule_profiles(project: fixes.KicadProject) -> None:
     design = data["board"]["design_settings"]["rules"]
     assert design["min_track_width"] == 0.1
     assert design["min_clearance"] == 0.1
-    assert design["min_through_hole_diameter"] == 0.15
-    assert design["min_via_diameter"] == 0.25
+    assert design["min_through_hole_diameter"] == 0.3
+    assert design["min_via_diameter"] == 0.4
     assert design["min_via_annular_width"] == 0.1  # ipc-class2 tightens jlcpcb's 0.05
     assert design["min_hole_to_hole"] == 0.2
     assert design["min_copper_edge_clearance"] == 0.2
