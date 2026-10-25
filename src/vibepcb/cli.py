@@ -298,7 +298,7 @@ def cmd_fix(board: str) -> int:
     project.save()
     if restored:  # the routed geometry of a restored net can clash with its cleaned-up neighbours
         before = copy.deepcopy(project.pcb)
-        repairs = fixes.relocate_vias(project) + fixes.push_tracks_clear(project)
+        repairs = fixes.relocate_vias(project) + fixes.push_tracks_clear(project) + fixes.corner_touch_up(project)
         if repairs:
             project.save()
             if broken := kicad.unconnected_nets(project.pcb_path, report_path) - lost:  # broke something: undo
@@ -548,6 +548,20 @@ def cmd_check(board: str, *, strict: bool = False) -> int:
     for change in stitched:
         print(f"  post-fill: {change}")
     loaded = fixes.KicadProject.load(project, board)
+    if fixes.sharp_corners(loaded):  # nets restored as routed skipped the clean-up: touch up their corners, kept
+        backup = pcb.read_bytes()  # only if KiCad finds nothing newly unconnected
+        if touched := fixes.corner_touch_up(loaded):
+            loaded.save()
+            after = kicad.run_drc(pcb, reports / "drc.json")
+            if after.unconnected <= drc.unconnected and not _pad_spots(after) - _pad_spots(drc):
+                drc = after
+                for change in touched:
+                    print(f"  corner touch-up: {change}")
+            else:
+                pcb.write_bytes(backup)
+                drc = kicad.run_drc(pcb, reports / "drc.json")
+                print("  corner touch-up: undone, it disconnected something")
+            loaded = fixes.KicadProject.load(project, board)
     corners = fixes.sharp_corners(loaded)
     unpoured = fixes.unpoured_copper_layers(loaded)
     summary = [str(erc), str(drc), f"Track bends: {len(corners)} sharper than 135 deg"]

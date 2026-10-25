@@ -3233,6 +3233,13 @@ def straighten_via_exits(project: KicadProject) -> list[str]:
     return changes
 
 
+def corner_touch_up(project: KicadProject) -> list[str]:
+    """The corner fixes that never cut a path (:func:`straighten_via_exits`, :func:`snap_bends_to_45`): run again on
+    the finished board, where a net restored as routed (``restore_nets``) skipped the clean-up. The caller re-checks
+    connectivity with KiCad and undoes them if anything got disconnected."""
+    return straighten_via_exits(project) + snap_bends_to_45(project)
+
+
 def _piece_key(a: tracks.Point, b: tracks.Point) -> frozenset[tuple[int, int]]:
     return frozenset((tracks._key(a), tracks._key(b)))
 
