@@ -776,6 +776,40 @@ def test_widen_thin_vias(project: fixes.KicadProject) -> None:
     assert float(str(size[1])) == 0.5  # drill + 2 x 0.1 mm ring: room for that, not for the class's 0.6
 
 
+def test_snap_bends_to_45(project: fixes.KicadProject) -> None:
+    # a 45 deg diagonal meeting a track 1.3 deg off horizontal (133.7 deg): the corner moves so both lie on the grid
+    pieces = [
+        sexpr.loads(f"(segment (start {a}) (end {b}) (width 0.15) (layer F.Cu) (net 1))")
+        for a, b in (("70 60", "70 62"), ("70 62", "69 63"), ("69 63", "65 62.91"))
+    ]
+    project.pcb += pieces
+    assert [c for c in fixes.sharp_corners(project) if c[0] == "VCC"]
+    changes = fixes.snap_bends_to_45(project)
+    assert len(changes) == 1
+    assert not [c for c in fixes.sharp_corners(project) if c[0] == "VCC"]
+    end = sexpr.child(pieces[1], "end")
+    assert end is not None
+    assert abs(float(str(end[2])) - 62.91) < 1e-3  # the long piece is horizontal now
+    assert fixes.snap_bends_to_45(project) == []
+
+
+def test_straighten_via_exits(project: fixes.KicadProject) -> None:
+    # a track leaves a VCC via through a diagonal and a short stub (a 90 deg bend at the via's edge), then runs
+    # horizontally: the stubs go, the track starts at the via centre
+    via = sexpr.loads("(via (at 70 70) (size 0.5) (drill 0.3) (layers F.Cu B.Cu) (net 1))")
+    pieces = [
+        sexpr.loads(f"(segment (start {a}) (end {b}) (width 0.4) (layer B.Cu) (net 1))")
+        for a, b in (("70 70", "70.16 70.11"), ("70.16 70.11", "70.165 70.254"), ("70.165 70.254", "73.35 70.265"))
+    ]
+    project.pcb += [via, *pieces]
+    assert [c for c in fixes.sharp_corners(project) if c[0] == "VCC"]
+    assert len(fixes.straighten_via_exits(project)) == 1
+    assert not [c for c in fixes.sharp_corners(project) if c[0] == "VCC"]
+    assert pieces[0] not in project.pcb
+    assert pieces[1] not in project.pcb
+    assert fixes.straighten_via_exits(project) == []
+
+
 def test_push_tracks_clear(project: fixes.KicadProject) -> None:
     assert fixes.push_tracks_clear(project) == []
     # a VCC zig-zag whose middle piece passes 0.1 mm from a GND via (needs 0.2 mm + half width)

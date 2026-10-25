@@ -3022,6 +3022,217 @@ def _square_tees_pass(project: KicadProject, clearance: float, edge_clearance: f
     return changes
 
 
+def _polyline_ends(copper: _Copper) -> dict[tuple[str, str, tuple[int, int]], list[tuple[tracks.Seg, str]]]:
+    """Track ends per (net, layer, point): each track with the end (``start``/``end``) lying there."""
+    ends: dict[tuple[str, str, tuple[int, int]], list[tuple[tracks.Seg, str]]] = {}
+    for s in copper.segs:
+        ends.setdefault((s.net, s.layer, tracks._key(s.a)), []).append((s, "start"))
+        ends.setdefault((s.net, s.layer, tracks._key(s.b)), []).append((s, "end"))
+    return ends
+
+
+def _far(seg: tracks.Seg, end: str) -> tracks.Point:
+    return seg.b if end == "start" else seg.a
+
+
+def _set_end(seg: tracks.Seg, end: str, p: tracks.Point) -> None:
+    node = sexpr.child(_source(seg), end)
+    assert node is not None
+    node[1:3] = [Sym(_mm(p[0])), Sym(_mm(p[1]))]
+
+
+def _corner_at(
+    ends: dict[tuple[str, str, tuple[int, int]], list[tuple[tracks.Seg, str]]],
+    copper: _Copper,
+    seg: tracks.Seg,
+    p: tracks.Point,
+) -> tracks.Point | None:
+    """The far end of the one other track bending at ``p`` with ``seg`` (a plain bend), else None."""
+    if copper.on_pad_or_via(p, seg.net, seg.layer):
+        return None
+    others = [(t, e) for t, e in ends.get((seg.net, seg.layer, tracks._key(p)), []) if t is not seg]
+    return _far(*others[0]) if len(others) == 1 else None
+
+
+def _fits(
+    copper: _Copper, obstacles: list[tracks.Obstacle], seg: tracks.Seg, a: tracks.Point, b: tracks.Point,
+    clearance: float, edge_clearance: float,
+) -> bool:  # fmt: skip
+    half = seg.width / 2
+    return all(
+        o.distance(a, b) >= clearance + half for o in obstacles if o.net != seg.net and seg.layer in o.layers
+    ) and all(e.distance(a, b) >= edge_clearance + half for e in copper.edges if seg.layer in e.layers)
+
+
+def _snapped(d: tuple[float, float]) -> tuple[float, float]:
+    """Direction ``d`` turned to the nearest multiple of 45 deg (unit length)."""
+    step = math.pi / 4
+    angle = round(math.atan2(d[1], d[0]) / step) * step
+    return math.cos(angle), math.sin(angle)
+
+
+def _line_cross(
+    p: tracks.Point, d: tuple[float, float], q: tracks.Point, e: tuple[float, float]
+) -> tracks.Point | None:
+    det = d[0] * e[1] - d[1] * e[0]
+    if abs(det) < 1e-9:
+        return None
+    t = ((q[0] - p[0]) * e[1] - (q[1] - p[1]) * e[0]) / det
+    return p[0] + t * d[0], p[1] + t * d[1]
+
+
+SNAP_BEND_DEG = 10.0  # bends this far below 135 deg are snapped to the 45 deg grid
+CORNER_TOLERANCE_DEG = 1.0  # sharp_corners' allowance for KiCad's rounding
+CORNER_FIX_MAX_PASSES = 200  # one change per pass (the copper is rebuilt after each)
+SNAP_MOVE_MM = 0.2  # the corner moves at most this far
+
+
+def snap_bends_to_45(project: KicadProject) -> list[str]:
+    """Move the corner of a bend just short of 135 deg so both its tracks lie on the 45 deg grid.
+
+    The router leaves bends of 130-134 deg where one piece drifts a degree or two off the grid (seen: a 45 deg
+    diagonal meeting a track 1.3 deg off horizontal, 133.7 deg). The corner moves (at most :data:`SNAP_MOVE_MM`)
+    to where the two pieces, each turned to the nearest 45 deg direction about its far end, cross. Done only if both
+    pieces keep their clearance and the bends at their far ends don't get sharper than 135 deg (or than they were);
+    only bends sharp_corners reports are touched.
+    """
+    clearance, edge_clearance = _design_clearances(project)
+    changes: list[str] = []
+    skip: set[tuple[int, int]] = set()  # corners tried without success
+    for _ in range(CORNER_FIX_MAX_PASSES):
+        copper = _copper(project.pcb)
+        obstacles = copper.obstacles()
+        ends = _polyline_ends(copper)
+        done = False
+        for (net, layer, key), items in ends.items():
+            if key in skip:
+                continue
+            if len(items) != 2:
+                continue
+            (s1, e1), (s2, e2) = items
+            v = s1.a if e1 == "start" else s1.b
+            a, b = _far(s1, e1), _far(s2, e2)
+            angle = tracks.interior_angle(a, v, b)
+            if not tracks.MIN_CORNER_DEG - SNAP_BEND_DEG <= angle < tracks.MIN_CORNER_DEG - CORNER_TOLERANCE_DEG:
+                continue  # only bends sharp_corners reports
+            if copper.on_pad_or_via(v, net, layer):
+                continue
+            new = _line_cross(a, _snapped((v[0] - a[0], v[1] - a[1])), b, _snapped((v[0] - b[0], v[1] - b[1])))
+            if (
+                new is None
+                or math.dist(new, v) > SNAP_MOVE_MM
+                or tracks.interior_angle(a, new, b) < tracks.MIN_CORNER_DEG - 1e-6
+            ):
+                continue
+            ok = _fits(copper, obstacles, s1, a, new, clearance, edge_clearance) and _fits(
+                copper, obstacles, s2, new, b, clearance, edge_clearance
+            )
+            for seg, far in ((s1, a), (s2, b)):  # the bends at the far ends
+                nxt = _corner_at(ends, copper, seg, far)
+                if nxt is not None:
+                    before, after = tracks.interior_angle(v, far, nxt), tracks.interior_angle(new, far, nxt)
+                    ok = ok and after >= min(tracks.MIN_CORNER_DEG, before) - 1e-6
+            if not ok:
+                skip.add(tracks._key(v))
+                continue
+            _set_end(s1, e1, new)
+            _set_end(s2, e2, new)
+            changes.append(
+                f"{net} bend at ({_mm(v[0])}, {_mm(v[1])}): {angle:.1f} -> {tracks.interior_angle(a, new, b):.1f} deg"
+            )
+            done = True
+            break
+        if not done:
+            break
+    return changes
+
+
+def straighten_via_exits(project: KicadProject) -> list[str]:
+    """Replace the stubs a track takes inside a via's copper by one piece from the via centre.
+
+    The router can leave a track a few short pieces inside a via before it heads off (seen: a diagonal and a 0.14 mm
+    stub, their corner 0.302 mm from a 0.3 mm via's centre, a 92 deg bend the via copper all but covers). Walking out
+    of the via along a plain polyline, every corner within via radius + half the track width is dropped and the first
+    piece reaching beyond starts at the via centre, where such a chain hides a bend sharp_corners reports. If that
+    straight piece would hit something, a new piece leaves the via at 45 deg to it and joins it partway (a 135 deg
+    bend). Done only if the new copper keeps its clearance and no bend gets sharper than 135 deg (or than it was).
+    """
+    clearance, edge_clearance = _design_clearances(project)
+    changes: list[str] = []
+    for _ in range(CORNER_FIX_MAX_PASSES):
+        copper = _copper(project.pcb)
+        obstacles = copper.obstacles()
+        ends = _polyline_ends(copper)
+        done = False
+        for _, centre, radius, net in copper.vias:
+            for s in copper.segs_by_net.get(net, []):
+                start = next((e for e, p in (("start", s.a), ("end", s.b)) if math.dist(p, centre) <= radius), None)
+                if start is None:
+                    continue
+                chain, seg, end = [(s, start)], s, start
+                while True:  # walk outwards while the corners stay inside the via copper
+                    p = _far(seg, end)
+                    if math.dist(p, centre) > radius + seg.width / 2:
+                        break
+                    others = [(t, e) for t, e in ends.get((net, seg.layer, tracks._key(p)), []) if t is not seg]
+                    if len(others) != 1:
+                        chain = []
+                        break
+                    seg, end = others[0]
+                    chain.append((seg, end))
+                if len(chain) < 2:
+                    continue
+                points = [s.a if start == "start" else s.b] + [_far(piece, e) for piece, e in chain]
+                corners = [
+                    tracks.interior_angle(points[i - 1], points[i], points[i + 1])
+                    for i in range(1, len(points) - 1)
+                    if not copper.on_pad_or_via(points[i], net, s.layer)
+                ]
+                if not corners or min(corners) >= tracks.MIN_CORNER_DEG - CORNER_TOLERANCE_DEG:
+                    continue  # nothing sharp_corners would report
+                last, last_end = chain[-1]
+                q = _far(last, last_end)
+                old_from = last.a if last_end == "start" else last.b
+                nxt = _corner_at(ends, copper, last, q)
+                direct = _fits(copper, obstacles, last, centre, q, clearance, edge_clearance) and (
+                    nxt is None
+                    or tracks.interior_angle(centre, q, nxt)
+                    >= min(tracks.MIN_CORNER_DEG, tracks.interior_angle(old_from, q, nxt)) - 1e-6
+                )
+                join = None  # else: leave the via at 45 deg to the last piece and join it partway (a 135 deg bend)
+                length = math.dist(old_from, q)
+                if not direct and length > tracks.EPS:
+                    u = ((q[0] - old_from[0]) / length, (q[1] - old_from[1]) / length)
+                    t = (centre[0] - old_from[0]) * u[0] + (centre[1] - old_from[1]) * u[1]
+                    foot = (old_from[0] + t * u[0], old_from[1] + t * u[1])
+                    along = t + math.dist(centre, foot)
+                    x = (old_from[0] + along * u[0], old_from[1] + along * u[1])
+                    if tracks.EPS < along < length - tracks.EPS and _fits(
+                        copper, obstacles, last, centre, x, clearance, edge_clearance
+                    ):
+                        join = x
+                if not direct and join is None:
+                    continue
+                for piece, _ in chain[:-1]:
+                    _drop(project.pcb, _source(piece))
+                if direct:
+                    _set_end(last, last_end, centre)
+                else:
+                    assert join is not None
+                    _set_end(last, last_end, join)
+                    project.pcb.append(_segment_node(_source(last), centre, join, last.width))
+                changes.append(
+                    f"{net} via at ({_mm(centre[0])}, {_mm(centre[1])}): {len(chain) - 1} stub(s) inside the via dropped"
+                )
+                done = True
+                break
+            if done:
+                break
+        if not done:
+            break
+    return changes
+
+
 def _piece_key(a: tracks.Point, b: tracks.Point) -> frozenset[tuple[int, int]]:
     return frozenset((tracks._key(a), tracks._key(b)))
 
@@ -4049,7 +4260,7 @@ def sharp_corners(project: KicadProject) -> list[tuple[str, tracks.Point, float]
         if len(pairs) == 2:
             (p, a), (_, b) = pairs
             angle = tracks.interior_angle(a, p, b)
-            if angle < tracks.MIN_CORNER_DEG - 1 and not copper.on_pad_or_via(p, net, layer):
+            if angle < tracks.MIN_CORNER_DEG - CORNER_TOLERANCE_DEG and not copper.on_pad_or_via(p, net, layer):
                 out.append((net, p, angle))
     return sorted(out)
 
@@ -4079,6 +4290,8 @@ def apply_post_fill(
             ("clean_tracks", lambda: clean_tracks(project)),
             ("separate_ends_on_pads", lambda: separate_ends_on_pads(project)),
             ("square_tees", lambda: square_tees(project)),
+            ("straighten_via_exits", lambda: straighten_via_exits(project)),
+            ("snap_bends_to_45", lambda: snap_bends_to_45(project)),
             ("push_tracks_clear", lambda: push_tracks_clear(project)),
             ("relocate_vias", lambda: relocate_vias(project)),
             ("reroute_tracks", lambda: reroute_tracks(project)),
@@ -4512,6 +4725,8 @@ FIXES: dict[str, Fix] = {
     "clean_tracks": clean_tracks,
     "separate_ends_on_pads": separate_ends_on_pads,
     "square_tees": square_tees,
+    "straighten_via_exits": straighten_via_exits,
+    "snap_bends_to_45": snap_bends_to_45,
     "push_tracks_clear": push_tracks_clear,
     "reroute_tracks": reroute_tracks,
     "remove_antennas": remove_antennas,
