@@ -1077,8 +1077,9 @@ def test_apply_rule_profiles(project: fixes.KicadProject) -> None:
     assert design["min_copper_edge_clearance"] == 0.2
     assert design["min_text_thickness"] == 0.15
     cls = data["net_settings"]["classes"][0]
-    # profile value for the track width, via raised to the 0.1 mm ring, clearance already at the minimum
-    assert cls == {"name": "Default", "track_width": 0.2, "clearance": 0.1, "via_diameter": 0.4, "via_drill": 0.2}
+    # profile value for the track width, via drill raised to the 0.3 mm price-class floor and its pad to the 0.1 mm
+    # ring, clearance already at the minimum
+    assert cls == {"name": "Default", "track_width": 0.2, "clearance": 0.1, "via_diameter": 0.5, "via_drill": 0.3}
     dru = project.pcb_path.with_suffix(".kicad_dru").read_text(encoding="utf-8")
     assert "(constraint hole_to_hole (min 0.45mm))" in dru
     assert "(constraint annular_width (min 0.18mm))" in dru
