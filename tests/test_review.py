@@ -102,6 +102,8 @@ def test_validate() -> None:
     assert "board:sims: answered twice" in problems
     assert "board:sims: ok needs a cite (datasheet + page, or 'n/a: <why>')" in problems
     assert "U9:x: not a checklist item of this board" in problems
+    (moved,) = review.drop_unknown_pins([review.Answer("U1:dropout", "issue", pin="62", text="t")], work, design)
+    assert (moved.pin, moved.text) == ("", "t (cites pin 62, which U1 does not have)")  # kept, part-level
     ok = [review.Answer("U1:dropout", "ok", pin="vin", cite="p.5"), review.Answer("board:sims", "ok", cite="n/a")]
     assert (
         review.validate([review.Answer("U1:dropout", "ok", pin="V", cite="p.5"), ok[1]], work, design) == []

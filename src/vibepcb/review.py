@@ -28,7 +28,7 @@ import json
 import re
 import shutil
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -339,6 +339,28 @@ def parse_answers(text: str, where: str = ANSWERS_NAME) -> list[Answer]:
     return out
 
 
+def _has_pin(design: Design, ref: str, pin: str) -> bool:
+    names = {p.name.upper() for p in design.pins_of(ref)} | {p.number.upper() for p in design.pins_of(ref)}
+    # a pin group by its common name counts too ("GND" for GND1..GND20, "VS" for VS_POS)
+    return pin.upper() in names or any(n.startswith(pin.upper()) for n in names)
+
+
+def drop_unknown_pins(answers: list[Answer], work_items: list[Item], design: Design) -> list[Answer]:
+    """Answers citing a pin their part doesn't have: the pin goes into the text instead (the finding stays part-level).
+
+    A datasheet pin the footprint merges or omits (bench-psu: ESP32-S3 GND pads 62-65 sit under pad 61) is still a
+    finding to judge, not a reason to throw away the whole review.
+    """
+    refs = {i.id: i.ref for i in work_items}
+    out = []
+    for a in answers:
+        ref = refs.get(a.id, "")
+        if a.pin and ref and not _has_pin(design, ref, a.pin):
+            a = replace(a, pin="", text=f"{a.text} (cites pin {a.pin}, which {ref} does not have)".strip())
+        out.append(a)
+    return out
+
+
 def validate(answers: list[Answer], work_items: list[Item], design: Design) -> list[str]:
     """Problems with the reviewer's answers, one line each (empty = usable)."""
     wanted = {i.id: i for i in work_items}
@@ -361,13 +383,8 @@ def validate(answers: list[Answer], work_items: list[Item], design: Design) -> l
             problems.append(f"{a.id}: {a.verdict} needs a cite (datasheet + page, or 'n/a: <why>')")
         if a.verdict in {"issue", "unknown"} and not a.text:
             problems.append(f"{a.id}: {a.verdict} needs a text")
-        if a.pin and item.ref:
-            names = {p.name.upper() for p in design.pins_of(item.ref)} | {
-                p.number.upper() for p in design.pins_of(item.ref)
-            }
-            # a pin group by its common name counts too ("GND" for GND1..GND20, "VS" for VS_POS)
-            if a.pin.upper() not in names and not any(n.startswith(a.pin.upper()) for n in names):
-                problems.append(f"{a.id}: {item.ref} has no pin {a.pin!r}")
+        if a.pin and item.ref and not _has_pin(design, item.ref, a.pin):
+            problems.append(f"{a.id}: {item.ref} has no pin {a.pin!r}")
     problems += [f"{i}: not answered" for i in wanted if i not in seen]
     return problems
 
@@ -427,6 +444,7 @@ def merge(board: str, *, now: datetime | None = None) -> tuple[list[str], int]:
         msg = f"no answers: run `pcb review {board}` and let the reviewer fill {display_path(answers_file)}"
         raise ReviewError(msg)
     answers = parse_answers(answers_file.read_text(encoding="utf-8"), answers_file.name)
+    answers = drop_unknown_pins(answers, work_items, design)
     if problems := validate(answers, work_items, design):
         shown = "\n  ".join(problems[:40]) + (f"\n  ... {len(problems) - 40} more" if len(problems) > 40 else "")
         msg = f"{display_path(answers_file)}: {len(problems)} problem(s):\n  {shown}"
