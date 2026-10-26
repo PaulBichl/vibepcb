@@ -145,7 +145,8 @@ test in `tests/test_fixes.py` against the fixtures in `tests/data/`.
   few clearance/via-in-pad errors, nudge the nearby passive 0.5 mm and rebuild.
 - Router clearance targets also become the KiCad rules: board props
   `minTraceToPadEdgeClearance`, `minBoardEdgeClearance` (KiCad default 0.5 mm),
-  `minViaHoleDiameter`/`minViaPadDiameter`, `minViaEdgeToPadEdgeClearance`.
+  `minViaHoleDiameter`/`minViaPadDiameter`, `minViaEdgeToPadEdgeClearance`. `minTraceToPadEdgeClearance` is also
+  the router's track-to-track gap (a patch; tscircuit itself keeps a fixed 0.1 mm there).
 - The router keeps edge clearance to the outline only; put a `<keepout>` around
   `<cutout>` slots.
 - Check 4-pad tactile switches against the datasheet: tscircuit's 2-pin symbol

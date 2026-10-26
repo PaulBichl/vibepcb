@@ -184,7 +184,13 @@ def cmd_build(board: str, *, fast: bool = False) -> int:
     # tscircuit evaluates (places + routes) the board on every call: do it once, export the rest from the JSON
     # [planes] nets get a via per pad in `fix` (fixes.plane_pad_vias): the router leaves them out
     with _phase("tscircuit placement + routing (the long step)"):
-        tscircuit.export(source, "circuit-json", circuit, unrouted_nets=sorted(_plane_nets(board)))
+        tscircuit.export(
+            source,
+            "circuit-json",
+            circuit,
+            unrouted_nets=sorted(_plane_nets(board)),
+            trace_clearance=tscircuit.board_clearance(unrouted_json),
+        )
     for change in tscircuit.repair_trace_nets(circuit):
         print(f"  re-linked route {change}")
     errors, report = tscircuit.routed_errors(circuit)
@@ -493,10 +499,11 @@ def _pad_spots(result: kicad.CheckResult) -> set[tuple[str, tuple[float, float]]
 
 
 def _stitch_pour_gaps(
-    project: Path, board: str, pcb: Path, reports: Path, drc: kicad.CheckResult
+    project: Path, board: str, pcb: Path, reports: Path, drc: kicad.CheckResult, *, islands: bool = False
 ) -> tuple[kicad.CheckResult, list[str]]:
-    """Stitching vias where the refilled pour no longer reaches: pads first, then cut-off pour pieces; each kept
-    only if KiCad then reports fewer unconnected items. Returns the new DRC result and the changes."""
+    """Stitching vias where the refilled pour no longer reaches: pads first (kept if KiCad then reports fewer
+    unconnected items), then cut-off pour pieces (kept unless it reports more, or a pad loses its connection; also
+    with nothing unconnected yet if ``islands``). Returns the new DRC result and the changes."""
     out: list[str] = []
     if pads := drc.unconnected_pads():  # pads their pour can't reach: a via to the net's plane
         loaded, stitched = fixes.KicadProject.load(project, board), pcb.read_bytes()
@@ -510,19 +517,30 @@ def _stitch_pour_gaps(
                 pcb.write_bytes(stitched)
                 drc = kicad.run_drc(pcb, reports / "drc.json")
         out += changes
-    if drc.unconnected:  # pour pieces cut off by tracks: a stitching via each into the plane below
-        loaded, stitched = fixes.KicadProject.load(project, board), pcb.read_bytes()
-        changes = fixes.stitch_pour_islands(loaded)
-        if changes:
+    if drc.unconnected or islands:  # pour pieces cut off by tracks: a stitching via each into the plane below
+        stitched = pcb.read_bytes()
+        # refilled with islands kept first: a piece fenced in by tracks is deleted by KiCad, stitching never saw it
+        loaded = fixes.KicadProject.load(project, board)
+        if fixes.set_island_removal(loaded, fixes.ISLANDS_KEPT):
             loaded.save()
+            kicad.run_drc(pcb, reports / "drc.json")  # refills (and saves) with the islands
+            loaded = fixes.KicadProject.load(project, board)
+        changes = fixes.stitch_pour_islands(loaded)
+        fixes.set_island_removal(loaded, fixes.ISLANDS_REMOVED)
+        loaded.save()
+        if changes:
             fewer = kicad.run_drc(pcb, reports / "drc.json")
-            if fewer.unconnected < drc.unconnected:
+            # not "fewer": a piece KiCad had deleted (a pocket fenced in by tracks) counted as nothing before; its
+            # stitch only shows later, when the pads it reaches lose their tracks to the prune
+            if fewer.unconnected <= drc.unconnected and not _pad_spots(fewer) - _pad_spots(drc):
                 drc = fewer
                 out += changes
             else:
                 pcb.write_bytes(stitched)
                 drc = kicad.run_drc(pcb, reports / "drc.json")
-                out.append(f"{len(changes)} stitching via(s) for pour pieces undone (no fewer unconnected items)")
+                out.append(f"{len(changes)} stitching via(s) for pour pieces undone (more unconnected items)")
+        else:
+            pcb.write_bytes(stitched)
     return drc, out
 
 
@@ -537,6 +555,10 @@ def cmd_check(board: str, *, strict: bool = False) -> int:
     # retry keeping the tracks around the reported spots, then prune only the tracks at acute
     # angles; give up (restore) after a few tries
     post_fill_started = time.monotonic()
+    # pour pieces the fill cut off (KiCad deletes a pocket fenced in by tracks): stitched before the prune judges
+    drc, stitched = _stitch_pour_gaps(project, board, pcb, reports, drc, islands=True)
+    for change in stitched:
+        print(f"  post-fill: {change}")
     backup, before = pcb.read_bytes(), drc.unconnected
     before_pads = _pad_spots(drc)
     keep: list[tuple[float, float]] = []
@@ -607,6 +629,17 @@ def cmd_check(board: str, *, strict: bool = False) -> int:
                 drc = kicad.run_drc(pcb, reports / "drc.json")
                 print("  corner touch-up: undone, it disconnected something")
             loaded = fixes.KicadProject.load(project, board)
+    if split := fixes.split_at_tees(loaded):  # last: KiCad measures a T only at a vertex reliably
+        backup = pcb.read_bytes()
+        loaded.save()
+        after = kicad.run_drc(pcb, reports / "drc.json")
+        if after.unconnected <= drc.unconnected and not _pad_spots(after) - _pad_spots(drc):
+            drc = after
+            print(f"  post-fill: {len(split)} T-junction(s) given a vertex in the through-track")
+        else:
+            pcb.write_bytes(backup)
+            drc = kicad.run_drc(pcb, reports / "drc.json")
+        loaded = fixes.KicadProject.load(project, board)
     corners = fixes.sharp_corners(loaded)
     unpoured = fixes.unpoured_copper_layers(loaded)
     summary = [str(erc), str(drc), f"Track bends: {len(corners)} sharper than 135 deg"]

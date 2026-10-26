@@ -1277,6 +1277,73 @@ def test_reroute_named_nets_keeps_tscircuit_copper_on_failure(
     assert sorted(map(sexpr.dumps, after)) == sorted(map(sexpr.dumps, before))  # the partial route went
 
 
+def test_plane_pad_vias_stay_out_of_pour_keepouts(project: fixes.KicadProject) -> None:
+    # the plane under a pour keepout (antenna, coil) is not filled: a via there would dangle
+    for n in [n for n in project.pcb if sexpr.head(n) in ("segment", "via")]:
+        if isinstance(n, list) and fixes._net_of(n, fixes._net_names(project.pcb)) == "GND":
+            project.pcb.remove(n)
+    project.pcb.append(
+        sexpr.loads(
+            '(zone (net 2 "GND") (layer "B.Cu") (polygon (pts (xy 85 90) (xy 110 90) (xy 110 110) (xy 85 110))))'
+        )
+    )
+    project.pcb.append(
+        sexpr.loads(
+            '(zone (net 0) (net_name "") (layers "B.Cu") (name "vibepcb:keepout:coil") (keepout (tracks allowed) '
+            "(vias allowed) (pads allowed) (copperpour not_allowed) (footprints allowed)) "
+            "(polygon (pts (xy 85 90) (xy 110 90) (xy 110 110) (xy 85 110))))"
+        )
+    )
+    project.config = {"planes": {"nets": ["GND"]}}
+    changes = fixes.plane_pad_vias(project)
+    assert changes[0] == "GND: 0 pad vias to the plane"
+    assert "has no room for a via" in changes[1]
+
+
+def test_net_placed_vias(project: fixes.KicadProject) -> None:
+    # a TSX <via> arrives with (net 0) and an empty tscircuit:Unknown footprint; its track carries the net
+    project.pcb.append(sexpr.loads('(via (at 70 70) (size 0.4) (drill 0.2) (layers "F.Cu" "B.Cu") (net 0) (uuid "p"))'))
+    project.pcb.append(sexpr.loads('(segment (start 70 72) (end 70 70) (width 0.2) (layer "F.Cu") (net 2) (uuid "t"))'))
+    project.pcb.append(sexpr.loads('(footprint "tscircuit:Unknown" (layer "F.Cu") (uuid "u") (at 70 70 0))'))
+    changes = fixes.net_placed_vias(project)
+    assert changes == [
+        "via at (70, 70): net GND (from its track)",
+        "empty footprint tscircuit:Unknown at (70, 70) removed (a placed via's stand-in)",
+    ]
+    assert (70.0, 70.0) in [c for c, _ in fixes._copper(project.pcb).vias_by_net["GND"]]
+    assert fixes.net_placed_vias(project) == []
+
+
+def test_split_at_tees(project: fixes.KicadProject) -> None:
+    through = sexpr.loads('(segment (start 60 80) (end 64 80) (width 0.15) (layer "F.Cu") (net 2) (uuid "a"))')
+    branch = sexpr.loads('(segment (start 61.5 80) (end 61.5 83) (width 0.15) (layer "F.Cu") (net 2) (uuid "b"))')
+    project.pcb += [through, branch]
+    changes = fixes.split_at_tees(project)
+    assert changes == ["GND track split at the T-junction at (61.5, 80)"]
+    ends = {(s.a, s.b) for s in fixes._copper(project.pcb).segs if s.layer == "F.Cu" and s.a[1] == s.b[1] == 80}
+    assert ((60.0, 80.0), (61.5, 80.0)) in ends
+    assert ((61.5, 80.0), (64.0, 80.0)) in ends
+    assert fixes.split_at_tees(project) == []
+
+
+def test_set_island_removal(project: fixes.KicadProject) -> None:
+    zone = sexpr.loads(
+        '(zone (net 2 "GND") (layer "B.Cu") (fill yes (island_removal_mode 0)) '
+        "(polygon (pts (xy 85 90) (xy 110 90) (xy 110 110) (xy 85 110))))"
+    )
+    keepout = sexpr.loads(
+        '(zone (net 0) (layers "B.Cu") (keepout (copperpour not_allowed)) (fill (island_removal_mode 0)) '
+        "(polygon (pts (xy 0 0) (xy 1 0) (xy 1 1))))"
+    )
+    project.pcb += [zone, keepout]
+    assert fixes.set_island_removal(project, fixes.ISLANDS_KEPT) >= 1
+    assert sexpr.dumps(zone).count("(island_removal_mode 1)") == 1
+    assert "(island_removal_mode 0)" in sexpr.dumps(keepout)  # keepouts are no pour
+    assert fixes.set_island_removal(project, fixes.ISLANDS_KEPT) == 0
+    fixes.set_island_removal(project, fixes.ISLANDS_REMOVED)
+    assert "(island_removal_mode 0)" in sexpr.dumps(zone)
+
+
 def test_net_node_track_form(project: fixes.KicadProject) -> None:
     # tracks / vias take (net <id>); a pad's (net <id> "<name>") on a via crashes kicad-cli's DRC
     for n in [n for n in project.pcb if sexpr.head(n) in ("segment", "via")]:

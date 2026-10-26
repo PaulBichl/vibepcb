@@ -65,6 +65,42 @@
    "file": "tscircuit/dist/webworker.min.js",
    "old": "if(!netConnectivityKey||handledNetConnectivityKeys.has(netConnectivityKey))continue;",
    "new": "if(!netConnectivityKey||handledNetConnectivityKeys.has(netConnectivityKey)||(globalThis.process?.env?.VIBEPCB_UNROUTED_NETS??\"\").split(\",\").includes(net.name))continue;"
+  },
+  {
+   "file": "@tscircuit/capacity-autorouter/dist/index.js",
+   "all": true,
+   "old": "traceClearance:.1,viaClearance:.1",
+   "new": "traceClearance:(+(globalThis.process?.env?.VIBEPCB_TRACE_CLEARANCE)||.1),viaClearance:.1"
+  },
+  {
+   "file": "@tscircuit/capacity-autorouter/dist/index.js",
+   "all": true,
+   "old": "traceClearance??.1",
+   "new": "traceClearance??(+(globalThis.process?.env?.VIBEPCB_TRACE_CLEARANCE)||.1)"
+  },
+  {
+   "file": "@tscircuit/eval/dist/webworker/entrypoint.js",
+   "all": true,
+   "old": "traceClearance:.1,viaClearance:.1",
+   "new": "traceClearance:(+(globalThis.process?.env?.VIBEPCB_TRACE_CLEARANCE)||.1),viaClearance:.1"
+  },
+  {
+   "file": "@tscircuit/eval/dist/webworker/entrypoint.js",
+   "all": true,
+   "old": "traceClearance??.1",
+   "new": "traceClearance??(+(globalThis.process?.env?.VIBEPCB_TRACE_CLEARANCE)||.1)"
+  },
+  {
+   "file": "tscircuit/dist/webworker.min.js",
+   "all": true,
+   "old": "traceClearance:.1,viaClearance:.1",
+   "new": "traceClearance:(+(globalThis.process?.env?.VIBEPCB_TRACE_CLEARANCE)||.1),viaClearance:.1"
+  },
+  {
+   "file": "tscircuit/dist/webworker.min.js",
+   "all": true,
+   "old": "traceClearance??.1",
+   "new": "traceClearance??(+(globalThis.process?.env?.VIBEPCB_TRACE_CLEARANCE)||.1)"
   }
  ]
 }

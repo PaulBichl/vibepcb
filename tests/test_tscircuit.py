@@ -128,3 +128,11 @@ def test_prepared_source_writes_posix_import_paths(tmp_path: Path) -> None:
     text = tscircuit.prepared_source(src / "index.circuit.tsx", tmp_path / "work").read_text(encoding="utf-8")
     assert "\\" not in text
     assert (src / "lib" / "x").resolve().as_posix() in text
+
+
+def test_board_clearance(tmp_path: Path) -> None:
+    circuit = tmp_path / "c.json"
+    circuit.write_text(json.dumps([{"type": "pcb_board", "min_trace_to_pad_edge_clearance": 0.2}]), encoding="utf-8")
+    assert tscircuit.board_clearance(circuit) == 0.2
+    circuit.write_text(json.dumps([{"type": "pcb_board"}]), encoding="utf-8")
+    assert tscircuit.board_clearance(circuit) is None

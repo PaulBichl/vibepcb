@@ -4,7 +4,8 @@
 //   node scripts/patch-tscircuit.mjs --check    only report; exit 1 if a patch is missing or does not match
 //   node scripts/patch-tscircuit.mjs --root DIR node_modules lives in DIR (default: the current directory)
 //
-// patches/tscircuit.json lists {file, old, new}: one exact text replacement per file. patch-package is not
+// patches/tscircuit.json lists {file, old, new}: one exact text replacement per file ("all": true: every occurrence,
+// for a constant the bundle repeats). patch-package is not
 // used because the dist bundles are minified (one line = 50 KB to 3 MB, so its line diffs would be megabytes).
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -20,7 +21,7 @@ const spec = JSON.parse(readFileSync(join(here, "..", "patches", "tscircuit.json
 let applied = 0;
 let already = 0;
 const problems = [];
-for (const { file, old, new: replacement } of spec.patches) {
+for (const { file, old, new: replacement, all } of spec.patches) {
   const path = join(root, "node_modules", file);
   if (!existsSync(path)) {
     problems.push(`${file}: not installed`);
@@ -28,11 +29,11 @@ for (const { file, old, new: replacement } of spec.patches) {
   }
   const text = readFileSync(path, "utf8");
   const first = text.indexOf(old);
-  if (first >= 0 && text.indexOf(old, first + 1) < 0) {
+  if (first >= 0 && (all || text.indexOf(old, first + 1) < 0)) {
     if (check) {
       problems.push(`${file}: patch missing`);
     } else {
-      writeFileSync(path, text.slice(0, first) + replacement + text.slice(first + old.length));
+      writeFileSync(path, all ? text.split(old).join(replacement) : text.slice(0, first) + replacement + text.slice(first + old.length));
       applied += 1;
     }
   } else if (text.includes(replacement)) {

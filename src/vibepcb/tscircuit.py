@@ -70,19 +70,33 @@ def _run(cmd: list[str], env: dict[str, str] | None = None) -> subprocess.Comple
     return subprocess.CompletedProcess(cmd, child.returncode, "".join(lines), "")
 
 
-UNROUTED_NETS_ENV = "VIBEPCB_UNROUTED_NETS"  # read by a patch in tscircuit's core (patches/tscircuit.json)
+# read by patches in tscircuit's core / autorouter (patches/tscircuit.json)
+UNROUTED_NETS_ENV = "VIBEPCB_UNROUTED_NETS"
+TRACE_CLEARANCE_ENV = "VIBEPCB_TRACE_CLEARANCE"
 
 
-def export(source: Path, fmt: str, output: Path, *, unrouted_nets: Sequence[str] = ()) -> None:
+def export(
+    source: Path,
+    fmt: str,
+    output: Path,
+    *,
+    unrouted_nets: Sequence[str] = (),
+    trace_clearance: float | None = None,
+) -> None:
     """``tsci export <source> -f <fmt> -o <output>``; raises with tsci's output on failure.
 
     ``unrouted_nets``: nets the autorouter leaves out (plane nets: ``fixes.plane_pad_vias`` gives each pad
     its own via to the pour, so the router's tracks of the net would only be thrown away and block others).
+    ``trace_clearance``: the autorouter's track-to-track / track-to-via gap (mm); unpatched it is a fixed
+    0.1 mm whatever the board says, so its routes broke the board's clearance (KiCad's net class) everywhere.
     """
     output.parent.mkdir(parents=True, exist_ok=True)
     # the parts engine looks up every part on the network on each run; `fab` checks availability once
     cmd = [*_tsci(), "export", str(source), "-f", fmt, "-o", str(output.resolve()), "--disable-parts-engine"]
-    result = _run(cmd, {UNROUTED_NETS_ENV: ",".join(unrouted_nets)} if unrouted_nets else None)
+    env = {UNROUTED_NETS_ENV: ",".join(unrouted_nets)} if unrouted_nets else {}
+    if trace_clearance is not None:
+        env[TRACE_CLEARANCE_ENV] = f"{trace_clearance:g}"
+    result = _run(cmd, env or None)
     if result.returncode != 0 or not output.exists():
         msg = f"tsci export -f {fmt} failed:\n{result.stdout}{result.stderr}"
         raise TscircuitError(msg)
@@ -209,6 +223,14 @@ PLACEMENT_ERRORS = (
     "pcb_footprint_overlap_error",
     "pcb_pad_pad_clearance_error",
 )
+
+
+def board_clearance(circuit_json: Path) -> float | None:
+    """The board's ``minTraceToPadEdgeClearance`` (mm) from a circuit JSON: the clearance KiCad's net class gets."""
+    elements = json.loads(circuit_json.read_text(encoding="utf-8"))
+    board = next((e for e in elements if e.get("type") == "pcb_board"), None)
+    value = board.get("min_trace_to_pad_edge_clearance") if board else None
+    return float(value) if isinstance(value, int | float) else None
 
 
 def circuit_errors(circuit_json: Path, only: tuple[str, ...] | None = None) -> tuple[int, str]:

@@ -1717,6 +1717,13 @@ class _Copper:
     edges: list[tracks.Obstacle]
     zones: dict[tuple[str, str], list[list[tracks.Point]]]  # (net, layer) -> polygons
     keepouts: list[tracks.Obstacle] = field(default_factory=list)  # areas tracks may not enter
+    no_pour: dict[str, list[list[tracks.Point]]] = field(default_factory=dict)  # layer -> keepouts without pour
+
+    def poured(self, q: tracks.Point, net: str, layer: str) -> bool:
+        """``q`` lies in a zone outline of ``net`` on ``layer`` outside every pour keepout there (filled or not)."""
+        return any(tracks.point_in_polygon(q, poly) for poly in self.zones.get((net, layer), [])) and not any(
+            tracks.point_in_polygon(q, poly) for poly in self.no_pour.get(layer, [])
+        )
 
     def obstacles(self) -> list[tracks.Obstacle]:
         out = [tracks.Obstacle(s.net, frozenset({s.layer}), (s.a, s.b), s.width / 2) for s in self.segs]
@@ -1903,6 +1910,7 @@ def _copper(pcb: list[Node], *, filled_zones: bool = False) -> _Copper:
             edges += [tracks.Obstacle("<edge>", frozenset(COPPER_LAYERS), (a, b)) for a, b in itertools.pairwise(pts)]
     zones: dict[tuple[str, str], list[list[tracks.Point]]] = {}
     keepouts = []
+    no_pour: dict[str, list[list[tracks.Point]]] = {}
     for zone in sexpr.children(pcb, "zone"):
         keepout = sexpr.child(zone, "keepout")
         if keepout is None:
@@ -1916,7 +1924,10 @@ def _copper(pcb: list[Node], *, filled_zones: bool = False) -> _Copper:
             if net is not None:
                 for layer, poly in _zone_polygons(zone, filled=False):
                     keepouts.append(tracks.Obstacle(net, frozenset({layer}), _inset(poly), polygon=True))
-    return _Copper(names, segs, vias, pads, rect_pads, edges, zones, keepouts)
+            if "copperpour" in blocked:
+                for layer, poly in _zone_polygons(zone, filled=False):
+                    no_pour.setdefault(layer, []).append(poly)
+    return _Copper(names, segs, vias, pads, rect_pads, edges, zones, keepouts, no_pour)
 
 
 def _inset(poly: list[tracks.Point], by: float = KEEPOUT_INSET_MM) -> tuple[tracks.Point, ...]:
@@ -4292,6 +4303,46 @@ def sharp_corners(project: KicadProject) -> list[tuple[str, tracks.Point, float]
     return sorted(out)
 
 
+def split_at_tees(project: KicadProject) -> list[str]:
+    """Split a track where another track of its net ends on its middle: every junction becomes a vertex.
+
+    KiCad's ``track_angle`` check misjudges some T-junctions whose branch ends inside the other track (seen:
+    an exact 90 deg T reported as 0.001 deg, open-theremin VCC); with the through-track split at the foot it
+    measures the real angles. Electrically nothing changes. ``check`` runs it last (the clean-up merges
+    straight runs back into one piece).
+    """
+    changes = []
+    for _ in range(SPLIT_TEES_MAX):
+        copper = _copper(project.pcb)
+        found = None
+        for t in copper.segs:
+            for s in copper.segs_by_net.get(t.net, []):
+                if s is t or s.layer != t.layer:
+                    continue
+                for e in (s.a, s.b):
+                    if min(math.dist(e, t.a), math.dist(e, t.b)) > T_SPLIT_MIN_MM and (
+                        tracks.point_seg_distance(e, t.a, t.b) <= T_ON_LINE_MM
+                    ):
+                        found = (t, e)
+                        break
+                if found:
+                    break
+            if found:
+                break
+        if found is None:
+            break
+        t, e = found
+        node = _source(t)
+        index = project.pcb.index(node)
+        project.pcb[index : index + 1] = [_segment_node(node, t.a, e, t.width), _segment_node(node, e, t.b, t.width)]
+        changes.append(f"{t.net} track split at the T-junction at ({_mm(e[0])}, {_mm(e[1])})")
+    return changes
+
+
+SPLIT_TEES_MAX = 500
+T_SPLIT_MIN_MM = 0.01  # an end this close to the track's own end already meets it there
+
+
 def apply_post_fill(
     project: KicadProject,
     keep_near: list[tracks.Point] | None = None,
@@ -4715,6 +4766,40 @@ def tune_lengths(project: KicadProject) -> list[str]:
     return list(tune.tune(project))
 
 
+def net_placed_vias(project: KicadProject) -> list[str]:
+    """Give a ``<via>`` the TSX placed itself the net of the track that ends in it, and drop its empty footprint.
+
+    tscircuit exports such a via with ``(net 0)`` (its net only comes through the trace to it) plus an empty
+    ``tscircuit:Unknown`` footprint at its spot. Net-less, the fixes take the via's own track for foreign
+    copper (``relocate_vias`` pushed it off its pin: the GND pin lost its plane).
+    """
+    copper = _copper(project.pcb)
+    changes = []
+    for node, centre, radius, net in copper.vias:
+        if net:
+            continue
+        ending = {
+            s.net
+            for s in copper.segs
+            if s.net and min(math.dist(s.a, centre), math.dist(s.b, centre)) <= radius - tracks.EPS
+        }
+        if len(ending) != 1 or (net_node := _net_node(project.pcb, next(iter(ending)))) is None:
+            continue
+        old = sexpr.child(node, "net")
+        if old is not None:
+            node.remove(old)
+        node.insert(len(node) - 1, copy.deepcopy(net_node))
+        changes.append(f"via at ({_mm(centre[0])}, {_mm(centre[1])}): net {next(iter(ending))} (from its track)")
+    for fp in [n for n in project.pcb if sexpr.head(n) == "footprint" and isinstance(n, list)]:
+        empty = not any(sexpr.head(c) in ("pad", "fp_line", "fp_text", "fp_rect", "fp_circle", "property") for c in fp)
+        if empty and len(fp) > 1 and str(fp[1]) == "tscircuit:Unknown":
+            at = sexpr.child(fp, "at")
+            project.pcb.remove(fp)
+            where = f" at ({_mm(_num(at, 1))}, {_mm(_num(at, 2))})" if at is not None else ""
+            changes.append(f"empty footprint tscircuit:Unknown{where} removed (a placed via's stand-in)")
+    return changes
+
+
 UNROUTED_NAME = "unrouted.kicad_pcb"
 
 
@@ -4786,6 +4871,7 @@ FIXES: dict[str, Fix] = {
     "thermal_pad_vias": thermal_pad_vias,  # before the track fixes: obstacles for them, kept by restore_nets
     "repair_zero_width_tracks": repair_zero_width_tracks,
     "drop_tracks_inside_pads": drop_tracks_inside_pads,
+    "net_placed_vias": net_placed_vias,  # before the track fixes: they judge copper by net
     "merge_duplicate_vias": merge_duplicate_vias,
     "widen_thin_vias": widen_thin_vias,
     "plane_pad_vias": plane_pad_vias,
@@ -4930,6 +5016,27 @@ def drop_vias_at(project: KicadProject, spots: list[tracks.Point]) -> list[str]:
     return changes
 
 
+ISLANDS_REMOVED = 0  # KiCad's island_removal_mode: 0 always remove, 1 never
+ISLANDS_KEPT = 1
+
+
+def set_island_removal(project: KicadProject, mode: int) -> int:
+    """Set ``island_removal_mode`` of every net zone (not keepouts); returns how many zones changed.
+
+    ``check`` refills once with islands kept (:data:`ISLANDS_KEPT`) so :func:`stitch_pour_islands` sees the pour
+    pieces KiCad would delete (a piece fenced in by tracks, no via yet), then restores the removal.
+    """
+    changed = 0
+    for zone in sexpr.children(project.pcb, "zone"):
+        if sexpr.child(zone, "keepout") is not None:
+            continue
+        for node in sexpr.walk(zone):
+            if sexpr.head(node) == "island_removal_mode" and isinstance(node, list) and str(node[1]) != str(mode):
+                node[1] = Sym(str(mode))
+                changed += 1
+    return changed
+
+
 def stitch_pour_islands(project: KicadProject) -> list[str]:
     """A via into every piece of a net's pour that has no connection to the net's pour on another layer.
 
@@ -5022,9 +5129,9 @@ def _pad_via(
     via_size, via_drill = _design_via(project)
     r = via_size / 2
     layer = next((lay for lay in COPPER_LAYERS if lay in pad.layers), None)
-    planes = [poly for (n, lay), polys in copper.zones.items() if n == net and lay != layer for poly in polys]
+    plane_layers = sorted({lay for n, lay in copper.zones if n == net and lay != layer})
     net_node = _net_node(project.pcb, net)
-    if layer is None or not planes or net_node is None:
+    if layer is None or not plane_layers or net_node is None:
         return None
     # only what a via within reach could touch (the whole board's copper made this the slowest fix)
     reach = max(STITCH_STEPS_MM) + r + clearance + width + 0.5
@@ -5042,7 +5149,7 @@ def _pad_via(
             all(o.distance(q, q) >= r + clearance for o in others)
             and all(e.distance(q, q) >= r + edge_clearance for e in copper.edges)
             and all(o.distance(q, q) >= r + clearance for o in own_pads)  # no via-in-pad, also not in a neighbour's
-            and any(tracks.point_in_polygon(q, poly) for poly in planes)
+            and any(copper.poured(q, net, lay) for lay in plane_layers)  # not in a pour keepout (antenna, coil)
         )
 
     def fits(q: tracks.Point) -> bool:  # the via and a straight track to it
