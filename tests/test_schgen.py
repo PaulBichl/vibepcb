@@ -34,10 +34,14 @@ TSX = """
 """
 
 
-def _circuit(tmp_path: Path) -> Path:
+def _circuit(
+    tmp_path: Path,
+    parts: dict[str, tuple[str, list[tuple[str, int | None]]]] | None = None,
+    named: dict[int, str] | None = None,
+) -> Path:
     elements: list[dict[str, object]] = []
     port = 0
-    for comp, (name, (ftype, pins)) in enumerate(PARTS.items()):
+    for comp, (name, (ftype, pins)) in enumerate((PARTS if parts is None else parts).items()):
         elements.append({"type": "source_component", "source_component_id": f"c{comp}", "name": name, "ftype": ftype})
         for number, (pin, net) in enumerate(pins, start=1):
             p: dict[str, object] = {
@@ -56,7 +60,8 @@ def _circuit(tmp_path: Path) -> Path:
         {"type": "source_port", "source_port_id": "px", "name": "pin1_internal_1", "source_component_id": "c0"}
     )
     elements += [
-        {"type": "source_net", "name": n, "subcircuit_connectivity_map_key": f"{KEY}{k}"} for k, n in NAMED.items()
+        {"type": "source_net", "name": n, "subcircuit_connectivity_map_key": f"{KEY}{k}"}
+        for k, n in (NAMED if named is None else named).items()
     ]
     elements.append({"type": "source_trace", "connected_source_port_ids": ["p0"]})  # the unnamed net is traced
     elements.append({"type": "source_trace", "connected_source_port_ids": [f"p{port - 1}"]})
@@ -261,3 +266,105 @@ def test_named_trace_names_its_net() -> None:
     assert names["U2", "1"] == "SD_DQ0"
     assert names["U1", "2"] == "GND"
     assert names["U1", "3"] == "U1_X"  # tscircuit's own trace id is no name
+
+
+def _symbols(sch: list[Node]) -> dict[str, list[Node]]:
+    return {sexpr.property_value(s, "Reference") or "": s for s in sexpr.children(sch, "symbol")}
+
+
+def _power_at(sch: list[Node], point: tuple[float, float]) -> tuple[str, int]:
+    """(rail name, angle) of the rail symbol whose pin sits on ``point``."""
+    symbols = _symbols(sch)
+    for (ref, _), at in fixes._pin_positions(sch).items():
+        if ref.startswith("#PWR") and at == point:
+            angle = sexpr.child(symbols[ref], "at")
+            assert angle is not None
+            return sexpr.property_value(symbols[ref], "Value") or "", round(float(str(angle[3])))
+    msg = f"no rail symbol on {point}"
+    raise AssertionError(msg)
+
+
+def test_decoupling_caps_stand_at_their_supply_pin(tmp_path: Path) -> None:
+    # a box chip: the VCC pin's caps stand side by side on a wire out of the pin, each with GND below it
+    text = schgen.generate(_circuit(tmp_path), "board", _source(tmp_path), _no_library(tmp_path))
+    sch = sexpr.loads(text)
+    pins = fixes._pin_positions(sch)
+    vcc = pins["U1", "6"]  # VCC and VCC2 are joined, the caps go on the run's last pin
+    for cap in ("C1", "C2"):
+        top, bottom = sorted([pins[cap, "1"], pins[cap, "2"]], key=lambda p: p[1])
+        assert top[0] == bottom[0]  # standing
+        assert top[1] == vcc[1]  # on the pin's row ...
+        assert abs(top[0] - vcc[0]) <= 8 * schgen.GRID  # ... within 8 grid units of the pin
+        assert _power_at(sch, bottom) == ("GND", 0)  # GND below the cap, pointing down
+    assert schgen.connectivity_errors(text, schgen._parts(json.loads(_circuit(tmp_path).read_text()))) == []
+
+
+def test_rail_to_rail_chain_is_one_column(tmp_path: Path) -> None:
+    # LED + resistor between VCC and GND (no chip on their middle net): one standing column, VCC on top
+    parts: dict[str, tuple[str, list[tuple[str, int | None]]]] = {
+        "U1": ("simple_chip", [("VCC", 0), ("OUT", 2), ("GND", 1)]),
+        "R1": ("simple_resistor", [("pin1", 0), ("pin2", 3)]),
+        "D1": ("simple_led", [("anode", 3), ("cathode", 1)]),
+        "J1": ("simple_chip", [("VCC", 0), ("SIG", 2), ("GND", 1)]),
+    }
+    circuit = _circuit(tmp_path, parts, {0: "VCC", 1: "GND", 2: "OUT", 3: "LED_A"})
+    sch = sexpr.loads(schgen.generate(circuit, "board", None, _no_library(tmp_path)))
+    pins = fixes._pin_positions(sch)
+    xs = {pins[ref, n][0] for ref in ("R1", "D1") for n in ("1", "2")}
+    assert len(xs) == 1  # one column
+    top = min((pins[ref, n] for ref in ("R1", "D1") for n in ("1", "2")), key=lambda p: p[1])
+    bottom = max((pins[ref, n] for ref in ("R1", "D1") for n in ("1", "2")), key=lambda p: p[1])
+    assert _power_at(sch, top)[0] == "VCC"
+    assert _power_at(sch, bottom) == ("GND", 0)
+
+
+def test_one_pin_part_is_a_small_symbol(tmp_path: Path) -> None:
+    parts: dict[str, tuple[str, list[tuple[str, int | None]]]] = {
+        "U1": ("simple_chip", [("VCC", 0), ("OUT", 2), ("GND", 1)]),
+        "J1": ("simple_chip", [("VCC", 0), ("SIG", 2), ("GND", 1)]),
+        "TP1": ("simple_test_point", [("pin1", 0)]),
+    }
+    sch = sexpr.loads(schgen.generate(_circuit(tmp_path, parts, {0: "VCC", 1: "GND", 2: "OUT"}), "b", None,
+                                      _no_library(tmp_path)))  # fmt: skip
+    lib = sexpr.child(sch, "lib_symbols")
+    assert lib is not None
+    tp = next(s for s in sexpr.children(lib, "symbol") if str(s[1]) == "vibepcb:TP1")
+    heads = {sexpr.head(x) for x in sexpr.walk(tp)}
+    assert "circle" in heads
+    assert "rectangle" not in heads  # no box
+
+
+def test_rails_turn_only_into_free_room() -> None:
+    sheet = schgen.Sheet("t", set(), set())
+    sheet.wire(0, 0, 2.54, 0)  # a pin's wire to the right, its GND rail at the end
+    sheet.rail("GND", 2.54, 0, "right")
+    sheet.wire(0, 10.16, 2.54, 10.16)
+    sheet.rail("GND", 2.54, 10.16, "right")
+    sheet.wire(0, 12.7, 10.16, 12.7)  # the next pin's wire right under the second one
+    sheet.rail("VCC", 0, 30, "down")  # a supply arriving from above: upside down, turns sideways
+    sheet.finish()
+    angles = {
+        sexpr.property_value(n, "Value") + str(round(float(str(sexpr.child(n, "at")[2])))): sexpr.child(n, "at")[3]  # type: ignore[index, operator]
+        for n in (sexpr.loads(item) for item in sheet.items)
+        if sexpr.head(n) == "symbol"
+    }
+    assert str(angles["GND0"]) == "0"  # free below: points down
+    assert str(angles["GND10"]) == "90"  # a wire below: stays pointing right
+    assert str(angles["VCC30"]) in {"90", "270"}  # sideways, not upside down
+
+
+def test_unsectioned_decoupling_joins_its_chip() -> None:
+    def part(name: str, kind: str, pos: tuple[float, float], *pins: tuple[str, str]) -> schgen.Part:
+        pin_list = [schgen.Pin(str(i), p, n) for i, (p, n) in enumerate(pins, start=1)]
+        return schgen.Part(name, name, kind, pin_list, pos=pos)
+
+    parts = [
+        part("U1", "chip", (0, 0), ("VDD", "V3V3"), ("GND", "GND")),
+        part("U2", "chip", (20, 0), ("VDD", "V3V3"), ("GND", "GND")),
+        part("C1", "C", (19, 1), ("pin1", "V3V3"), ("pin2", "GND")),
+        part("R1", "R", (19, 1), ("pin1", "V3V3"), ("pin2", "SIG")),
+    ]
+    section_of = {"U1": "mcu", "U2": "sensor"}
+    schgen._adopt_decoupling(parts, section_of, {"V3V3", "GND"})
+    assert section_of["C1"] == "sensor"  # the nearest chip its supply powers
+    assert "R1" not in section_of  # not a rail-to-rail part

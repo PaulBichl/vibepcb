@@ -11,8 +11,10 @@ so builds always disable it and the schematic comes from here, in well under a s
 - GND / supply rails end in rail symbols (``fixes.schematic_power_symbols`` makes them power
   symbols); a net is wired once per block and labelled there, every further appearance is a label
   (double arrow when the net leaves the block); labels always, so KiCad keeps the PCB's net names;
-- capacitors between two rails (decoupling) hang off the supply pin of the chip they serve
-  (pin -+- rail symbol, caps below to GND); ones no chip takes stand in a row at the block end.
+- capacitors between two rails (decoupling) stand at the supply pin of the chip they serve
+  (a wire out of the pin, the caps standing on it with GND below); ones no chip takes stand in a
+  row at the block end; two parts in series between two rails (LED + resistor) stand as one column;
+- rail symbols point GND down / supplies up wherever that room is free (``Sheet.finish``).
 """
 
 from __future__ import annotations
@@ -36,6 +38,7 @@ PIN_LENGTH = 2.54
 FONT = 1.27
 SMALL = 1.0  # reference / value of the two-terminal parts
 CHAR_W = 1.0  # width per character at 1.27 mm (generous)
+SMALL_CHAR_W = 1.0  # width per character at SMALL (KiCad font, measured)
 STUB = 2.54  # wire from a node to a part / label
 TWO_LEN = 7.62  # pin end to pin end of a two-terminal symbol
 TWO_TEXT = 2.286  # reference above / value below a horizontal two-terminal symbol
@@ -58,7 +61,11 @@ _NAME = re.compile(r"""\bname\s*=\s*["']([^"']+)["']""")
 _GROUND = re.compile(r"GND|VSS", re.IGNORECASE)
 _SUPPLY = re.compile(r"^[+-]?(V|VCC|VDD|VBUS|VIN|VBAT|\d+V)", re.IGNORECASE)
 # chip pins that take a supply (VDD, AVDD, VIN, VPOS, VS_NEG, V+, ...): a net on one is a rail, not a signal
-_POWER_PIN = re.compile(r"^(A|D|P)?V(CC|DD|EE|IN|BUS|BAT|POS|NEG|S_?POS|S_?NEG|_POS|_NEG|BIAS)?\d*$|^VS?[+-]$", re.I)
+_POWER_PIN = re.compile(
+    r"^(A|D|P)?V(CC|DD|EE|IN|BUS|BAT|POS|NEG|S_?POS|S_?NEG|_POS|_NEG|BIAS)?\d*$|^VS?[+-]$"
+    r"|^\+?\d+V\d*$|^(A|D)?V(CC|DD)[A-Z0-9_]*$",  # 3V3 / 5V pins (modules), VDDA, VDD_SPI, VCCIO
+    re.I,
+)
 _NEGATIVE_PIN = re.compile(r"NEG|^VEE|^VS?-$", re.IGNORECASE)  # a rail on such a pin is a negative supply
 _GENERIC_PIN = re.compile(r"^(pin)?\d+$", re.IGNORECASE)
 _ANODE = {"a", "anode", "pos"}
@@ -305,6 +312,8 @@ class Node:
 
     net: str
     entries: list[Label | Rail | Branch] = field(default_factory=list)
+    offset: float = 0.0  # a comb (see _combs): how far out its first cap stands, past the trees below it
+    comb: bool = True  # False: drawn as a stack (the comb would have to stand too far from its pin)
 
 
 @dataclass
@@ -343,8 +352,51 @@ class Frame:
         return self.ox + v, self.oy - u
 
 
+Box = tuple[float, float, float, float]  # x1, y1, x2, y2 (x1 <= x2, y1 <= y2)
+RAIL_TEXT = 2 * GRID  # a rail symbol's name: this far from its pin, past the symbol
+
+
+def _overlap(a: Box, b: Box, *, touch: bool = False) -> bool:
+    """Whether two boxes share area (``touch``: or meet, for zero-width wires)."""
+    if touch:
+        return a[0] <= b[2] and b[0] <= a[2] and a[1] <= b[3] and b[1] <= a[3]
+    return a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]
+
+
+def _rail_box(net: str, x: float, y: float, direction: str) -> Box:
+    """Room a rail symbol on (x, y) pointing ``direction`` takes, its name included."""
+    half = len(net) * 1.2 / 2  # KiCad's font at 1.27 mm, measured
+    if direction in {"up", "down"}:
+        w, far = max(HALF, half), RAIL_TEXT + HALF
+        return (x - w, y - far, x + w, y) if direction == "up" else (x - w, y, x + w, y + far)
+    far = GRID + HALF + 2 * half
+    return (x, y - HALF, x + far, y + HALF) if direction == "right" else (x - far, y - HALF, x, y + HALF)
+
+
+def _body_box(sym: symlib.LibSymbol, unit: int) -> Box:
+    """(xmin, ymin, xmax, ymax) of a library symbol's graphics (pins left out), library frame."""
+    xs, ys = [], []
+    for sub in sexpr.children(sym.node, "symbol"):
+        m = re.search(r"_(\d+)_(\d+)$", str(sub[1]))
+        if m and int(m[1]) not in {0, unit}:
+            continue
+        for item in sexpr.walk(sub):
+            if sexpr.head(item) in {"xy", "start", "end", "center", "mid"} and len(item) > 2:
+                xs.append(float(str(item[1])))
+                ys.append(float(str(item[2])))
+    return (min(xs), min(ys), max(xs), max(ys)) if xs else (0.0, 0.0, 0.0, 0.0)
+
+
 def _part_text(part: Part) -> float:
     return _text_w(max(part.name, part.value, key=len))
+
+
+def _span(part: Part, vertical: bool) -> float:
+    """Length along the chain of a two-terminal part: the symbol, plus lead wires when its reference /
+    value (below / above a horizontal symbol) is wider than it, so neighbouring texts do not overlap."""
+    if vertical:
+        return TWO_LEN
+    return max(TWO_LEN, _snap(len(max(part.name, part.value, key=len)) * SMALL_CHAR_W + GRID))
 
 
 def _extent(item: End | Branch, vertical: bool = False) -> tuple[float, float]:
@@ -382,6 +434,63 @@ def _hangs(item: End, side: str) -> bool:
     )
 
 
+def _decoupling(item: End) -> bool:
+    """A supply pin's node: its rail symbol, then the decoupling caps (see Block._attach)."""
+    return (
+        isinstance(item, Node)
+        and len(item.entries) > 1
+        and isinstance(item.entries[0], Rail)
+        and all(isinstance(e, Branch) for e in item.entries[1:])
+    )
+
+
+def _combs(item: End, side: str) -> bool:
+    """A supply pin on the left / right of a chip with decoupling caps: a wire out from the pin, the
+    caps standing on it side by side down to GND (GND below, as drawn by hand), the rail at its end.
+    The comb stands out past the trees of the pins below it (``Node.offset``), so it does not push
+    them off their pins."""
+    return side in {"left", "right"} and _decoupling(item) and isinstance(item, Node) and item.comb
+
+
+COMB_MAX_OFFSET = 3 * GRID  # library symbols (fixed pin pitch): a comb standing further out is a stack
+COMB_DEPTH = TWO_LEN + 2 * GRID + 2 * HALF  # below the pin row: a standing cap and its GND symbol + name
+
+
+def _comb_offsets(node: Node, side: str) -> tuple[list[float], float]:
+    """u of each cap of a comb from its start (offset included), and the u of the rail at its end.
+    A standing cap's reference / value sit to its right: towards the chip on the left side."""
+    x = node.offset + STUB
+    offsets = []
+    for entry in node.entries[1:]:
+        assert isinstance(entry, Branch)
+        text = GRID + HALF + _part_text(entry.part)
+        if side == "left":
+            x = _snap(x + text, HALF)
+            offsets.append(x)
+            x += GRID
+        else:
+            offsets.append(_snap(x, HALF))
+            x = offsets[-1] + text + GRID
+    return offsets, _snap(x, HALF)
+
+
+def _comb_offset(
+    start: float, v: float, below: list[tuple[Any, End, float, float]], side: str, u_tree: float, gn: set[str]
+) -> float:
+    """``Node.offset`` of a comb starting at ``start`` on row ``v``: its caps stand past the trees of
+    the slots ``below`` it (``(pins, attachment, pin row, drawn row)``, trees starting at ``u_tree``)
+    that reach into the rows the caps hang over."""
+    clear = max(
+        (
+            (0.0 if isinstance(a, Label | Rail) else u_tree) + _slot_width(a, side, gn)
+            for _, a, _, v_s in below
+            if a is not None and v_s - _slot_extent(a, side)[0] < v + COMB_DEPTH
+        ),
+        default=0.0,
+    )
+    return max(0.0, _snap(clear + GRID - start - STUB, HALF))
+
+
 def _hang_offsets(node: Node) -> tuple[list[float], float, float]:
     """v offsets of the hanging caps right of the pin, and (before, after) of the whole drawing."""
     before, x = _extent(node.entries[0], True)
@@ -395,10 +504,21 @@ def _hang_offsets(node: Node) -> tuple[list[float], float, float]:
 
 
 def _slot_extent(item: End, side: str) -> tuple[float, float]:
+    if _combs(item, side):
+        return HALF, HALF  # the caps hang outside the trees below (Node.offset)
     if isinstance(item, Node) and _hangs(item, side):
         _, before, after = _hang_offsets(item)
         return before, after
     return _extent(item, side in {"up", "down"})
+
+
+def _slot_width(item: End, side: str, global_nets: set[str]) -> float:
+    """Reach of a pin's attachment outwards from the pin."""
+    if isinstance(item, Node) and _hangs(item, side):
+        return STUB + TWO_LEN + 2 * GRID + HALF + GRID
+    if isinstance(item, Node) and _combs(item, side):
+        return _comb_offsets(item, side)[1] + _width(item.entries[0], global_nets)
+    return _width(item, global_nets, side in {"up", "down"})
 
 
 def _rows(node: Node, vertical: bool = False) -> list[float]:
@@ -414,7 +534,7 @@ def _rows(node: Node, vertical: bool = False) -> list[float]:
 def _width(item: End | Branch, global_nets: set[str], vertical: bool = False) -> float:
     """Reach of the item along u."""
     if isinstance(item, Branch):
-        return STUB + TWO_LEN + _width(item.end, global_nets, vertical)
+        return STUB + _span(item.part, vertical) + _width(item.end, global_nets, vertical)
     if isinstance(item, Node):
         return max((_width(e, global_nets, vertical) for e in item.entries), default=0.0)
     if isinstance(item, Label):
@@ -427,6 +547,7 @@ def _width(item: End | Branch, global_nets: set[str], vertical: bool = False) ->
 # --- drawing -----------------------------------------------------------------------
 
 _LABEL_ANGLE = {"right": (0, "left"), "left": (180, "right"), "up": (90, "left"), "down": (270, "right")}
+_INWARD = {"right": "left", "left": "right", "up": "down", "down": "up"}
 _TWO_ANGLE = {"right": 0, "left": 180, "down": 270, "up": 90}  # the symbol's pin 1 nearest the start
 
 
@@ -439,6 +560,9 @@ class Sheet:
         self.lib: list[str] = []
         self.items: list[str] = []
         self.points: list[tuple[float, float]] = []  # extent of the drawing
+        self.boxes: list[Box] = []  # what is drawn (bodies, texts, labels): rails turn only into free room
+        self.segments: list[Box] = []  # wires and frames
+        self.pending: list[tuple[str, float, float, str]] = []  # rails, placed by finish()
         self.n = 0
         self.power = 0
 
@@ -454,6 +578,7 @@ class Sheet:
             f" (stroke (width 0) (type default)) (uuid {self.uid()}))"
         )
         self.points += [(x1, y1), (x2, y2)]
+        self.segments.append((x1, y1, x2, y2))
 
     def junction(self, x: float, y: float) -> None:
         self.items.append(f"(junction (at {_fmt(x)} {_fmt(y)}) (diameter 0) (color 0 0 0 0) (uuid {self.uid()}))")
@@ -469,6 +594,7 @@ class Sheet:
         )
         reach = _width(Label(net), self.global_nets) - STUB
         self.points.append(Frame(x, y, side).pt(reach, 0))
+        self.box(*Frame(x, y, side).pt(0, -HALF), *Frame(x, y, side).pt(reach, HALF))
 
     def text(self, text: str, x: float, y: float, size: float) -> None:
         self.items.append(
@@ -476,6 +602,7 @@ class Sheet:
             f" (effects (font (size {_fmt(size)} {_fmt(size)}) (thickness 0.4) bold) (justify left bottom))"
             f" (uuid {self.uid()}))"
         )
+        self.box(x, y - size, x + len(text) * size * 0.9, y)
 
     def frame(self, x1: float, y1: float, x2: float, y2: float) -> None:
         self.items.append(
@@ -483,6 +610,10 @@ class Sheet:
             f" (stroke (width 0.254) (type dash)) (fill (type none)) (uuid {self.uid()}))"
         )
         self.points += [(x1, y1), (x2, y2)]
+        self.segments += [(x1, y1, x2, y1), (x2, y1, x2, y2), (x1, y2, x2, y2), (x1, y1, x1, y2)]
+
+    def box(self, x1: float, y1: float, x2: float, y2: float) -> None:
+        self.boxes.append((min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2)))
 
     def symbol(
         self,
@@ -525,7 +656,46 @@ class Sheet:
         )
 
     def rail(self, net: str, x: float, y: float, direction: str) -> None:
-        """Rail symbol on (x, y) pointing ``direction`` (right / left / up / down) away from it."""
+        """Rail symbol on (x, y) pointing ``direction`` (right / left / up / down) away from it;
+        :meth:`finish` may turn it (GND down, supplies up) where that room is free."""
+        self.pending.append((net, x, y, direction))
+        box = _rail_box(net, x, y, direction)
+        self.points += [box[:2], box[2:]]
+
+    def finish(self) -> None:
+        """Place the rails. One whose wire arrives sideways (or from below / above) points its
+        conventional way instead - GND and negative supplies down, positive supplies up - where
+        nothing is drawn in that room; an upside-down one at least turns sideways."""
+        for net, x, y, direction in self.pending:
+            down = is_ground(net) or net in self.negative
+            want, back = ("down" if down else "up"), _INWARD[direction]
+            tries = [want] if want != back else ["right", "left"]
+            pick = next((d for d in tries if d != direction and self.free(_rail_box(net, x, y, d), x, y, d)), direction)
+            self.place_rail(net, x, y, pick)
+            self.box(*_rail_box(net, x, y, pick))
+            box = _rail_box(net, x, y, pick)
+            self.points += [box[:2], box[2:]]
+        self.pending = []
+
+    def free(self, box: Box, x: float, y: float, direction: str) -> bool:
+        """Nothing drawn in ``box`` (a rail on (x, y) pointing ``direction``), but the wires ending on
+        (x, y) from other directions."""
+        grown = (box[0] - 0.3, box[1] - 0.3, box[2] + 0.3, box[3] + 0.3)
+        if any(_overlap(grown, b) for b in self.boxes):
+            return False
+        for x1, y1, x2, y2 in self.segments:
+            seg = (min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2))
+            ends = {(round(x1, 3), round(y1, 3)), (round(x2, 3), round(y2, 3))}
+            if (round(x, 3), round(y, 3)) in ends:
+                ox, oy = (x2, y2) if (round(x1, 3), round(y1, 3)) == (round(x, 3), round(y, 3)) else (x1, y1)
+                along = {"right": ox > x, "left": ox < x, "down": oy > y, "up": oy < y}[direction]
+                if not along:
+                    continue  # its own wire, arriving from another side
+            if _overlap(grown, seg, touch=True):
+                return False
+        return True
+
+    def place_rail(self, net: str, x: float, y: float, direction: str) -> None:
         down = is_ground(net) or net in self.negative
         lib_id = RAIL_UP if not down else RAIL_DOWN if is_ground(net) else RAIL_NEG
         # rail_down / rail_neg draw downwards, rail_up upwards at angle 0 (angles counter-clockwise)
@@ -534,7 +704,7 @@ class Sheet:
             if down
             else {"right": 270, "left": 90, "up": 0, "down": 180}
         )
-        far, side = 2 * GRID + HALF, GRID + HALF + _text_w(net) / 2  # value centred: KiCad turns justify too
+        far, side = RAIL_TEXT, GRID + HALF + _text_w(net) / 2  # value centred: KiCad turns justify too
         vx, vy, vj = {
             "right": (x + side, y, ""),
             "left": (x - side, y, ""),
@@ -544,20 +714,28 @@ class Sheet:
         self.power += 1
         ref = f"#PWR{self.power:03d}"
         self.symbol(lib_id, ref, net, ["1"], x, y, angles[direction], ((x, y, ""), (vx, vy, vj)), power=True)
-        self.points.append((vx + _text_w(net) / 2, vy))
 
     def two(self, part: Part, near: Pin, f: Frame, u: float, v: float) -> None:
         """Two-terminal part from (u, v) outwards along u, its ``near`` pin at (u, v)."""
         self.lib.append(_two_lib(part))
+        span = _span(part, f.vertical)
+        if span > TWO_LEN:  # lead wires either side, the symbol centred
+            lead = _snap((span - TWO_LEN) / 2, HALF)
+            self.wire(*f.pt(u, v), *f.pt(u + lead, v))
+            self.wire(*f.pt(u + lead + TWO_LEN, v), *f.pt(u + span, v))
+            u += lead
         cx, cy = f.pt(u + TWO_LEN / 2, v)
         angle = (_TWO_ANGLE[f.side] + (0 if near is part.pins[0] else 180)) % 360
         if f.vertical:  # reference / value to the right, centred (KiCad turns justify with the symbol)
             tx = cx + GRID + _part_text(part) / 2
             fields = ((tx, cy - HALF, ""), (tx, cy + HALF, ""))
             self.points += [(cx - GRID, cy), (tx + _part_text(part) / 2, cy)]
+            self.box(cx - 1.6, cy - TWO_LEN / 2, tx + _part_text(part) / 2, cy + TWO_LEN / 2)
         else:
             fields = ((cx, cy - TWO_TEXT, ""), (cx, cy + TWO_TEXT, ""))
-            self.points += [(cx - TWO_LEN / 2, cy - GRID), (cx + TWO_LEN / 2, cy + GRID)]
+            half = max(TWO_LEN, len(max(part.name, part.value, key=len)) * SMALL_CHAR_W) / 2
+            self.points += [(cx - half, cy - TWO_TEXT - HALF), (cx + half, cy + TWO_TEXT + HALF)]
+            self.box(cx - half, cy - TWO_TEXT - 0.6, cx + half, cy + TWO_TEXT + 0.6)
         self.symbol(f"vibepcb:{part.name}", part.name, part.value, [p.number for p in part.pins], cx, cy, angle,
                     fields, size=SMALL)  # fmt: skip
 
@@ -576,6 +754,7 @@ class Sheet:
             if pin.net:
                 self.rail(pin.net, x, py, direction)
         self.points.append((name_x + _text_w(max(part.name, part.value, key=len)) / 2, y))
+        self.box(x - 1.6, y - TWO_LEN / 2, name_x + _text_w(max(part.name, part.value, key=len)) / 2, y + TWO_LEN / 2)
 
     def rank(self, net: str | None) -> int:
         """Vertical order of rails: negative supplies below ground below positive ones."""
@@ -602,7 +781,26 @@ class Sheet:
             self.two(entry.part, entry.near, down, 0, v + offset)
             self.end(entry.end, down, TWO_LEN, v + offset)
 
+    def comb(self, node: Node, f: Frame, u: float, v: float) -> None:
+        """See :func:`_combs`."""
+        offsets, end = _comb_offsets(node, f.side)
+        prev = u
+        for entry, offset in zip(node.entries[1:], offsets, strict=True):
+            assert isinstance(entry, Branch)
+            self.wire(*f.pt(prev, v), *f.pt(u + offset, v))
+            self.junction(*f.pt(u + offset, v))
+            prev = u + offset
+            down = Frame(*f.pt(u + offset, v), "down")
+            self.two(entry.part, entry.near, down, 0, 0)
+            self.end(entry.end, down, TWO_LEN, 0)
+        self.wire(*f.pt(prev, v), *f.pt(u + end, v))
+        assert isinstance(node.entries[0], Rail)
+        self.rail(node.entries[0].net, *f.pt(u + end, v), f.side)
+
     def node(self, node: Node, f: Frame, u: float = 0.0, v: float = 0.0) -> None:
+        if _combs(node, f.side):
+            self.comb(node, f, u, v)
+            return
         if _hangs(node, f.side):
             self.hanging(node, f, u, v)
             return
@@ -620,7 +818,7 @@ class Sheet:
                 self.rail(entry.net, *f.pt(u + STUB, vi), f.side)
             else:
                 self.two(entry.part, entry.near, f, u + STUB, vi)
-                self.end(entry.end, f, u + STUB + TWO_LEN, vi)
+                self.end(entry.end, f, u + STUB + _span(entry.part, f.vertical), vi)
 
     def end(self, end: End, f: Frame, u: float = 0.0, v: float = 0.0) -> None:
         if isinstance(end, Node):
@@ -784,6 +982,31 @@ class Block:
                 owners[part.name] = min(cands, key=lambda c: math.dist((px, py), c.pos or (0, 0))).name
             else:
                 owners[part.name] = cands[0].name
+        # passives joined by a net no chip pin is on (LED + resistor, RC between rails) are drawn as one
+        # piece: they all take the owner most of them have, else one owner would cut the chain into labels
+        chip_nets = set().union(*signal.values()) if signal else set()
+        group = {p.name: p.name for p in twos}
+
+        def find(a: str) -> str:
+            while group[a] != a:
+                a = group[a]
+            return a
+
+        by_net: dict[str, str] = {}
+        for part in twos:
+            for net in sorted(nets_of[part.name] - chip_nets):
+                if net in by_net:
+                    group[find(part.name)] = find(by_net[net])
+                else:
+                    by_net[net] = part.name
+        members: dict[str, list[str]] = {}
+        for part in twos:
+            members.setdefault(find(part.name), []).append(part.name)
+        for names in members.values():
+            votes = [owners[n] for n in names if n in owners]
+            if len(names) > 1 and votes:
+                pick = max(dict.fromkeys(votes), key=votes.count)
+                owners.update(dict.fromkeys(names, pick))
         return owners
 
     def _build(self, net: str) -> Node:
@@ -871,6 +1094,8 @@ class Block:
                 sym = self.symbols[chip.name]
                 for unit in sorted(sym.units()) or [1]:  # each unit of a dual op-amp its own triangle
                     own.append(self._lib_cell(chip, row, sym, satellites, unit))
+            elif len(chip.pins) == 1:
+                own.append(self._point_cell(chip, row[0]))
             else:
                 own.append(self._chip_cell(chip, row))
             extra = [self._root_cell(r) for r in satellites]
@@ -898,12 +1123,44 @@ class Block:
             visit(top)
 
     def _pin_rank(self, pin: Pin) -> tuple[int, str]:
-        """Side order: supplies on top, then signals (pin order), grounds, unconnected pins last."""
+        """Side order: supplies on top, then signals (pin order), unconnected pins, grounds last (room
+        below them for the GND symbol pointing down)."""
         if pin.net is None:
-            return 3, ""
+            return 2, ""
         if pin.net in self.rails:
-            return (2 if is_ground(pin.net) else 0), pin.net
+            return (3 if is_ground(pin.net) else 0), pin.net
         return 1, ""
+
+    def _point_cell(self, chip: Part, attached: End) -> Cell:
+        """A one-pin part (test point, antenna, touch pad): a small circle on its pin, not a box."""
+        lib_id = f"vibepcb:{chip.name}"
+        pin = chip.pins[0]
+        r = 0.762
+        lib = (
+            f"{_lib_head(lib_id, hide_pins=True)} (symbol {_q(chip.name + '_0_1')} (circle (center {_fmt(r)} 0)"
+            f" (radius {_fmt(r)}) (stroke (width 0.254) (type default)) (fill (type none))))"
+            f" (symbol {_q(chip.name + '_1_1')} (pin passive line (at {_fmt(-PIN_LENGTH)} 0 0)"
+            f" (length {_fmt(PIN_LENGTH)}) (name {_q(pin.name)} (effects {_font()}))"
+            f" (number {_q(pin.number)} (effects {_font()})))))"
+        )
+        above, below = _extent(attached) if attached is not None else (0.0, 0.0)
+        above, below = max(above, 2 * GRID), max(below, GRID)
+        left = _snap(_width(attached, self.global_nets))
+        text = max(_text_w(chip.name), _text_w(chip.value if chip.value != chip.name else ""))
+        width = left + PIN_LENGTH + 2 * r + GRID + text
+
+        def draw(sheet: Sheet, x: float, y: float) -> None:
+            px, py = x + left, y + _snap(above, HALF)
+            sheet.lib.append(lib)
+            tx = px + PIN_LENGTH + 2 * r + HALF
+            sheet.symbol(lib_id, chip.name, chip.value, [pin.number], px + PIN_LENGTH, py, 0,
+                         ((tx, py - HALF, "left"), (tx, py + HALF, "left")))  # fmt: skip
+            sheet.points += [(x, py - above), (tx + text, py + below)]
+            sheet.box(px + PIN_LENGTH, py - HALF, tx + text, py + HALF)
+            sheet.segments.append((px, py, px + PIN_LENGTH, py))
+            sheet.end(attached, Frame(px, py, "left"))
+
+        return Cell(_snap(width), _snap(above + below), draw)
 
     def _chip_cell(self, chip: Part, attached: list[End]) -> Cell:
         pairs = sorted(zip(chip.pins, attached, strict=True), key=lambda pa: self._pin_rank(pa[0]))
@@ -920,7 +1177,9 @@ class Block:
             return max((a for _, a in slot), key=lambda a: strength.get(type(a), 0))
 
         def extent(slot: list[tuple[Pin, End]]) -> tuple[float, float]:
-            above, below = _extent(attach(slot))
+            above, below = _slot_extent(attach(slot), "left")
+            if _combs(attach(slot), "left"):  # box pins are spaced freely: the next pin goes below the caps
+                below = COMB_DEPTH + HALF
             return max(above, (len(slot) - 1) * GRID + HALF), below
 
         heights = [sum(extent(slot)) for slot in slots]
@@ -943,7 +1202,21 @@ class Block:
                     pin_y[pin.number] = y - (len(slot) - 1 - k) * GRID
             side_h.append((y + extent(side[-1])[1] if side else 0) + GRID)
         height = _snap(max(side_h))
-        widths = [max((_width(attach(slot), self.global_nets) for slot in side), default=0.0) for side in sides]
+        for s, side in enumerate(sides):
+            name = "left" if s == 0 else "right"
+            rows: list[tuple[Any, End, float, float]] = [
+                ([], attach(slot), 0.0, pin_y[slot[-1][0].number]) for slot in side
+            ]
+            for i, (_, a, _, v) in enumerate(rows):
+                if isinstance(a, Node) and _combs(a, name):
+                    a.offset = _comb_offset(0.0, v, rows[i + 1 :], name, 0.0, self.global_nets)
+        widths = [
+            max(
+                (_slot_width(attach(slot), "left" if s == 0 else "right", self.global_nets) for slot in side),
+                default=0.0,
+            )
+            for s, side in enumerate(sides)
+        ]
         lib_id = f"vibepcb:{chip.name}"
         pin_defs = []
         for s, side in enumerate(sides):
@@ -969,6 +1242,13 @@ class Block:
             fields = ((cx, top - HALF, ""), (cx, top + height + HALF, ""))
             sheet.symbol(lib_id, chip.name, chip.value, [p.number for p in chip.pins], cx, top, 0, fields)
             sheet.points += [(x, y), (x + cell_w, top + height + GRID)]
+            sheet.box(cx - half_w, top - HALF - 0.6, cx + half_w, top + height + HALF + 0.6)
+            for s, side in enumerate(sides):
+                for slot in side:
+                    for pin, _ in slot:
+                        sx = cx + (half_w if s else -half_w)
+                        sheet.segments.append((sx, top + pin_y[pin.number], sx + (PIN_LENGTH if s else -PIN_LENGTH),
+                                               top + pin_y[pin.number]))  # fmt: skip
             for s, side in enumerate(sides):
                 d = -1 if s == 0 else 1
                 px = cx + d * (half_w + PIN_LENGTH)
@@ -987,8 +1267,9 @@ class Block:
         """A chip drawn with its library symbol: pins keep their pitch on every side, so a pin whose
         tree needs more room than the pitch jogs out to a free row (lanes stepping inwards row by row,
         so no jog crosses another). A tree that would have to jog further than MAX_JOG goes to
-        ``moved`` (drawn next to the chip from a label) and the pin gets the net label instead,
-        as on any MCU schematic; a supply pin keeps its decoupling caps."""
+        a column beside the chip on the pin's side, level with the pin (from a label facing the pin's
+        label; top / bottom pins: to ``moved``, packed under the chip), and the pin gets the net label
+        instead, as on any MCU schematic; a supply pin keeps its decoupling caps (see _combs)."""
         lib_id = f"vibepcb:{chip.name}"
         lib_text = sexpr.dumps(symlib.for_schematic(sym, lib_id))
         net_of = {p.number: p.net for p in chip.pins}
@@ -1020,42 +1301,79 @@ class Block:
                     runs[-1].append(lp)
                 else:
                     runs.append([lp])
-            slots = []
-            prev_end = -math.inf
-            long_row = len(pins) > LONG_PIN_ROW
-            connected = [v_of(run[-1]) for run in runs if any(attach_of[lp.number] is not None for lp in run)]
-            for run in runs:
-                a = _strongest([attach_of[lp.number] for lp in run])
-                before, after = _slot_extent(a, side) if a is not None else (0.0, 0.0)
-                v_p = v_of(run[-1])
-                v_s = v_p if a is None or prev_end == -math.inf else max(v_p, _snap(prev_end + before, HALF))
-                next_v = min((v for v in connected if v > v_p + 1e-6), default=math.inf)
-                pushes = v_s > v_p + 1e-6 or v_p + after + HALF > next_v + 1e-6
-                if isinstance(a, Node) and a.net not in self.rails and (v_s - v_p > MAX_JOG or (long_row and pushes)):
-                    rest = [e for e in a.entries if not (isinstance(e, Label) and e.net == a.net)]
-                    if rest:
-                        moved.append(Node(a.net, [Label(a.net), *rest]))
-                    a = Label(a.net)
-                    before, after = _slot_extent(a, side)
-                    v_s = v_p if prev_end == -math.inf else max(v_p, _snap(prev_end + before, HALF))
+            while True:  # a comb that would stand too far out goes back to a stack of caps (Node.comb)
+                slots = []
+                outer: list[tuple[float, Node]] = []  # trees moved off their pin: (pin row, tree)
+                prev_end = -math.inf
+                long_row = len(pins) > LONG_PIN_ROW
+                connected = [v_of(run[-1]) for run in runs if any(attach_of[lp.number] is not None for lp in run)]
+                for run in runs:
+                    a = _strongest([attach_of[lp.number] for lp in run])
+                    before, after = _slot_extent(a, side) if a is not None else (0.0, 0.0)
+                    v_p = v_of(run[-1])
+                    v_s = v_p if a is None or prev_end == -math.inf else max(v_p, _snap(prev_end + before, HALF))
+                    next_v = min((v for v in connected if v > v_p + 1e-6), default=math.inf)
+                    pushes = v_s > v_p + 1e-6 or v_p + after + HALF > next_v + 1e-6
+                    if (
+                        isinstance(a, Node)
+                        and a.net not in self.rails
+                        and (v_s - v_p > MAX_JOG or (long_row and pushes))
+                    ):
+                        rest = [e for e in a.entries if not (isinstance(e, Label) and e.net == a.net)]
+                        if rest:
+                            outer.append((v_p, Node(a.net, rest)))
+                        a = Label(a.net)
+                        before, after = _slot_extent(a, side)
+                        v_s = v_p if prev_end == -math.inf else max(v_p, _snap(prev_end + before, HALF))
+                    if a is not None:
+                        prev_end = v_s + after
+                    slots.append((run, a, v_p, v_s))
+                lanes: dict[int, float] = {}
+                group: list[int] = []
+                widest = 0
+                for i, (run, a, v_p, v_s) in enumerate([*slots, ([], None, 0.0, 0.0)]):
+                    if a is None and run:
+                        continue  # an unconnected pin draws nothing: it does not end a group of jogs
+                    if a is not None and v_s > v_p + 1e-6:
+                        group.append(i)
+                        continue
+                    for k, j in enumerate(group):
+                        lanes[j] = (len(group) - k) * HALF
+                    widest = max(widest, len(group))
+                    group = []
+                u0 = (widest + 1) * HALF if widest else 0.0
+                for i, (_, a, _, v_s) in enumerate(slots):
+                    if isinstance(a, Node) and _combs(a, side):
+                        start = u0 if i in lanes else max(u0, STUB)
+                        a.offset = _comb_offset(start, v_s, slots[i + 1 :], side, max(u0, STUB), self.global_nets)
+                far = [a for _, a, _, _ in slots if isinstance(a, Node) and a.comb and _combs(a, side)
+                       and a.offset > COMB_MAX_OFFSET]  # fmt: skip
+                if not far:
+                    if vertical:  # above / below the chip: packed under it, from a label
+                        moved += [Node(tree.net, [Label(tree.net), *tree.entries]) for _, tree in outer]
+                        outer = []
+                    break
+                for a in far:
+                    a.comb, a.offset = False, 0.0
+            # the moved trees: one column outside the pin attachments, each as level with its pin as the
+            # trees above it allow, its trunk starting at a label that faces the pin's own label
+            column: list[tuple[float, float, Node]] = []
+            spans = []  # rows and reach of each pin attachment
+            for _, a, _, v_s in slots:
                 if a is not None:
-                    prev_end = v_s + after
-                slots.append((run, a, v_p, v_s))
-            lanes: dict[int, float] = {}
-            group: list[int] = []
-            widest = 0
-            for i, (run, a, v_p, v_s) in enumerate([*slots, ([], None, 0.0, 0.0)]):
-                if a is None and run:
-                    continue  # an unconnected pin draws nothing: it does not end a group of jogs
-                if a is not None and v_s > v_p + 1e-6:
-                    group.append(i)
-                    continue
-                for k, j in enumerate(group):
-                    lanes[j] = (len(group) - k) * HALF
-                widest = max(widest, len(group))
-                group = []
-            u0 = (widest + 1) * HALF if widest else 0.0
-            plans.append((side, vertical, base, n_of, slots, lanes, u0))
+                    before, after = _slot_extent(a, side)
+                    after = COMB_DEPTH if _combs(a, side) else after
+                    spans.append((v_s - before, v_s + after, u0 + _slot_width(a, side, self.global_nets)))
+            end = -math.inf
+            for v_p, tree in outer:
+                before, after = _extent(tree, vertical)
+                v = v_p if end == -math.inf else max(v_p, _snap(end + max(before, HALF) + GRID, HALF))
+                lo, hi = v - max(before, HALF) - GRID, v + max(after, HALF) + GRID
+                clear = max((w for a, b, w in spans if a < hi and b > lo), default=0.0)
+                reach = _width(Label(tree.net), self.global_nets) - STUB
+                column.append((_snap(clear + 2 * GRID + reach), v, tree))
+                end = v + max(after, HALF)
+            plans.append((side, vertical, base, n_of, slots, lanes, u0, column))
 
         def draw_at(sheet: Sheet, cx: float, cy: float) -> None:
             sheet.lib.append(lib_text)
@@ -1076,7 +1394,19 @@ class Block:
             numbers = [lp.number for lp in unit_pins]
             sheet.symbol(lib_id, chip.name, chip.value, numbers, cx, cy, 0, fields, unit=unit)
             sheet.points += [(cx + xmin, cy - ymax), (cx + xmax, cy - ymin)]
-            for side, vertical, base, n_of, slots, lanes, u0 in plans:
+            for (fx, fy, fj), text in zip(fields, (chip.name, chip.value), strict=True):
+                w = _text_w(text)  # the cell holds its reference / value (long MPNs reach past the body)
+                x0 = fx if "left" in fj else fx - w if "right" in fj else fx - w / 2
+                sheet.points += [(x0, fy - HALF), (x0 + w, fy + HALF)]
+                sheet.box(x0, fy - HALF, x0 + w, fy + HALF)
+            bx0, by0, bx1, by1 = _body_box(sym, unit)
+            sheet.box(cx + bx0, cy - by1, cx + bx1, cy - by0)
+            for lp in unit_pins:  # pin lines: from the end into the body
+                px, py = cx + lp.x, cy - lp.y
+                ix = cx + bx0 if lp.angle == 0 else cx + bx1 if lp.angle == 180 else px
+                iy = cy - by0 if lp.angle == 90 else cy - by1 if lp.angle == 270 else py
+                sheet.segments.append((px, py, ix, iy))
+            for side, vertical, base, n_of, slots, lanes, u0, column in plans:
                 f = Frame(cx, cy + base, side) if vertical else Frame(cx + base, cy, side)
                 sign = -1 if side in {"left", "up"} else 1
                 for i, (run, a, v_p, v_s) in enumerate(slots):
@@ -1103,6 +1433,9 @@ class Block:
                         sheet.end(a, f, start, v_p)
                     else:
                         sheet.end(a, f, 0, v_p)
+                for u_col, v, tree in column:
+                    sheet.label(tree.net, *f.pt(u_col, v), _INWARD[side])
+                    sheet.node(tree, f, u_col, v)
 
         # dry run for the cell's extent, then place it by its top-left corner
         probe = Sheet("probe", self.global_nets, set())
@@ -1118,12 +1451,42 @@ class Block:
         return Cell(_snap(x1 - x0), _snap(y1 - y0), draw)
 
     def _root_cell(self, root: Node) -> Cell:
+        rungs = [e for e in root.entries if not isinstance(e, Label)]
+        ends = [e.end.net for e in rungs if isinstance(e, Branch) and isinstance(e.end, Rail)]
+        if len(rungs) == 2 and len(ends) == 2 and is_ground(ends[0]) != is_ground(ends[1]):
+            return self._ladder_cell(root.net, rungs)  # type: ignore[arg-type]
         above, below = _extent(root)
 
         def draw(sheet: Sheet, x: float, y: float) -> None:
             sheet.node(root, Frame(x, y + _snap(above, HALF), "right"))
 
         return Cell(_snap(_width(root, self.global_nets)), _snap(above + below, HALF), draw)
+
+    def _ladder_cell(self, net: str, rungs: list[Branch]) -> Cell:
+        """Two parts in series between two rails (LED + resistor, divider): one standing column,
+        the higher rail on top, the middle node labelled to the right."""
+        sheet_rank = Sheet("rank", set(), set())
+        top, bottom = sorted(rungs, key=lambda b: -sheet_rank.rank(b.end.net if isinstance(b.end, Rail) else None))
+        head = 3 * GRID
+        text = max(_part_text(b.part) for b in rungs) + GRID + HALF
+        reach = _width(Label(net), self.global_nets)
+        width = _snap(GRID + max(text, reach, _text_w(top.far.net or "") / 2 + GRID))
+        height = _snap(2 * head + 2 * TWO_LEN)
+
+        def draw(sheet: Sheet, x: float, y: float) -> None:
+            cx, y0 = x + GRID, y + head
+            f = Frame(cx, y0, "down")
+            assert isinstance(top.end, Rail)
+            assert isinstance(bottom.end, Rail)
+            sheet.rail(top.end.net, cx, y0, "up")
+            sheet.two(top.part, top.far, f, 0, 0)
+            sheet.two(bottom.part, bottom.near, f, TWO_LEN, 0)
+            sheet.rail(bottom.end.net, *f.pt(2 * TWO_LEN, 0), "down")
+            sheet.junction(cx, y0 + TWO_LEN)
+            sheet.wire(cx, y0 + TWO_LEN, cx + STUB, y0 + TWO_LEN)
+            sheet.label(net, cx + STUB, y0 + TWO_LEN, "right")
+
+        return Cell(width, height, draw)
 
     def _bank_cell(self, part: Part) -> Cell:
         text = max(_text_w(part.name), _text_w(part.value), *(_text_w(p.net or "") / 2 for p in part.pins))
@@ -1389,6 +1752,22 @@ def generate_with_notes(
     return text, notes
 
 
+def _adopt_decoupling(parts: list[Part], section_of: dict[str, str], rails: set[str]) -> None:
+    """A decoupling cap outside every TSX section joins the section of the chip it decouples (the
+    nearest one on the PCB among the chips its supply powers), so it can stand at that chip's pin."""
+    chips = [p for p in parts if not p.two]
+    for part in parts:
+        supply = {q.net for q in part.pins if q.net in rails and not is_ground(q.net)}
+        if not part.two or section_of.get(part.name, "") or not supply or any(q.net not in rails for q in part.pins):
+            continue
+        powered = [c for c in chips if any(q.net in supply and _POWER_PIN.match(q.name) for q in c.pins)]
+        if not powered or any(not section_of.get(c.name, "") for c in powered):
+            continue  # a chip of its own (unsectioned) block takes it there
+        pos = part.pos
+        chip = min(powered, key=lambda c: math.dist(pos, c.pos) if pos and c.pos else math.inf)
+        section_of[part.name] = section_of[chip.name]
+
+
 def _render(
     circuit: list[dict[str, Any]],
     parts: list[Part],
@@ -1398,6 +1777,7 @@ def _render(
 ) -> str:
     rails = _rails(circuit, parts)
     section_of = sections(source)
+    _adopt_decoupling(parts, section_of, rails)
     titles: list[str] = []
     for part in parts:
         section_of.setdefault(part.name, "")
@@ -1417,13 +1797,14 @@ def _render(
     head = 2 * TITLE if framed else 0.0
     # the block shapes and arrangement that fit the smallest paper, as large as possible on it
     best: tuple[tuple[int, float], list[Any], list[tuple[float, float]]] | None = None
-    for inner in (1.0, 1.6, 2.5):
+    for inner in (0.7, 1.0, 1.3, 1.6, 2.0, 2.5, 3.2):
         layouts = []
         for block in blocks:
             spots, w, h = _pack(block.cells, _target_width(block.cells, inner))
-            layouts.append((block, spots, _snap(w + 2 * pad), _snap(h + 2 * pad + head)))
+            title_w = len(block.title or "other") * TITLE * 0.9 if framed else 0.0  # the frame holds its title
+            layouts.append((block, spots, _snap(max(w, title_w) + 2 * pad), _snap(h + 2 * pad + head)))
         outer = [Cell(w, h, None) for _, _, w, h in layouts]
-        for aspect in (0.7, 1.0, 1.2, math.sqrt(2), 1.7, 2.0, 2.5):
+        for aspect in (0.7, 0.85, 1.0, 1.2, math.sqrt(2), 1.55, 1.7, 2.0, 2.5):
             for origins, w, h in (_pack(outer, _target_width(outer, aspect)), _pack_columns(outer, aspect)):
                 score = (_paper(w, h), -_scale(w, h))
                 if best is None or score < best[0]:
@@ -1438,6 +1819,7 @@ def _render(
         for cell, (cx, cy) in zip(block.cells, spots, strict=True):
             cell.draw(sheet, bx + pad + cx, by + pad + head + cy)
 
+    sheet.finish()
     xs, ys = [p[0] for p in sheet.points] or [0.0], [p[1] for p in sheet.points] or [0.0]
     width, height = max(xs) + SHEET_MARGIN, max(ys) + SHEET_MARGIN
     # A0 or smaller: fit_schematic_sheet picks the paper; beyond A0 a user sheet that holds it
