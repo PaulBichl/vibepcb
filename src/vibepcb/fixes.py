@@ -4846,6 +4846,50 @@ def apply_pours(project: KicadProject) -> list[str]:
     return changes
 
 
+def pours_to_board_outline(project: KicadProject) -> list[str]:
+    """One zone per net and layer over the whole pour area, instead of tscircuit's poured shapes.
+
+    tscircuit exports its pour result as the zone outlines: each poured piece its own zone (13 on one layer of
+    open-theremin), with holes wherever it had left a pocket empty. KiCad's refill only fills inside the
+    outlines, so a pocket tscircuit skipped stayed bare copper-free board whatever the later stitching did. The
+    zones of a net on a layer become one, with the first one's settings, over the bounding box of their
+    outlines (the board inset by the pour's edge margin). Config pours (``[pour.<name>]``) and keepouts stay.
+    """
+    groups: dict[tuple[str, str], list[list[Node]]] = {}
+    for z in sexpr.children(project.pcb, "zone"):
+        if sexpr.child(z, "keepout") is not None or _is_pour_zone(z):
+            continue
+        layers = _copper_layers(z)
+        if len(layers) != 1:
+            continue
+        groups.setdefault((_zone_net(project.pcb, z), next(iter(layers))), []).append(z)
+    changes = []
+    for (net, layer), zones in sorted(groups.items()):
+        outlines = [pts for z in zones for _, pts in _zone_polygons(z, filled=False)]
+        if len(zones) == 1 and all(len(pts) <= 4 for pts in outlines):
+            continue  # already one plain area
+        points = [q for pts in outlines for q in pts]
+        if not points:
+            continue
+        x0, y0, x1, y1 = _bbox(points)
+        keep = zones[0]
+        for z in zones[1:]:
+            project.pcb.remove(z)
+        for old in [*sexpr.children(keep, "polygon"), *sexpr.children(keep, "filled_polygon")]:
+            keep.remove(old)
+        keep.append(
+            sexpr.loads(
+                f"(polygon (pts (xy {_mm(x0)} {_mm(y0)}) (xy {_mm(x1)} {_mm(y0)}) (xy {_mm(x1)} {_mm(y1)}) "
+                f"(xy {_mm(x0)} {_mm(y1)})))"
+            )
+        )
+        changes.append(
+            f"{net} on {layer}: {len(zones)} poured shape(s) ({sum(len(o) for o in outlines)} points) -> one zone over "
+            f"({_mm(x0)}, {_mm(y0)})-({_mm(x1)}, {_mm(y1)})"
+        )
+    return changes
+
+
 def _is_pour_zone(zone: list[Node]) -> bool:
     name = sexpr.child(zone, "name")
     return name is not None and len(name) > 1 and str(name[1]).startswith(POUR_ZONE_PREFIX)
@@ -4966,6 +5010,7 @@ FIXES: dict[str, Fix] = {
     "apply_board_config": apply_board_config,  # before the routing: the router reads the net classes
     "apply_escapes": apply_escapes,
     "apply_pours": apply_pours,
+    "pours_to_board_outline": pours_to_board_outline,
     "apply_keepouts": apply_keepouts,
     "apply_routes": apply_routes,
     "thermal_pad_vias": thermal_pad_vias,  # before the track fixes: obstacles for them, kept by restore_nets
@@ -5094,6 +5139,11 @@ def stitch_unconnected_pads(project: KicadProject, pads: list[tuple[str, tracks.
 ISLAND_VIA_STEP_MM = 0.25  # candidate grid for a stitching via inside a pour piece
 
 
+def copper_vias(project: KicadProject) -> list[tuple[list[Node], tracks.Point, float, str]]:
+    """The board's vias as (node, centre, radius, net)."""
+    return _copper(project.pcb).vias
+
+
 def drop_vias_at(project: KicadProject, spots: list[tracks.Point]) -> list[str]:
     """Remove the vias centred on ``spots`` (KiCad's ``via_dangling`` positions) and the tracks only they held.
 
@@ -5138,13 +5188,15 @@ def set_island_removal(project: KicadProject, mode: int) -> int:
 
 
 def stitch_pour_islands(project: KicadProject) -> list[str]:
-    """A via into every piece of a net's pour that has no connection to the net's pour on another layer.
+    """A via joining every piece of a net's pour that floats to a piece on another layer that does not.
 
-    Tracks cut an outer-layer GND pour into pieces; a piece without a via or a through-hole pad of its
-    net floats (KiCad: unconnected zone items) even though the plane is right below it. Standard
-    practice is a stitching via; it goes to the spot of the piece nearest its middle that lies fully in
-    the fill, keeps the clearance on every layer and lands in the net's pour on another layer. Needs
-    the filled zones (``check`` runs it after KiCad's refill).
+    Tracks cut an outer-layer GND pour into pieces; a piece reaching no other copper of its net floats (KiCad:
+    unconnected zone items, or a deleted island) even though the plane is right below it. Standard practice is
+    a stitching via. Pieces, pads, vias and the net's tracks form groups (:func:`_pour_groups`); the group with
+    the most pads is the net. A piece outside it gets a via at the spot nearest its middle that lies fully in
+    the fill, keeps the clearance on every layer and lands in a piece of that group on another layer (a via
+    into a piece that floats too would only dangle); repeated while a stitch connects a further piece. Needs the
+    filled zones (``check`` runs it after KiCad's refill, with islands kept).
     """
     copper = _copper(project.pcb, filled_zones=True)
     clearance, edge_clearance = _design_clearances(project)
@@ -5152,67 +5204,143 @@ def stitch_pour_islands(project: KicadProject) -> list[str]:
     gap = _min_hole_to_hole(project)
     r = via_size / 2
     others_all = copper.obstacles()
-    vias_by_net: dict[str, list[tracks.Point]] = {}
-    for _, c, _, n in copper.vias:
-        vias_by_net.setdefault(n, []).append(c)
-    tht = [o for o in copper.pads if len(o.layers) > 1]
     all_vias = [(c, rr) for _, c, rr, _ in copper.vias]
     changes = []
-    for (net, layer), polys in sorted(copper.zones.items()):
-        planes = [poly for (n, lay), ps in copper.zones.items() if n == net and lay != layer for poly in ps]
+    for net in sorted({n for n, _ in copper.zones}):
         net_node = _net_node(project.pcb, net)
-        if not planes or net_node is None:
+        if net_node is None:
             continue
         others = [o for o in others_all if o.net != net]
-        for poly in polys:
-            if len(poly) < 3 or any(tracks.point_in_polygon(v, poly) for v in vias_by_net.get(net, [])):
-                continue
-            if any(o.net == net and tracks.point_in_polygon(o.centre, poly) for o in tht):
-                continue
-            ring = list(itertools.pairwise([*poly, poly[0]]))
-            xs, ys = [q[0] for q in poly], [q[1] for q in poly]
-            mid = (sum(xs) / len(xs), sum(ys) / len(ys))
-
-            def fits(
-                q: tracks.Point,
-                ring: list[tuple[tracks.Point, tracks.Point]] = ring,
-                poly: list[tracks.Point] = poly,
-                planes: list[list[tracks.Point]] = planes,
-                others: list[tracks.Obstacle] = others,
-            ) -> bool:
-                return (
-                    tracks.point_in_polygon(q, poly)
-                    and all(tracks.point_seg_distance(q, a, b) >= r for a, b in ring)  # the via's copper in the fill
-                    and any(tracks.point_in_polygon(q, pl) for pl in planes)
-                    and all(o.distance(q, q) >= r + clearance for o in others)  # every layer
-                    and all(e.distance(q, q) >= r + edge_clearance for e in copper.edges)
-                    and all(math.dist(q, c) >= rr + r + gap for c, rr in all_vias)
+        added: list[tracks.Point] = []
+        tried: set[tuple[str, int]] = set()
+        while True:
+            pieces, group_of, main = _pour_groups(copper, net, added)
+            if main is None:
+                break
+            stitched = False
+            for k, (layer, poly) in enumerate(pieces):
+                if group_of[k] == main or (layer, k) in tried or len(poly) < 3:
+                    continue
+                tried.add((layer, k))
+                targets = [pl for j, (lay, pl) in enumerate(pieces) if lay != layer and group_of[j] == main]
+                spot = _island_spot(poly, targets, others, copper.edges, all_vias, r, clearance, edge_clearance, gap)
+                if spot is None:
+                    continue
+                x, y = _mm(spot[0]), _mm(spot[1])
+                uid = uuid.uuid5(uuid.NAMESPACE_OID, f"island-via:{net}:{x},{y}")
+                via = sexpr.loads(
+                    f'(via (at {x} {y}) (size {_mm(via_size)}) (drill {_mm(via_drill)}) (layers "F.Cu" "B.Cu") '
+                    f'(uuid "{uid}"))'
                 )
-
-            nx = int((max(xs) - min(xs)) / ISLAND_VIA_STEP_MM) + 1
-            ny = int((max(ys) - min(ys)) / ISLAND_VIA_STEP_MM) + 1
-            candidates = sorted(
-                (
-                    (min(xs) + i * ISLAND_VIA_STEP_MM, min(ys) + j * ISLAND_VIA_STEP_MM)
-                    for i in range(nx + 1)
-                    for j in range(ny + 1)
-                ),
-                key=lambda q: (math.dist(q, mid), q),
-            )
-            spot = next((q for q in candidates if fits(q)), None)
-            if spot is None:
-                continue
-            x, y = _mm(spot[0]), _mm(spot[1])
-            uid = uuid.uuid5(uuid.NAMESPACE_OID, f"island-via:{net}:{x},{y}")
-            via = sexpr.loads(
-                f'(via (at {x} {y}) (size {_mm(via_size)}) (drill {_mm(via_drill)}) (layers "F.Cu" "B.Cu") (uuid "{uid}"))'
-            )
-            via.insert(len(via) - 1, copy.deepcopy(net_node))
-            project.pcb.append(via)
-            vias_by_net.setdefault(net, []).append(spot)
-            all_vias.append((spot, r))
-            changes.append(f"{net} pour piece on {layer}: stitching via at ({x}, {y})")
+                via.insert(len(via) - 1, copy.deepcopy(net_node))
+                project.pcb.append(via)
+                added.append(spot)
+                all_vias.append((spot, r))
+                changes.append(f"{net} pour piece on {layer}: stitching via at ({x}, {y})")
+                stitched = True
+                break  # the groups changed: recompute
+            if not stitched:
+                break
     return changes
+
+
+def _pour_groups(
+    copper: _Copper, net: str, extra_vias: list[tracks.Point]
+) -> tuple[list[tuple[str, list[tracks.Point]]], list[int], int | None]:
+    """The net's filled pour pieces, the connectivity group of each and the main group (the most pads).
+
+    Union-find over pieces, pads, vias (``extra_vias`` too) and the net's tracks: a via joins the pieces its
+    centre lies in on every layer, a pad the pieces its centre lies in on its layers, a track the pieces its
+    ends lie in (and the pads / vias at its ends).
+    """
+    pieces = [(layer, poly) for (n, layer), polys in sorted(copper.zones.items()) if n == net for poly in polys]
+    pads = copper.pads_by_net.get(net, [])
+    vias = [c for c, _ in copper.vias_by_net.get(net, [])] + extra_vias
+    segs = copper.segs_by_net.get(net, [])
+    n_pieces, n_pads = len(pieces), len(pads)
+    parent = list(range(n_pieces + n_pads + len(vias) + len(segs)))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(i: int, j: int) -> None:
+        parent[find(i)] = find(j)
+
+    def pieces_at(q: tracks.Point, layers: frozenset[str] | set[str]) -> list[int]:
+        return [k for k, (lay, poly) in enumerate(pieces) if lay in layers and tracks.point_in_polygon(q, poly)]
+
+    via_base, seg_base = n_pieces + n_pads, n_pieces + n_pads + len(vias)
+    for i, pad in enumerate(pads):
+        for k in pieces_at(pad.centre, pad.layers):
+            union(n_pieces + i, k)
+    for i, c in enumerate(vias):
+        for k in pieces_at(c, set(COPPER_LAYERS)):
+            union(via_base + i, k)
+    for i, s in enumerate(segs):
+        me = seg_base + i
+        for end in (s.a, s.b):
+            for k in pieces_at(end, {s.layer}):
+                union(me, k)
+            for j, pad in enumerate(pads):
+                if s.layer in pad.layers and pad.distance(end, end) <= s.width / 2:
+                    union(me, n_pieces + j)
+            for j, c in enumerate(vias):
+                if math.dist(end, c) <= s.width / 2 + tracks.EPS:
+                    union(me, via_base + j)
+        for j, t in enumerate(segs[:i]):
+            if t.layer == s.layer and any(math.dist(e, f) <= tracks.EPS for e in (s.a, s.b) for f in (t.a, t.b)):
+                union(me, seg_base + j)
+    if not pads:
+        return pieces, [find(k) for k in range(n_pieces)], None
+    counts: dict[int, int] = {}
+    for i in range(n_pads):
+        counts[find(n_pieces + i)] = counts.get(find(n_pieces + i), 0) + 1
+    main = max(counts, key=lambda g: (counts[g], -g))
+    return pieces, [find(k) for k in range(n_pieces)], main
+
+
+def _island_spot(
+    poly: list[tracks.Point],
+    targets: list[list[tracks.Point]],
+    others: list[tracks.Obstacle],
+    edges: list[tracks.Obstacle],
+    vias: list[tuple[tracks.Point, float]],
+    r: float,
+    clearance: float,
+    edge_clearance: float,
+    gap: float,
+) -> tracks.Point | None:
+    """The spot nearest the middle of ``poly`` for a via of radius ``r``: fully in the fill, in one of ``targets``
+    (pieces on another layer), clear of ``others`` / the edges / other vias' holes."""
+    if not targets:
+        return None
+    ring = list(itertools.pairwise([*poly, poly[0]]))
+    xs, ys = [q[0] for q in poly], [q[1] for q in poly]
+    mid = (sum(xs) / len(xs), sum(ys) / len(ys))
+    nx = int((max(xs) - min(xs)) / ISLAND_VIA_STEP_MM) + 1
+    ny = int((max(ys) - min(ys)) / ISLAND_VIA_STEP_MM) + 1
+    candidates = sorted(
+        (
+            (min(xs) + i * ISLAND_VIA_STEP_MM, min(ys) + j * ISLAND_VIA_STEP_MM)
+            for i in range(nx + 1)
+            for j in range(ny + 1)
+        ),
+        key=lambda q: (math.dist(q, mid), q),
+    )
+    for q in candidates:
+        if (
+            tracks.point_in_polygon(q, poly)
+            and all(tracks.point_seg_distance(q, a, b) >= r for a, b in ring)  # the via's copper in the fill
+            and any(tracks.point_in_polygon(q, pl) for pl in targets)
+            and all(o.distance(q, q) >= r + clearance for o in others)  # every layer
+            and all(e.distance(q, q) >= r + edge_clearance for e in edges)
+            and all(math.dist(q, c) >= rr + r + gap for c, rr in vias)
+        ):
+            return q
+    return None
 
 
 def _pad_via(

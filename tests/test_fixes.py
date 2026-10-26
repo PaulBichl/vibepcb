@@ -1503,6 +1503,52 @@ def test_stitch_pour_islands_puts_a_via_into_a_floating_piece(project: fixes.Kic
     assert fixes.stitch_pour_islands(project) == []
 
 
+def test_stitch_pour_islands_lands_only_in_the_connected_plane(project: fixes.KicadProject) -> None:
+    # the F.Cu piece lies over a B.Cu pocket that floats too (fenced in by tracks): a via there would only join two
+    # floating pieces; the main B.Cu pour (with the header's through-hole GND pin) is elsewhere
+    project.pcb.append(sexpr.loads(
+        '(zone (net 2 "GND") (layer "F.Cu") (filled_polygon (layer "F.Cu") '
+        "(pts (xy 104 93.5) (xy 109 93.5) (xy 109 96) (xy 104 96))))"
+    ))  # fmt: skip
+    project.pcb.append(sexpr.loads(
+        '(zone (net 2 "GND") (layer "B.Cu") (filled_polygon (layer "B.Cu") '
+        "(pts (xy 91 93.5) (xy 101 93.5) (xy 101 106.5) (xy 91 106.5))) "
+        '(filled_polygon (layer "B.Cu") (pts (xy 103 93) (xy 110 93) (xy 110 97) (xy 103 97))))'
+    ))  # fmt: skip
+    assert fixes.stitch_pour_islands(project) == []
+    # widen the F.Cu piece over the main B.Cu pour: now it gets its via there
+    zone = next(
+        z for z in sexpr.children(project.pcb, "zone") if fixes._layer(z) == "F.Cu" and sexpr.child(z, "filled_polygon")
+    )
+    fill = sexpr.child(zone, "filled_polygon")
+    assert fill is not None
+    zone.remove(fill)
+    zone.insert(len(zone), sexpr.loads(
+        '(filled_polygon (layer "F.Cu") (pts (xy 99 93.5) (xy 109 93.5) (xy 109 96) (xy 99 96)))'
+    ))  # fmt: skip
+    changes = fixes.stitch_pour_islands(project)
+    assert changes[0].startswith("GND pour piece on F.Cu: stitching via at (")
+    x = float(changes[0].split("(")[1].split(",")[0])
+    assert 99 < x < 101  # over the main B.Cu pour, not over the pocket
+
+
+def test_pours_to_board_outline(project: fixes.KicadProject) -> None:
+    # tscircuit's pour pieces: two GND zones on B.Cu with poured (non-rectangular) outlines -> one rectangle
+    for pts in (
+        "(xy 80 80) (xy 90 80) (xy 90 85) (xy 85 85) (xy 85 90) (xy 80 90)",
+        "(xy 95 95) (xy 110 95) (xy 110 110)",
+    ):
+        project.pcb.append(sexpr.loads(f'(zone (net 2 "GND") (layer "B.Cu") (polygon (pts {pts})))'))
+    changes = [c for c in fixes.pours_to_board_outline(project) if "B.Cu" in c]
+    assert changes == ["GND on B.Cu: 2 poured shape(s) (9 points) -> one zone over (80, 80)-(110, 110)"]
+    zones = [z for z in sexpr.children(project.pcb, "zone") if "B.Cu" in fixes._copper_layers(z)]
+    assert len(zones) == 1
+    assert [pts for _, pts in fixes._zone_polygons(zones[0], filled=False)] == [
+        [(80, 80), (110, 80), (110, 110), (80, 110)]
+    ]
+    assert not [c for c in fixes.pours_to_board_outline(project) if "B.Cu" in c]
+
+
 def test_apply_pours_area_pour_is_a_named_prioritised_box(project: fixes.KicadProject) -> None:
     project.config = {"pour": {"core": {"net": "VCC", "layers": ["B.Cu"], "area": [95, 95, 100, 100], "priority": 2}}}
     changes = fixes.apply_pours(project)

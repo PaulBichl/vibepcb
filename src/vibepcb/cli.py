@@ -33,6 +33,7 @@ import copy
 import hashlib
 import importlib
 import json
+import math
 import os
 import shlex
 import shutil
@@ -525,11 +526,19 @@ def _stitch_pour_gaps(
             loaded.save()
             kicad.run_drc(pcb, reports / "drc.json")  # refills (and saves) with the islands
             loaded = fixes.KicadProject.load(project, board)
+        old_vias = {c for _, c, _, _ in fixes.copper_vias(loaded)}
         changes = fixes.stitch_pour_islands(loaded)
         fixes.set_island_removal(loaded, fixes.ISLANDS_REMOVED)
         loaded.save()
         if changes:
             fewer = kicad.run_drc(pcb, reports / "drc.json")
+            # stitches into a piece that floats too go (only the new ones: a pad's own via may dangle until stitched)
+            if dangling := [q for q in fewer.spots_of("via_dangling") if all(math.dist(q, c) > 1e-3 for c in old_vias)]:
+                loaded = fixes.KicadProject.load(project, board)
+                if dropped := fixes.drop_vias_at(loaded, dangling):
+                    loaded.save()
+                    fewer = kicad.run_drc(pcb, reports / "drc.json")
+                    changes = [*changes, *dropped]
             # not "fewer": a piece KiCad had deleted (a pocket fenced in by tracks) counted as nothing before; its
             # stitch only shows later, when the pads it reaches lose their tracks to the prune
             if fewer.unconnected <= drc.unconnected and not _pad_spots(fewer) - _pad_spots(drc):
@@ -629,7 +638,8 @@ def cmd_check(board: str, *, strict: bool = False) -> int:
                 drc = kicad.run_drc(pcb, reports / "drc.json")
                 print("  corner touch-up: undone, it disconnected something")
             loaded = fixes.KicadProject.load(project, board)
-    if split := fixes.drop_folded_back_tracks(loaded) + fixes.split_at_tees(loaded):  # last: KiCad measures a T
+    folds = fixes.drop_folded_back_tracks  # again after the split: a fold onto a T's foot only shows as one then
+    if split := folds(loaded) + fixes.split_at_tees(loaded) + folds(loaded):  # last: KiCad measures a T
         # only at a vertex reliably; a fold left by the clean-up is an acute angle to it
         backup = pcb.read_bytes()
         loaded.save()
