@@ -159,7 +159,8 @@ test in `tests/test_fixes.py` against the fixtures in `tests/data/`.
   nudges of the parts around it; tscircuit routing is deterministic, so compare
   variants as board copies (`boards/<copy>`) built in parallel.
 - **Look before you move anything.** Before choosing what to nudge (or which variants to build), inspect every
-  remaining error on the best board: take its location from `check.txt`, render it with `hatch run pcb inspect
+  remaining error on the best board: `hatch run pcb hotspots <board>` groups the errors into spots (nets, parts,
+  TSX coordinates, an `--area` per spot); render each with `hatch run pcb inspect
   <board> --area x0 y0 x1 y1 --layer <L> --net <pattern>` on each layer involved (2-4 mm around the spot), and see
   which nets and parts meet there and why the router got stuck. Then move the part next to the actual problem, or fix
   the tooling if it is a systematic post-processing gap. Never nudge a part only because it was the last one changed:
@@ -173,6 +174,8 @@ test in `tests/test_fixes.py` against the fixtures in `tests/data/`.
   cache: import the JSON into `<autoroutingphase pcbTracePaths={...} />`). Verified on a one-part board:
   with the symbol it fails, with the `symbol` prop deleted (keep `pinLabels`, `footprint`, `cadModel`) the
   paths are saved. Delete the symbol block of imported chips; the schematic is generated from the netlist anyway.
+- GND poured on every layer: list it in `[planes] nets`. The router then leaves GND out (a tscircuit patch) and
+  `fix` gives every GND pad its own via into the pour; routed GND tracks crowded the fan-outs of a 2-layer board.
 - Fine-pitch MCUs (0.5 mm LQFP): assign pins by package side (each signal leaves on the side facing
   its destination) and use 0.3/0.5 mm vias; with random pins and 0.6 mm vias the router dropped vias
   onto neighbouring pins (STM32 on smu-main: 39 errors -> 0).
@@ -222,6 +225,7 @@ test in `tests/test_fixes.py` against the fixtures in `tests/data/`.
 | `hatch run pcb publish <name>` | review set for GitHub in `boards/<name>/hardware/` (needs a passing `check`; no fab files) |
 | `hatch run pcb cost <name> [--qty N]` | Batch cost, hand-assembled: BOM priced at LCSC (min order, multiples, stock) + bare boards (`[cost] pcb_usd` from a jlcpcb.com quote, else a labelled estimate; JLCPCB's quote API is not public) |
 | `hatch run pcb rules <name>` | Merged design / manufacturing rule profiles of a board, each value's source |
+| `hatch run pcb hotspots <name>` | The last check's DRC errors grouped into spots: nets, parts nearby, TSX coordinates, inspect area |
 | `hatch run pcb list` | List boards |
 | `hatch run pcb doctor` | Check the setup (tools, KiCad version, patches, network); exit 1 on FAIL |
 | `hatch run tsci <args>` | tscircuit CLI |

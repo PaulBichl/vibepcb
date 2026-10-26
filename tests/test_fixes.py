@@ -1196,6 +1196,30 @@ def test_plane_pad_vias(project: fixes.KicadProject) -> None:
     assert all(s.a in {p.centre for p in smd} for s in copper.segs if s.net == "GND")  # the router's tracks are gone
 
 
+def test_plane_pad_vias_on_an_unrouted_net(project: fixes.KicadProject, monkeypatch: pytest.MonkeyPatch) -> None:
+    # the router left GND out (build passes [planes] nets as VIBEPCB_UNROUTED_NETS): a pad without room for
+    # a via can't fall back to routed tracks, so the vias that fit go in and the pour has to reach the rest
+    for n in [n for n in project.pcb if sexpr.head(n) in ("segment", "via")]:
+        if isinstance(n, list) and fixes._net_of(n, fixes._net_names(project.pcb)) == "GND":
+            project.pcb.remove(n)
+    zone = sexpr.loads(
+        '(zone (net 2 "GND") (layer "B.Cu") (polygon (pts (xy 85 90) (xy 110 90) (xy 110 110) (xy 85 110))))'
+    )
+    project.pcb.append(zone)
+    project.config = {"planes": {"nets": ["GND"]}}
+    smd = [o for o in fixes._copper(project.pcb).pads_by_net["GND"] if len(o.layers) == 1]
+    stuck = smd[0]
+    real = fixes._pad_via
+    monkeypatch.setattr(
+        fixes, "_pad_via", lambda pr, c, pad, *a: None if pad.centre == stuck.centre else real(pr, c, pad, *a)
+    )
+    monkeypatch.setattr(fixes, "_pad_link", lambda *a: None)
+    changes = fixes.plane_pad_vias(project)
+    assert len(changes) == 1
+    assert "the pour must reach it" in changes[0]
+    assert len(fixes._copper(project.pcb).vias_by_net.get("GND", [])) == len(smd) - 1
+
+
 def test_net_node_track_form(project: fixes.KicadProject) -> None:
     # tracks / vias take (net <id>); a pad's (net <id> "<name>") on a via crashes kicad-cli's DRC
     for n in [n for n in project.pcb if sexpr.head(n) in ("segment", "via")]:

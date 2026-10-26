@@ -5,6 +5,7 @@ vibepcb build <board>   [--fast] [--quiet] tscircuit -> out/<board>/raw (KiCad z
 vibepcb fix <board>     raw -> out/<board>/kicad, apply post-processing fixes
 vibepcb route <board>   [--only NET] [--dry-run] routes.toml -> tracks on the KiCad board (seconds, no rebuild)
 vibepcb inspect <board> [--area x0 y0 x1 y1] [--net PAT] [--layer L] [--scale PX/MM] [--source unrouted]  PNG of the board
+vibepcb hotspots <board> the DRC errors of the last check grouped into spots: nets, parts nearby, inspect area
 vibepcb ratsnest <board> [--source unrouted]  unrouted links (longest first), crossings, worst 10 mm cells
 vibepcb place-score <board>..  total ratsnest length and crossings per board (compare `clone` variants)
 vibepcb check <board>   KiCad DRC + ERC -> out/<board>/reports (after refill: drop tracks the GND pour provides)
@@ -54,6 +55,7 @@ from vibepcb import (
     fanout,
     fixes,
     history,
+    hotspots,
     inspect,
     intent,
     kicad,
@@ -180,8 +182,10 @@ def cmd_build(board: str, *, fast: bool = False) -> int:
         )
         return 0
     # tscircuit evaluates (places + routes) the board on every call: do it once, export the rest from the JSON
+    # [planes] nets get a via per pad in `fix` (fixes.plane_pad_vias): the router leaves them out
+    plane_nets = config.load(board).get("planes", {}).get("nets", [])
     with _phase("tscircuit placement + routing (the long step)"):
-        tscircuit.export(source, "circuit-json", circuit)
+        tscircuit.export(source, "circuit-json", circuit, unrouted_nets=plane_nets)
     for change in tscircuit.repair_trace_nets(circuit):
         print(f"  re-linked route {change}")
     errors, report = tscircuit.routed_errors(circuit)
@@ -427,6 +431,28 @@ def _load_project(board: str, source: str = "current") -> fixes.KicadProject:
 
 
 RATSNEST_TOP = 40
+
+
+def cmd_hotspots(board: str, radius: float) -> int:
+    """The last check's DRC errors grouped into spots (clusters), most errors first, with nets and parts nearby."""
+    report = paths.reports_dir(board) / "drc.json"
+    if not report.exists():
+        print(f"{report.relative_to(paths.ROOT)} missing - run `pcb check {board}` first", file=sys.stderr)
+        return 1
+    project = _load_project(board)
+    errors = hotspots.drc_errors(json.loads(report.read_text(encoding="utf-8")))
+    errors += [hotspots.Error("sharp_corner", pos, (net,)) for net, pos, _ in fixes.sharp_corners(project)]
+    model = board_model.Board.from_project(project)
+    xs = [p for e in model.edges for p in (e.points[0][0], e.points[-1][0])]
+    ys = [p for e in model.edges for p in (e.points[0][1], e.points[-1][1])]
+    origin = ((min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2) if xs else None
+    pads = routes.board_pads(project)
+    spots = hotspots.group(errors, radius)
+    for spot in spots:
+        for line in hotspots.describe(spot, pads, origin):
+            print(line)
+    print(f"{len(errors)} error(s) in {len(spots)} spot(s)")
+    return 0
 
 
 def cmd_ratsnest(board: str, source: str) -> int:
@@ -845,6 +871,9 @@ def main(argv: list[str] | None = None) -> int:
     padtable_parser = sub.add_parser("padtable")
     padtable_parser.add_argument("board")
     padtable_parser.add_argument("refs", nargs="+", help="parts whose pad positions go into boards/<board>/pads.ts")
+    hotspots_parser = sub.add_parser("hotspots")
+    hotspots_parser.add_argument("board")
+    hotspots_parser.add_argument("--radius", type=float, default=1.5, help="errors closer than this (mm) share a spot")
     ratsnest_parser = sub.add_parser("ratsnest")
     ratsnest_parser.add_argument("board")
     score_parser = sub.add_parser("place-score")
@@ -881,6 +910,8 @@ def main(argv: list[str] | None = None) -> int:
                 return cmd_clone(args.board, args.new)
             case "padtable":
                 return cmd_padtable(args.board, args.refs)
+            case "hotspots":
+                return cmd_hotspots(args.board, args.radius)
             case "ratsnest":
                 return cmd_ratsnest(args.board, args.source)
             case "place-score":

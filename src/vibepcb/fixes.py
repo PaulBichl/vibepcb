@@ -4503,6 +4503,13 @@ def plane_pad_vias(project: KicadProject) -> list[str]:
                 + (f" ({len(no_room)} pad(s) joined to a neighbour)" if no_room else "")
             )
             continue
+        if not routed:  # nothing to fall back to (the router left the net out): every via that fits, the pour the rest
+            project.pcb += added
+            changes.append(
+                f"{net}: {len(with_via)} pad vias to the plane; pad at ({_mm(stuck.centre[0])}, {_mm(stuck.centre[1])})"
+                " has no room for a via, the pour must reach it"
+            )
+            continue
         project.pcb += routed  # a pad without room: the net keeps its routing
         changes.append(
             f"{net}: pad at ({_mm(stuck.centre[0])}, {_mm(stuck.centre[1])}) has no room for a via, left as routed"

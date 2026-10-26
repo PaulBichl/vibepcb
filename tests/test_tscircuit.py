@@ -114,6 +114,11 @@ def test_run_streams_lines_to_the_handler() -> None:
     assert tscircuit._run(cmd).stdout.strip() == "one"  # no handler: captured silently
 
 
+def test_run_passes_extra_environment() -> None:
+    cmd = [sys.executable, "-c", "import os; print(os.environ['VIBEPCB_UNROUTED_NETS'], 'PATH' in os.environ)"]
+    assert tscircuit._run(cmd, {"VIBEPCB_UNROUTED_NETS": "GND,VCC"}).stdout.split() == ["GND,VCC", "True"]
+
+
 def test_prepared_source_writes_posix_import_paths(tmp_path: Path) -> None:
     src = tmp_path / "board"
     src.mkdir()

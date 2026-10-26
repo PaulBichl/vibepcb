@@ -50,6 +50,21 @@
    "file": "tscircuit/dist/webworker.min.js",
    "old": "throw new Error(`TraceSimplificationSolver cannot preserve endpoints for duplicate route \"${n10.connectionName}\"`);t48.set(n10.connectionName,{start:{...e56},end:{...o11}})}this.preservedRouteEndpoints=t48}this.MAX_ITERATIONS=1e8}getSolverName(){return\"TraceSimplificationSolver\"}get simplifiedHdRoutes(){return this.hdRoutes}validatePreservedRouteEndpoints(e55){if(!this.preservedRouteEndpoints)",
    "new": "{this.__dupRoute=true;continue;}t48.set(n10.connectionName,{start:{...e56},end:{...o11}})}this.preservedRouteEndpoints=this.__dupRoute?void 0:t48}this.MAX_ITERATIONS=1e8}getSolverName(){return\"TraceSimplificationSolver\"}get simplifiedHdRoutes(){return this.hdRoutes}validatePreservedRouteEndpoints(e55){"
+  },
+  {
+   "file": "@tscircuit/core/dist/index.js",
+   "old": "    if (!netConnectivityKey || handledNetConnectivityKeys.has(netConnectivityKey)) {\n      continue;\n    }",
+   "new": "    if (!netConnectivityKey || handledNetConnectivityKeys.has(netConnectivityKey) || (globalThis.process?.env?.VIBEPCB_UNROUTED_NETS ?? \"\").split(\",\").includes(net.name)) {\n      continue;\n    }"
+  },
+  {
+   "file": "@tscircuit/eval/dist/webworker/entrypoint.js",
+   "old": "if(!netConnectivityKey||handledNetConnectivityKeys.has(netConnectivityKey))continue;",
+   "new": "if(!netConnectivityKey||handledNetConnectivityKeys.has(netConnectivityKey)||(globalThis.process?.env?.VIBEPCB_UNROUTED_NETS??\"\").split(\",\").includes(net.name))continue;"
+  },
+  {
+   "file": "tscircuit/dist/webworker.min.js",
+   "old": "if(!netConnectivityKey||handledNetConnectivityKeys.has(netConnectivityKey))continue;",
+   "new": "if(!netConnectivityKey||handledNetConnectivityKeys.has(netConnectivityKey)||(globalThis.process?.env?.VIBEPCB_UNROUTED_NETS??\"\").split(\",\").includes(net.name))continue;"
   }
  ]
 }

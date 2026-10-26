@@ -11,12 +11,13 @@ if TYPE_CHECKING:
 
 
 def run(
-    cmd: Sequence[str], *, cwd: Path | None = None, timeout: float | None = None
+    cmd: Sequence[str], *, cwd: Path | None = None, timeout: float | None = None, env: dict[str, str] | None = None
 ) -> subprocess.CompletedProcess[str]:
     """``subprocess.run`` capturing stdout/stderr as UTF-8 text (undecodable bytes replaced), never raising on exit code."""
     return subprocess.run(
         list(cmd),
         cwd=cwd,
+        env=env,
         capture_output=True,
         text=True,
         encoding="utf-8",

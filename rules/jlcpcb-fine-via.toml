@@ -1,0 +1,9 @@
+# JLCPCB small vias, an add-on after jlcpcb-2l / -4l / -6l (`profiles = ["jlcpcb-2l", "jlcpcb-fine-via"]`).
+# Source: https://jlcpcb.com/capabilities/pcb-capabilities (read 2026-10-19): via holes 0.15-0.25 mm are built
+# at a surcharge (the base profiles keep 0.3 mm, the standard price class). For dense fan-outs (0.5-0.8 mm
+# pitch pin fields) where 0.3 / 0.45 mm vias block the channels between pins. All lengths in mm.
+kind = "fab"
+description = "JLCPCB small via holes (surcharge)"
+
+min_via_drill = 0.15              # order form: via hole 0.15 mm
+min_via_diameter = 0.25           # via pad for a 0.15 mm hole (hole + 0.1 mm)

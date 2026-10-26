@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -15,7 +16,7 @@ from vibepcb import proc
 from vibepcb.paths import ROOT
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
 
 
 class TscircuitError(RuntimeError):
@@ -42,13 +43,24 @@ def set_line_handler(handler: Callable[[str], None] | None) -> None:
     _line_handler = handler
 
 
-def _run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
-    """Run a tsci command in the project root; stdout+stderr (merged) go to the line handler as they appear."""
+def _run(cmd: list[str], env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    """Run a tsci command in the project root; stdout+stderr (merged) go to the line handler as they appear.
+
+    ``env``: extra environment variables for the command.
+    """
+    full_env = {**os.environ, **env} if env else None
     if _line_handler is None:
-        return proc.run(cmd, cwd=ROOT)
+        return proc.run(cmd, cwd=ROOT, env=full_env)
     lines = []
     with subprocess.Popen(
-        cmd, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace"
+        cmd,
+        cwd=ROOT,
+        env=full_env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
     ) as child:
         if child.stdout is not None:
             for line in child.stdout:
@@ -58,12 +70,19 @@ def _run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.CompletedProcess(cmd, child.returncode, "".join(lines), "")
 
 
-def export(source: Path, fmt: str, output: Path) -> None:
-    """``tsci export <source> -f <fmt> -o <output>``; raises with tsci's output on failure."""
+UNROUTED_NETS_ENV = "VIBEPCB_UNROUTED_NETS"  # read by a patch in tscircuit's core (patches/tscircuit.json)
+
+
+def export(source: Path, fmt: str, output: Path, *, unrouted_nets: Sequence[str] = ()) -> None:
+    """``tsci export <source> -f <fmt> -o <output>``; raises with tsci's output on failure.
+
+    ``unrouted_nets``: nets the autorouter leaves out (plane nets: ``fixes.plane_pad_vias`` gives each pad
+    its own via to the pour, so the router's tracks of the net would only be thrown away and block others).
+    """
     output.parent.mkdir(parents=True, exist_ok=True)
     # the parts engine looks up every part on the network on each run; `fab` checks availability once
     cmd = [*_tsci(), "export", str(source), "-f", fmt, "-o", str(output.resolve()), "--disable-parts-engine"]
-    result = _run(cmd)
+    result = _run(cmd, {UNROUTED_NETS_ENV: ",".join(unrouted_nets)} if unrouted_nets else None)
     if result.returncode != 0 or not output.exists():
         msg = f"tsci export -f {fmt} failed:\n{result.stdout}{result.stderr}"
         raise TscircuitError(msg)
