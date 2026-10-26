@@ -98,11 +98,12 @@ def render(
         for o in board.copper.pads:
             if layer not in o.layers or not inside(o.box[:2], o.box[2:]):
                 continue
-            xs, ys = [p[0] for p in o.points], [p[1] for p in o.points]
+            # the box, not the points: a rounded pad's points are its centre line (copper = line + radius)
+            bx0, by0, bx1, by1 = o.box
             op = 0.8 if strong(o.net) else DIM
             out.append(
-                f'<rect x="{_fmt(min(xs))}" y="{_fmt(min(ys))}" width="{_fmt(max(xs) - min(xs))}" '
-                f'height="{_fmt(max(ys) - min(ys))}" fill="{colour}" opacity="{op}"/>'
+                f'<rect x="{_fmt(bx0)}" y="{_fmt(by0)}" width="{_fmt(bx1 - bx0)}" '
+                f'height="{_fmt(by1 - by0)}" fill="{colour}" opacity="{op}"/>'
             )
     for _, c, r, n in board.copper.vias:
         if x0 - 1 <= c[0] <= x1 + 1 and y0 - 1 <= c[1] <= y1 + 1:
