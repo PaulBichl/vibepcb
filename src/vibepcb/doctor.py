@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 import shutil
 import subprocess
 import urllib.error
@@ -153,13 +154,37 @@ def check_patches() -> Check:
     detail = (result.stdout.strip().splitlines() or [""])[0].removeprefix("tscircuit patches: ")
     if result.returncode == 0:
         return Check("tscircuit patches", OK, detail)
-    return Check(
-        "tscircuit patches",
-        WARN,
-        detail,
-        "run `node scripts/patch-tscircuit.mjs` (npm install does it as postinstall); some boards crash the"
-        " autorouter / pour export without them",
-    )
+    return Check("tscircuit patches", WARN, detail, patch_hint(tscircuit_version(ROOT), tested_tscircuit_version()))
+
+
+def tscircuit_version(root: Path) -> str | None:
+    """The tscircuit version installed in ``root/node_modules``."""
+    try:
+        return str(json.loads((root / "node_modules" / "tscircuit" / "package.json").read_text())["version"])
+    except (OSError, ValueError, KeyError):
+        return None
+
+
+def tested_tscircuit_version() -> str | None:
+    """The tscircuit version VibePCB's patches and fixes are made for (its own ``package.json``)."""
+    try:
+        spec = json.loads((PATCH_SCRIPT.parents[1] / "package.json").read_text())["devDependencies"]["tscircuit"]
+    except (OSError, ValueError, KeyError):
+        return None
+    return str(spec).lstrip("^~=")
+
+
+def patch_hint(installed: str | None, tested: str | None) -> str:
+    """What to do about missing patches: another tscircuit version (a project repo pinned its own) needs
+    the tested one first; otherwise the patch script was just not run (``npm install`` runs it as postinstall)."""
+    why = "some boards crash the autorouter / pour export without them"
+    if installed and tested and installed != tested:
+        return (
+            f"tscircuit {installed} is installed, VibePCB is patched and tested for {tested}: pin"
+            f' "tscircuit": "{tested}" in package.json (a project repo: copy VibePCB\'s package-lock.json and add'
+            f' "postinstall": "node {PATCH_SCRIPT}"), then npm install; {why}'
+        )
+    return f"run `node {PATCH_SCRIPT} --root {ROOT}` (npm install does it as postinstall); {why}"
 
 
 def check_network(probe: Callable[[str], str | None] = reachable) -> list[Check]:

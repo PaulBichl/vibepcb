@@ -57,3 +57,17 @@ def test_symbol_library_dirs_follow_the_kicad_cli_location() -> None:
     assert dirs[0].endswith("/10.0/share/kicad/symbols")
     assert any(d.endswith("/SharedSupport/symbols") for d in dirs)
     assert any("Program Files/KiCad" in p for p in symlib.LIBRARY_DIRS)
+
+
+def test_patch_hint_names_the_tested_tscircuit_version() -> None:
+    hint = doctor.patch_hint("0.0.2900", "0.0.2786")
+    assert '"tscircuit": "0.0.2786"' in hint
+    assert "postinstall" in hint
+    assert "--root" in doctor.patch_hint("0.0.2786", "0.0.2786")
+    assert "--root" in doctor.patch_hint(None, "0.0.2786")
+
+
+def test_tested_tscircuit_version_reads_the_checkout() -> None:
+    version = doctor.tested_tscircuit_version()
+    assert version is not None
+    assert version[0].isdigit()
