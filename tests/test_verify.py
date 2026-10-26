@@ -396,6 +396,17 @@ def test_decoupling() -> None:
     assert ids(found) == {"decoupling:U1:2", "power_unconnected:U1:3"}
 
 
+def test_decoupling_ignores_a_dac_output() -> None:
+    # MCP4921: VOUT is the analog output, not a rail; a regulator's VOUT still needs its capacitor
+    parts = [
+        chip("U1", [("VDD", "+5V"), ("VOUT", "AUDIO_DAC"), ("VSS", "GND")]),
+        chip("U2", [("VIN", "+5V"), ("VOUT", "+3V3"), ("GND", "GND")]),
+        c("C1", 1e-7, "+5V", "GND"),
+    ]
+    found = netcheck.check_decoupling(netcheck.load_design(circuit(parts)), NO_INTENT)
+    assert ids(found) == {"decoupling:U2:2"}
+
+
 def test_feedback_divider() -> None:
     parts = [
         chip("U1", [("VIN", "+5V"), ("VOUT", "+3V3"), ("FB", "FBN"), ("GND", "GND")]),

@@ -7,7 +7,7 @@ have a known voltage. Checks (each finding cites a reference and a pin; ids are 
                       on a net above ``netlist.cap_derating`` (``rules/sim-defaults.toml``, default 0.8) of it
 - ``i2c_pullup``      an I2C net (``SDA`` / ``SCL`` in the name) with no pull-up resistor to a supply net;
                       ``i2c_pullup_multi``: more than one
-- ``decoupling``      an IC power pin (VDD*, VCC*, VBAT, VIN, VOUT, ...) whose net has no capacitor to a
+- ``decoupling``      an IC power pin (VDD*, VCC*, VBAT, VIN, a regulator's VOUT, ...) whose net has no capacitor to a
                       ground net; ``power_unconnected``: a power pin on no net
 - ``fb_divider``      a feedback divider (FB / ADJ pin, resistor to the output net and to ground) whose implied
                       reference voltage differs from the regulator's ``vref`` in ``intent.toml`` by more than 3 %,
@@ -249,10 +249,13 @@ def check_i2c(design: Design, intent: Intent) -> list[Finding]:
 def check_decoupling(design: Design, intent: Intent) -> list[Finding]:
     del intent
     nets, out = design.nets(), []
+    regulators = set(find_regulators(design))
     for chip in _chips(design):
         for pin in design.pins_of(chip.ref):
             if not POWER_PIN.match(pin.name) or is_ground(pin.net):
                 continue
+            if pin.name.upper() == "VOUT" and chip.ref not in regulators:
+                continue  # a DAC's / sensor's analog output, not a rail
             if pin.net is None:
                 out.append(
                     Finding(
