@@ -21,12 +21,13 @@ def test_errors_group_into_spots_with_their_nets_and_parts() -> None:
             _violation("clearance", (10.8, 10.4), (11, 10.4), ("GND", "SCK")),
             _violation("track_angle", (40, 40), (40.1, 40), ("VCC", "VCC")),
             {"type": "silk_overlap", "severity": "warning", "items": [{"description": "x", "pos": {"x": 0, "y": 0}}]},
-        ]
+        ],
+        "unconnected_items": [_violation("unconnected_items", (70, 70), (71, 70), ("GND", "GND"))],
     }
     errors = hotspots.drc_errors(drc)
-    assert len(errors) == 3  # the warning is no error
+    assert len(errors) == 4  # the warning is no error
     spots = hotspots.group(errors)
-    assert [len(s.errors) for s in spots] == [2, 1]  # the two clearance errors 1 mm apart are one spot
+    assert [len(s.errors) for s in spots] == [2, 1, 1]  # the two clearance errors 1 mm apart are one spot
     pads = [
         routes.Pad("U9", "14", "MISO", (10.5, 10.8), frozenset({"F.Cu"})),
         routes.Pad("R1", "1", "X", (30, 30), frozenset({"F.Cu"})),

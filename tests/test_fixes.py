@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from vibepcb import config, fixes, kicad, sexpr, tracks, tscircuit
+from vibepcb import config, fixes, kicad, routes, sexpr, tracks, tscircuit
 from vibepcb.sexpr import Sym
 
 if TYPE_CHECKING:
@@ -1012,6 +1012,17 @@ def test_snap_near_ends(project: fixes.KicadProject) -> None:
     assert fixes.snap_near_ends(project) == []
 
 
+def test_snap_near_ends_and_square_tees_agree_next_to_a_corner(project: fixes.KicadProject) -> None:
+    # a T whose foot lies 0.08 mm from a corner of the other track (where square_tees put it): snap_near_ends
+    # used to pull it onto the corner, square_tees pushed it back, every pass (open-theremin, VCC 88.5 deg)
+    up = sexpr.loads("(segment (start 60 80) (end 60 74) (width 0.15) (layer F.Cu) (net 2))")
+    left = sexpr.loads("(segment (start 60 80) (end 59.5 80) (width 0.15) (layer F.Cu) (net 2))")
+    down = sexpr.loads("(segment (start 59.92 80) (end 59.92 84) (width 0.15) (layer F.Cu) (net 2))")
+    project.pcb += [up, left, down]
+    assert fixes.snap_near_ends(project) == []
+    assert sexpr.child(down, "start") == ["start", Sym("59.92"), Sym("80")]
+
+
 def test_drop_loose_power_symbols(project: fixes.KicadProject) -> None:
     assert fixes.schematic_power_symbols(project)
     assert fixes.drop_loose_power_symbols(project) == []  # every rail symbol of the fixture is wired
@@ -1176,8 +1187,9 @@ def test_plane_pad_vias(project: fixes.KicadProject) -> None:
     )
     project.pcb.append(zone)
     project.config = {"planes": {"nets": ["GND"]}}
-    routed_before = [s for s in fixes._copper(project.pcb).segs if s.net == "GND"]
-    assert routed_before  # the fixture routes GND with tracks
+    for n in [n for n in project.pcb if sexpr.head(n) in ("segment", "via")]:  # build leaves GND unrouted
+        if isinstance(n, list) and fixes._net_of(n, fixes._net_names(project.pcb)) == "GND":
+            project.pcb.remove(n)
     changes = fixes.plane_pad_vias(project)
     assert len(changes) == 1
     assert "pad vias to the plane" in changes[0]
@@ -1188,20 +1200,16 @@ def test_plane_pad_vias(project: fixes.KicadProject) -> None:
     for pad in smd:  # each SMD pad: a track from its centre to a via beside it
         via = next(
             c
-            for c, r in copper.vias_by_net["GND"]
+            for c, _ in copper.vias_by_net["GND"]
             if any(s.net == "GND" and {s.a, s.b} == {pad.centre, c} for s in copper.segs)
         )
         radius = copper.vias_by_net["GND"][0][1]
         assert pad.distance(via, via) >= radius + clearance - 1e-6
-    assert all(s.a in {p.centre for p in smd} for s in copper.segs if s.net == "GND")  # the router's tracks are gone
 
 
-def test_plane_pad_vias_on_an_unrouted_net(project: fixes.KicadProject, monkeypatch: pytest.MonkeyPatch) -> None:
-    # the router left GND out (build passes [planes] nets as VIBEPCB_UNROUTED_NETS): a pad without room for
-    # a via can't fall back to routed tracks, so the vias that fit go in and the pour has to reach the rest
-    for n in [n for n in project.pcb if sexpr.head(n) in ("segment", "via")]:
-        if isinstance(n, list) and fixes._net_of(n, fixes._net_names(project.pcb)) == "GND":
-            project.pcb.remove(n)
+def test_plane_pad_vias_reports_a_boxed_in_pad(project: fixes.KicadProject, monkeypatch: pytest.MonkeyPatch) -> None:
+    # a pad with no room for a via and no neighbour to join: reported (its pour or a TSX track must reach it),
+    # the other pads still get their vias
     zone = sexpr.loads(
         '(zone (net 2 "GND") (layer "B.Cu") (polygon (pts (xy 85 90) (xy 110 90) (xy 110 110) (xy 85 110))))'
     )
@@ -1213,11 +1221,60 @@ def test_plane_pad_vias_on_an_unrouted_net(project: fixes.KicadProject, monkeypa
     monkeypatch.setattr(
         fixes, "_pad_via", lambda pr, c, pad, *a: None if pad.centre == stuck.centre else real(pr, c, pad, *a)
     )
-    monkeypatch.setattr(fixes, "_pad_link", lambda *a: None)
+    monkeypatch.setattr(fixes, "_pad_link", lambda *a, **k: None)
     changes = fixes.plane_pad_vias(project)
-    assert len(changes) == 1
-    assert "the pour must reach it" in changes[0]
-    assert len(fixes._copper(project.pcb).vias_by_net.get("GND", [])) == len(smd) - 1
+    assert changes[0] == f"GND: {len(smd) - 1} pad vias to the plane"
+    assert "has no room for a via" in changes[1]
+
+
+def test_plane_pad_vias_joins_a_via_the_tsx_placed(project: fixes.KicadProject) -> None:
+    # a GND <via> the TSX put next to a boxed-in pin: the pad gets a straight track to it, no via of its own
+    for n in [n for n in project.pcb if sexpr.head(n) in ("segment", "via")]:
+        if isinstance(n, list) and fixes._net_of(n, fixes._net_names(project.pcb)) == "GND":
+            project.pcb.remove(n)
+    project.pcb.append(
+        sexpr.loads(
+            '(zone (net 2 "GND") (layer "B.Cu") (polygon (pts (xy 85 90) (xy 110 90) (xy 110 110) (xy 85 110))))'
+        )
+    )
+    project.config = {"planes": {"nets": ["GND"]}}
+    pad = next(o for o in fixes._copper(project.pcb).pads_by_net["GND"] if len(o.layers) == 1)
+    x, y = pad.centre[0], pad.centre[1] + 2.0
+    via = sexpr.loads(f'(via (at {x} {y}) (size 0.4) (drill 0.2) (layers "F.Cu" "B.Cu") (net 2) (uuid "v"))')
+    project.pcb.append(via)
+    assert fixes.plane_pad_vias(project) == ["GND: 1 pad vias to the plane"]
+    copper = fixes._copper(project.pcb)
+    assert len(copper.vias_by_net["GND"]) == 1  # no new via
+    assert any({s.a, s.b} == {pad.centre, (x, y)} for s in copper.segs if s.net == "GND")
+
+
+def test_drop_vias_at(project: fixes.KicadProject) -> None:
+    via = sexpr.loads('(via (at 70 70) (size 0.4) (drill 0.2) (layers "F.Cu" "B.Cu") (net 2) (uuid "d"))')
+    project.pcb.append(via)
+    vias = len(list(sexpr.children(project.pcb, "via")))
+    assert fixes.drop_vias_at(project, [(80.0, 80.0)]) == []
+    changes = fixes.drop_vias_at(project, [(70.0004, 69.9998)])  # KiCad's report rounds the position
+    assert changes[0].endswith("via at (70, 70): dangling, removed")
+    assert len(list(sexpr.children(project.pcb, "via"))) == vias - 1
+
+
+def test_reroute_named_nets_keeps_tscircuit_copper_on_failure(
+    project: fixes.KicadProject, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert fixes.reroute_named_nets(project) == []  # no routes.toml
+    names = fixes._net_names(project.pcb)
+    net = next(fixes._net_of(n, names) for n in project.pcb if sexpr.head(n) == "segment" and isinstance(n, list))
+    before = [copy.deepcopy(n) for n in project.pcb if sexpr.head(n) in fixes.TRACK_NODES]
+    project.routes = {"route": [{"net": net}]}
+
+    def failing(prj: fixes.KicadProject, data: dict[str, object], *, only: str | None = None) -> routes.Report:
+        prj.pcb.append(sexpr.loads(f'(segment (start 0 0) (end 1 0) (width 0.2) (layer "F.Cu") (net "{only}"))'))
+        return routes.Report([routes.Result("x", ok=False, detail="no path")])
+
+    monkeypatch.setattr(routes, "apply", failing)
+    assert fixes.reroute_named_nets(project) == [f"{net}: kept tscircuit's routing (re-route failed: no path)"]
+    after = [n for n in project.pcb if sexpr.head(n) in fixes.TRACK_NODES]
+    assert sorted(map(sexpr.dumps, after)) == sorted(map(sexpr.dumps, before))  # the partial route went
 
 
 def test_net_node_track_form(project: fixes.KicadProject) -> None:

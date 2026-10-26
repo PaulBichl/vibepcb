@@ -43,9 +43,9 @@ class Spot:
 
 
 def drc_errors(drc: dict[str, Any]) -> list[Error]:
-    """The error-severity violations of a kicad-cli DRC report, each at the midpoint of its items."""
+    """The error-severity violations and unconnected items of a kicad-cli DRC report, each at its items' midpoint."""
     out = []
-    for v in drc.get("violations", []):
+    for v in [*drc.get("violations", []), *drc.get("unconnected_items", [])]:
         if v.get("severity") != "error" or not v.get("items"):
             continue
         items = v["items"]

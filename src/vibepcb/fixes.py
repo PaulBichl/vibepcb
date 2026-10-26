@@ -10,6 +10,7 @@ from __future__ import annotations
 import copy
 import dataclasses
 import datetime
+import fnmatch
 import functools
 import importlib
 import itertools
@@ -2892,6 +2893,7 @@ def snap_near_ends(project: KicadProject) -> list[str]:
 
 
 SNAP_MAX_ROUNDS = 500
+T_ON_LINE_MM = 1e-3  # an end this close to another track's centreline is a T junction, not a near miss
 
 
 def _snap_one_end(project: KicadProject, clearance: float, edge_clearance: float) -> str | None:
@@ -2904,6 +2906,9 @@ def _snap_one_end(project: KicadProject, clearance: float, edge_clearance: float
             same = [t for t in copper.segs_by_net.get(s.net, []) if t is not s and t.layer == s.layer]
             if any(min(math.dist(end, t.a), math.dist(end, t.b)) <= 1e-6 for t in same):
                 continue  # already meets a track end exactly
+            if any(tracks.point_seg_distance(end, t.a, t.b) <= T_ON_LINE_MM for t in same):
+                continue  # a T on the track's centreline (square_tees' foot may lie next to a corner): pulling it
+                # onto the corner made the two fixes undo each other every pass
             ends_near = [q for t in same for q in (t.a, t.b) if 1e-6 < math.dist(q, end) <= (s.width + t.width) / 2]
             if ends_near:  # two ends of one corner, a little apart
                 target = min(ends_near, key=lambda q: math.dist(q, end))
@@ -4439,12 +4444,13 @@ def plane_pad_vias(project: KicadProject) -> list[str]:
     """Connect the SMD pads of plane nets to their plane through their own via, not by tracks.
 
     For the nets listed in the board config (``[planes] nets = [...]``, see ``vibepcb.config``):
-    tscircuit routes a plane net's pads to each other with tracks, which knots up in fine-pitch
-    pin fields (0.5 mm QFP GND / VCC pins). The router's tracks and vias of the net go; each SMD
-    pad gets a minimum-width track to a via beside it (<= 3 mm, clearance on every layer, inside
-    the net's zone on another layer) - common practice; a pad without room joins a neighbouring
-    pad of the net that has one (adjacent GND pins). Per net all or nothing: if a pad finds neither,
-    that net keeps its routing.
+    ``build`` keeps them out of tscircuit's routing (pad-to-pad tracks knotted up in fine-pitch pin
+    fields, 0.5 mm QFP GND / VCC pins), so their only tracks are the ones the TSX draws itself (a
+    pin boxed in by its neighbours' fan-out, joined to a nearby pad of the net): those stay. Each
+    SMD pad gets a minimum-width track to a via beside it (<= 3 mm, clearance on every layer, inside
+    the net's zone on another layer) - common practice; a pad without room joins a neighbouring pad
+    of the net that has one (adjacent GND pins), else its own layer's pour or a TSX track must reach it
+    (``check`` reports it otherwise).
     """
     nets = list(project.config.get("planes", {}).get("nets", []))
     if not nets:
@@ -4454,20 +4460,8 @@ def plane_pad_vias(project: KicadProject) -> list[str]:
     for net in nets:
         copper = _copper(project.pcb)
         if not any(n == net for n, _ in copper.zones):
-            changes.append(f"{net}: no zone on the board, left as routed")
+            changes.append(f"{net}: no zone on the board, no pad vias")
             continue
-        names = _net_names(project.pcb)
-        routed = [
-            n
-            for n in project.pcb
-            if sexpr.head(n) in ("segment", "via")
-            and isinstance(n, list)
-            and _net_of(n, names) == net
-            and not _in_escape(n, escapes)
-        ]
-        for n in routed:
-            project.pcb.remove(n)
-        copper = _copper(project.pcb)
         others = [o for o in copper.obstacles() if o.net != net]
         added: list[list[Node]] = []
         smd = [
@@ -4475,9 +4469,17 @@ def plane_pad_vias(project: KicadProject) -> list[str]:
             for o in copper.pads_by_net.get(net, [])
             if len(o.layers & frozenset(COPPER_LAYERS)) == 1 and not any(_box_has(b, o.centre) for b in escapes)
         ]
+        # vias of the net the TSX placed itself (under a chip body, next to a pin boxed in by its neighbours)
+        placed = [
+            tracks.Obstacle("<via>", frozenset(COPPER_LAYERS), (c,), r) for c, r in copper.vias_by_net.get(net, [])
+        ]
         with_via: list[tracks.Obstacle] = []
         no_room = []
         for pad in smd:
+            if (link := _pad_link(project, pad, placed, others, net, max_mm=VIA_LINK_MAX_MM)) is not None:
+                added.append(link)
+                with_via.append(pad)
+                continue
             nodes = _pad_via(project, copper, pad, net, others)
             if nodes is None:
                 no_room.append(pad)
@@ -4489,42 +4491,41 @@ def plane_pad_vias(project: KicadProject) -> list[str]:
             r = _num(sexpr.child(nodes[1], "size"), 1) / 2
             others.append(tracks.Obstacle("<new via>", frozenset(COPPER_LAYERS), (centre,), r))  # spacing to the next
         # a pad without room joins a neighbouring pad of the net that has its via (adjacent GND pins)
-        stuck = None
+        stuck = []
         for pad in no_room:
             link = _pad_link(project, pad, with_via, others, net)
             if link is None:
-                stuck = pad
-                break
-            added.append(link)
-        if stuck is None:
-            project.pcb += added
-            changes.append(
-                f"{net}: {len(routed)} routed tracks/vias replaced by {len(with_via)} pad vias to the plane"
-                + (f" ({len(no_room)} pad(s) joined to a neighbour)" if no_room else "")
-            )
-            continue
-        if not routed:  # nothing to fall back to (the router left the net out): every via that fits, the pour the rest
-            project.pcb += added
-            changes.append(
-                f"{net}: {len(with_via)} pad vias to the plane; pad at ({_mm(stuck.centre[0])}, {_mm(stuck.centre[1])})"
-                " has no room for a via, the pour must reach it"
-            )
-            continue
-        project.pcb += routed  # a pad without room: the net keeps its routing
+                stuck.append(pad)
+            else:
+                added.append(link)
+        project.pcb += added
         changes.append(
-            f"{net}: pad at ({_mm(stuck.centre[0])}, {_mm(stuck.centre[1])}) has no room for a via, left as routed"
+            f"{net}: {len(with_via)} pad vias to the plane"
+            + (f" ({len(no_room) - len(stuck)} pad(s) joined to a neighbour)" if len(no_room) > len(stuck) else "")
         )
+        changes += [
+            f"{net}: pad at ({_mm(p.centre[0])}, {_mm(p.centre[1])}) has no room for a via (pour or a TSX track must"
+            " reach it)"
+            for p in stuck
+        ]
     return changes
 
 
 PAD_LINK_MAX_MM = 1.6  # a pad without via room may join a same-net pad this close (centre to centre)
+VIA_LINK_MAX_MM = 3.0  # a pad joins a via of its net placed by the TSX this close (centre to centre)
 
 
 def _pad_link(
-    project: KicadProject, pad: tracks.Obstacle, targets: list[tracks.Obstacle], others: list[tracks.Obstacle], net: str
+    project: KicadProject,
+    pad: tracks.Obstacle,
+    targets: list[tracks.Obstacle],
+    others: list[tracks.Obstacle],
+    net: str,
+    *,
+    max_mm: float = PAD_LINK_MAX_MM,
 ) -> list[Node] | None:
-    """A straight minimum-width track from ``pad`` to the nearest of ``targets`` on its layer, if it keeps
-    the clearance to ``others`` (other nets' copper); None if there is no such neighbour."""
+    """A straight minimum-width track from ``pad`` to the nearest of ``targets`` on its layer (<= ``max_mm``
+    centre to centre), if it keeps the clearance to ``others`` (other nets' copper); None if there is none."""
     clearance, _ = _design_clearances(project)
     width = _design_min_track_width(project)
     layer = next((lay for lay in COPPER_LAYERS if lay in pad.layers), None)
@@ -4533,7 +4534,7 @@ def _pad_link(
         return None
     on_layer = [o for o in others if layer in o.layers]
     for target in sorted(targets, key=lambda t: math.dist(t.centre, pad.centre)):
-        if math.dist(target.centre, pad.centre) > PAD_LINK_MAX_MM:
+        if math.dist(target.centre, pad.centre) > max_mm:
             break
         if layer not in target.layers:
             continue
@@ -4724,7 +4725,7 @@ def apply_routes(project: KicadProject) -> list[str]:
     routes from it in seconds. Entries that fail are listed; the board keeps what did route.
     """
     if project.config.get("routing", {}).get("mode") != "manual":
-        return []
+        return reroute_named_nets(project)
     routes = importlib.import_module("vibepcb.routes")  # routes imports this module: no import at the top
 
     snapshot = project.directory.parent / ".work" / UNROUTED_NAME
@@ -4732,6 +4733,45 @@ def apply_routes(project: KicadProject) -> list[str]:
     sexpr.dump(project.pcb, snapshot)
     report = routes.apply(project, project.routes)
     return [f"{r.entry}: {r.detail}" if r.ok else f"FAILED {r.entry}: {r.detail}" for r in report.results]
+
+
+def reroute_named_nets(project: KicadProject) -> list[str]:
+    """Auto mode: the nets a ``routes.toml`` ``[[route]] net = "..."`` entry names are re-routed by VibePCB's router.
+
+    tscircuit routes the whole board; where it left a net in a knot (two nets 0.07 mm apart along a run, a
+    fan-out it could not untangle) the board names that net in ``routes.toml`` and its tracks and vias are
+    ripped up and routed again with :mod:`vibepcb.routes` (which sees every other net's copper). One net at a
+    time, in file order; a net that does not route completely keeps tscircuit's copper.
+    """
+    entries = [e for e in project.routes.get("route", []) if "net" in e]
+    if not entries:
+        return []
+    routes = importlib.import_module("vibepcb.routes")  # routes imports this module: no import at the top
+
+    names = _net_names(project.pcb)
+    on_board = sorted({_net_of(n, names) for n in project.pcb if sexpr.head(n) in TRACK_NODES and isinstance(n, list)})
+    changes = []
+    for entry in entries:
+        for net in [n for n in on_board if fnmatch.fnmatchcase(n, str(entry["net"]))]:
+            names = _net_names(project.pcb)
+            old = [
+                n
+                for n in project.pcb
+                if sexpr.head(n) in TRACK_NODES and isinstance(n, list) and _net_of(n, names) == net
+            ]
+            project.pcb[:] = [n for n in project.pcb if not any(n is o for o in old)]
+            before = len(project.pcb)
+            report = routes.apply(project, {**project.routes, "pair": [], "route": [entry]}, only=net)
+            if report.results and not report.failed:
+                length = sum(r.length for r in report.results)
+                vias = sum(r.vias for r in report.results)
+                changes.append(f"{net}: re-routed ({len(old)} tscircuit tracks/vias -> {length:.1f} mm, {vias} via(s))")
+                continue
+            del project.pcb[before:]
+            project.pcb += old
+            why = report.failed[0].detail if report.failed else "nothing to connect"
+            changes.append(f"{net}: kept tscircuit's routing (re-route failed: {why})")
+    return changes
 
 
 FIXES: dict[str, Fix] = {
@@ -4866,6 +4906,28 @@ def stitch_unconnected_pads(project: KicadProject, pads: list[tuple[str, tracks.
 
 
 ISLAND_VIA_STEP_MM = 0.25  # candidate grid for a stitching via inside a pour piece
+
+
+def drop_vias_at(project: KicadProject, spots: list[tracks.Point]) -> list[str]:
+    """Remove the vias centred on ``spots`` (KiCad's ``via_dangling`` positions) and the tracks only they held.
+
+    A stitching via can join two pour pieces that reach no pad (a top island inside a QFP and the cut-off
+    bottom fill under it): the pair floats, KiCad reports the vias dangling. ``check`` drops them after the
+    refill and keeps that only if nothing loses its connection.
+    """
+    names = _net_names(project.pcb)
+    changes = []
+    for node in [n for n in project.pcb if sexpr.head(n) == "via" and isinstance(n, list)]:
+        at = sexpr.child(node, "at")
+        if at is None:
+            continue
+        centre = (_num(at, 1), _num(at, 2))
+        if any(math.dist(centre, q) <= tracks.ON_EDGE_MM for q in spots):
+            project.pcb.remove(node)
+            changes.append(f"{_net_of(node, names)} via at ({_mm(centre[0])}, {_mm(centre[1])}): dangling, removed")
+    if changes:
+        changes += remove_antennas(project, filled_zones=True)
+    return changes
 
 
 def stitch_pour_islands(project: KicadProject) -> list[str]:

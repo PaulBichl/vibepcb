@@ -183,9 +183,8 @@ def cmd_build(board: str, *, fast: bool = False) -> int:
         return 0
     # tscircuit evaluates (places + routes) the board on every call: do it once, export the rest from the JSON
     # [planes] nets get a via per pad in `fix` (fixes.plane_pad_vias): the router leaves them out
-    plane_nets = config.load(board).get("planes", {}).get("nets", [])
     with _phase("tscircuit placement + routing (the long step)"):
-        tscircuit.export(source, "circuit-json", circuit, unrouted_nets=plane_nets)
+        tscircuit.export(source, "circuit-json", circuit, unrouted_nets=sorted(_plane_nets(board)))
     for change in tscircuit.repair_trace_nets(circuit):
         print(f"  re-linked route {change}")
     errors, report = tscircuit.routed_errors(circuit)
@@ -296,7 +295,8 @@ def cmd_fix(board: str) -> int:
             " back; install KiCad 9/10 (or set $KICAD_CLI) and re-run `fix`, `check` will report them",
             file=sys.stderr,
         )
-    restored = fixes.restore_nets(project, lost)
+    # [planes] nets have no routed state (the router leaves them out): check's post-fill stitches their pads
+    restored = fixes.restore_nets(project, lost - _plane_nets(board))
     for change in restored:
         print(f"  fix restore_nets: {change}")
     project.save()
@@ -433,6 +433,11 @@ def _load_project(board: str, source: str = "current") -> fixes.KicadProject:
 RATSNEST_TOP = 40
 
 
+def _plane_nets(board: str) -> set[str]:
+    """The board's ``[planes] nets``: left out of tscircuit's routing, a via per pad from ``fix``."""
+    return set(config.load(board).get("planes", {}).get("nets", []))
+
+
 def cmd_hotspots(board: str, radius: float) -> int:
     """The last check's DRC errors grouped into spots (clusters), most errors first, with nets and parts nearby."""
     report = paths.reports_dir(board) / "drc.json"
@@ -555,7 +560,7 @@ def cmd_check(board: str, *, strict: bool = False) -> int:
         if drc.unconnected > before and attempt == POST_FILL_ATTEMPTS - 1:  # last resort: broken nets go back
             loaded = fixes.KicadProject.load(project, board)
             loaded.before_track_fixes = sexpr.loads(backup.decode("utf-8"))
-            changes += fixes.restore_nets(loaded, drc.unconnected_nets())
+            changes += fixes.restore_nets(loaded, drc.unconnected_nets() - _plane_nets(board))
             loaded.save()
             drc = kicad.run_drc(pcb, reports / "drc.json")
         # kept only if no pad lost its connection: the count alone can hide a new loss behind a fixed item
@@ -573,6 +578,20 @@ def cmd_check(board: str, *, strict: bool = False) -> int:
     drc, stitched = _stitch_pour_gaps(project, board, pcb, reports, drc)
     for change in stitched:
         print(f"  post-fill: {change}")
+    if dangling := drc.spots_of("via_dangling"):  # e.g. a stitch joining two floating pour pieces
+        backup = pcb.read_bytes()
+        loaded = fixes.KicadProject.load(project, board)
+        if dropped := fixes.drop_vias_at(loaded, dangling):
+            loaded.save()
+            after = kicad.run_drc(pcb, reports / "drc.json")
+            if after.unconnected <= drc.unconnected and not _pad_spots(after) - _pad_spots(drc):
+                drc = after
+                for change in dropped:
+                    print(f"  post-fill: {change}")
+            else:
+                pcb.write_bytes(backup)
+                drc = kicad.run_drc(pcb, reports / "drc.json")
+                print("  post-fill: dangling vias kept, removing them disconnected something")
     loaded = fixes.KicadProject.load(project, board)
     if fixes.sharp_corners(loaded):  # nets restored as routed skipped the clean-up: touch up their corners, kept
         backup = pcb.read_bytes()  # only if KiCad finds nothing newly unconnected

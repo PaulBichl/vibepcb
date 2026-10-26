@@ -11,10 +11,10 @@ import html
 import math
 from typing import TYPE_CHECKING
 
-from vibepcb import fixes, routes
+from vibepcb import board as board_mod
+from vibepcb import routes
 
 if TYPE_CHECKING:
-    from vibepcb import board as board_mod
     from vibepcb.fixes import KicadProject
 
 LAYER_COLOURS = {"F.Cu": "#d33", "B.Cu": "#36c"}
@@ -125,9 +125,10 @@ def render(
 def summary(project: KicadProject, box: tuple[float, float, float, float], net: str | None = None) -> list[str]:
     """Text next to the picture: the pads in the area with their nets and layers."""
     x0, y0, x1, y1 = box
+    on_board = set(board_mod.copper_layers(project.pcb))  # a through-hole pad's *.Cu: the board's layers only
     lines = []
     for p in routes.board_pads(project):
         if x0 <= p.centre[0] <= x1 and y0 <= p.centre[1] <= y1 and (net is None or fnmatch.fnmatchcase(p.net, net)):
-            layers = ",".join(sorted(layer.removesuffix(".Cu") for layer in p.layers if layer in fixes.COPPER_LAYERS))
+            layers = ",".join(sorted(layer.removesuffix(".Cu") for layer in p.layers if layer in on_board))
             lines.append(f"{p.label:<10} {p.net or '-':<22} ({p.centre[0]:.2f}, {p.centre[1]:.2f}) {layers}")
     return lines
