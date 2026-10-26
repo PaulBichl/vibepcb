@@ -3268,7 +3268,64 @@ def corner_touch_up(project: KicadProject) -> list[str]:
     """The corner fixes that never cut a path (:func:`straighten_via_exits`, :func:`snap_bends_to_45`): run again on
     the finished board, where a net restored as routed (``restore_nets``) skipped the clean-up. The caller re-checks
     connectivity with KiCad and undoes them if anything got disconnected."""
-    return straighten_via_exits(project) + snap_bends_to_45(project)
+    return straighten_via_exits(project) + snap_bends_to_45(project) + tuck_corners_into_pads(project)
+
+
+TUCK_REACH_MM = 0.5  # a sharp bend this close to a pad of its net may move onto it
+TUCK_STEPS = 20
+
+
+def tuck_corners_into_pads(project: KicadProject) -> list[str]:
+    """Move a sharp bend lying just outside a pad of its net onto that pad.
+
+    The router sometimes turns a track a hair before the pad it ends at (seen: a USB-C D- pad, 45.8 deg 0.1 mm
+    off the pad); on the pad the bend is pad copper, which neither KiCad's ``track_angle`` nor
+    :func:`sharp_corners` judges. The bend slides towards the pad centre to the first spot inside the pad where
+    both of its tracks keep their clearance.
+    """
+    clearance, edge_clearance = _design_clearances(project)
+    changes = []
+    for net, p, angle in sharp_corners(project):
+        copper = _copper(project.pcb)
+        at = [
+            s
+            for s in copper.segs_by_net.get(net, [])
+            if math.dist(s.a, p) <= tracks.EPS or math.dist(s.b, p) <= tracks.EPS
+        ]
+        if len(at) != 2 or at[0].layer != at[1].layer:
+            continue
+        layer = at[0].layer
+        pads = [o for o in copper.pads_by_net.get(net, []) if layer in o.layers and o.distance(p, p) <= TUCK_REACH_MM]
+        if not pads:
+            continue
+        pad = min(pads, key=lambda o: o.distance(p, p))
+        fars = [s.b if math.dist(s.a, p) <= tracks.EPS else s.a for s in at]
+        others = [o for o in copper.obstacles() if o.net != net and layer in o.layers]
+        spot = None
+        for k in range(1, TUCK_STEPS + 1):
+            q = (p[0] + (pad.centre[0] - p[0]) * k / TUCK_STEPS, p[1] + (pad.centre[1] - p[1]) * k / TUCK_STEPS)
+            if pad.distance(q, q) > tracks.EPS:
+                continue
+            if all(
+                o.distance(f, q) >= clearance + s.width / 2 - tracks.EPS
+                for s, f in zip(at, fars, strict=True)
+                for o in others
+            ) and all(
+                e.distance(f, q) >= edge_clearance + s.width / 2
+                for s, f in zip(at, fars, strict=True)
+                for e in copper.edges
+            ):
+                spot = q
+                break
+        if spot is None:
+            continue
+        for s in at:
+            key = "start" if math.dist(s.a, p) <= tracks.EPS else "end"
+            node = sexpr.child(_source(s), key)
+            assert node is not None
+            node[1:3] = [Sym(_mm(spot[0])), Sym(_mm(spot[1]))]
+        changes.append(f"{net} bend of {angle:.1f} deg at ({_mm(p[0])}, {_mm(p[1])}) moved onto its pad")
+    return changes
 
 
 def _piece_key(a: tracks.Point, b: tracks.Point) -> frozenset[tuple[int, int]]:

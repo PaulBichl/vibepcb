@@ -1344,6 +1344,23 @@ def test_set_island_removal(project: fixes.KicadProject) -> None:
     assert "(island_removal_mode 0)" in sexpr.dumps(zone)
 
 
+def test_tuck_corners_into_pads(project: fixes.KicadProject) -> None:
+    pad = next(o for o in fixes._copper(project.pcb).pads_by_net["GND"] if len(o.layers) == 1)
+    layer = next(iter(pad.layers))
+    _, y0, x1, y1 = pad.box
+    p = (x1 + 0.1, (y0 + y1) / 2)  # a 45 deg bend 0.1 mm right of the pad
+    a = sexpr.loads(f'(segment (start {p[0] + 3} {p[1]}) (end {p[0]} {p[1]}) (width 0.15) (layer "{layer}") (net 2))')
+    b = sexpr.loads(
+        f'(segment (start {p[0]} {p[1]}) (end {p[0] + 2} {p[1] + 2}) (width 0.15) (layer "{layer}") (net 2))'
+    )
+    project.pcb += [a, b]
+    assert any(n == "GND" and math.dist(q, p) < 1e-6 for n, q, _ in fixes.sharp_corners(project))
+    changes = fixes.tuck_corners_into_pads(project)
+    assert len(changes) == 1
+    assert "moved onto its pad" in changes[0]
+    assert not any(n == "GND" and math.dist(q, p) < 0.5 for n, q, _ in fixes.sharp_corners(project))
+
+
 def test_net_node_track_form(project: fixes.KicadProject) -> None:
     # tracks / vias take (net <id>); a pad's (net <id> "<name>") on a via crashes kicad-cli's DRC
     for n in [n for n in project.pcb if sexpr.head(n) in ("segment", "via")]:
