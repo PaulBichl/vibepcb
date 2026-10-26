@@ -4360,6 +4360,49 @@ def sharp_corners(project: KicadProject) -> list[tuple[str, tracks.Point, float]
     return sorted(out)
 
 
+def drop_folded_back_tracks(project: KicadProject) -> list[str]:
+    """Drop a track that leaves a point together with a longer track of its net and runs back along it.
+
+    Two pieces sharing an end and leaving it a few degrees apart overlap (a fold: seen on a VCC run, 4.8 mm under
+    an 18 mm one, 0.44 deg apart, which KiCad reports as an acute angle). Where the shorter one's far end lies on
+    the longer one's copper (KiCad connects whatever ends there to it), the shorter one is copper twice: it goes.
+    """
+    changes = []
+    for _ in range(FOLD_MAX):
+        copper = _copper(project.pcb)
+        found = None
+        for net, segs in copper.segs_by_net.items():
+            for s in segs:
+                for t in segs:
+                    if t is s or t.layer != s.layer or math.dist(s.a, s.b) >= math.dist(t.a, t.b):
+                        continue
+                    shared = next((e for e in (s.a, s.b) for f in (t.a, t.b) if math.dist(e, f) <= tracks.EPS), None)
+                    if shared is None:
+                        continue
+                    far_s = s.b if math.dist(s.a, shared) <= tracks.EPS else s.a
+                    far_t = t.b if math.dist(t.a, shared) <= tracks.EPS else t.a
+                    if (
+                        tracks.interior_angle(far_s, shared, far_t) <= FOLD_MAX_DEG
+                        and tracks.point_seg_distance(far_s, t.a, t.b) <= t.width / 2 - tracks.EPS
+                    ):
+                        found = (net, s, far_s)
+                        break
+                if found:
+                    break
+            if found:
+                break
+        if found is None:
+            break
+        net, s, far = found
+        project.pcb.remove(_source(s))
+        changes.append(f"{net} track folded back along a longer one at ({_mm(far[0])}, {_mm(far[1])}) removed")
+    return changes
+
+
+FOLD_MAX = 200
+FOLD_MAX_DEG = 10.0
+
+
 def split_at_tees(project: KicadProject) -> list[str]:
     """Split a track where another track of its net ends on its middle: every junction becomes a vertex.
 

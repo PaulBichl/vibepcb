@@ -629,13 +629,15 @@ def cmd_check(board: str, *, strict: bool = False) -> int:
                 drc = kicad.run_drc(pcb, reports / "drc.json")
                 print("  corner touch-up: undone, it disconnected something")
             loaded = fixes.KicadProject.load(project, board)
-    if split := fixes.split_at_tees(loaded):  # last: KiCad measures a T only at a vertex reliably
+    if split := fixes.drop_folded_back_tracks(loaded) + fixes.split_at_tees(loaded):  # last: KiCad measures a T
+        # only at a vertex reliably; a fold left by the clean-up is an acute angle to it
         backup = pcb.read_bytes()
         loaded.save()
         after = kicad.run_drc(pcb, reports / "drc.json")
         if after.unconnected <= drc.unconnected and not _pad_spots(after) - _pad_spots(drc):
             drc = after
-            print(f"  post-fill: {len(split)} T-junction(s) given a vertex in the through-track")
+            for change in split:
+                print(f"  post-fill: {change}")
         else:
             pcb.write_bytes(backup)
             drc = kicad.run_drc(pcb, reports / "drc.json")

@@ -1361,6 +1361,18 @@ def test_tuck_corners_into_pads(project: fixes.KicadProject) -> None:
     assert not any(n == "GND" and math.dist(q, p) < 0.5 for n, q, _ in fixes.sharp_corners(project))
 
 
+def test_drop_folded_back_tracks(project: fixes.KicadProject) -> None:
+    long = sexpr.loads('(segment (start 70 80) (end 52 80.05) (width 0.15) (layer "B.Cu") (net 2) (uuid "l"))')
+    short = sexpr.loads('(segment (start 65.2 80.04) (end 70 80) (width 0.15) (layer "B.Cu") (net 2) (uuid "s"))')
+    project.pcb += [long, short]
+    assert fixes.drop_folded_back_tracks(project) == [
+        "GND track folded back along a longer one at (65.2, 80.04) removed"
+    ]
+    assert short not in project.pcb
+    assert long in project.pcb
+    assert fixes.drop_folded_back_tracks(project) == []
+
+
 def test_net_node_track_form(project: fixes.KicadProject) -> None:
     # tracks / vias take (net <id>); a pad's (net <id> "<name>") on a via crashes kicad-cli's DRC
     for n in [n for n in project.pcb if sexpr.head(n) in ("segment", "via")]:

@@ -189,8 +189,11 @@ test in `tests/test_fixes.py` against the fixtures in `tests/data/`.
 - Differential pairs (USB, LVDS): tscircuit's `<differentialpair>` only matches lengths, its router doesn't couple the
   tracks. Draw the pair as two named `<trace pcbPath={[...]}>` (points `{x, y, via, fromLayer, toLayer}`, ending in the
   target port selector) side by side at the netclass gap; the router routes the rest around it. The points are
-  relative to the `from` part's centre, not its pin (`pcbPathRelativeTo` was ignored on bench-psu): check the result
-  with a routing-disabled evaluation (`tscircuit.evaluate_unrouted`) before a full build.
+  in the `from` part's frame: relative to its `pcbX`/`pcbY` and rotated with it (`pcbRotation={90}`: board offset =
+  (-y, x)), not to its pin (`pcbPathRelativeTo` was ignored on bench-psu): check the result with a routing-disabled
+  evaluation (`tscircuit.evaluate_unrouted`) before a full build. Not for a USB-C pad pair tie (A6/B6 around A7): the fixed
+  path boxed a pad in and the autorouter ran out of iterations (open-theremin); let it tie them, and tap extra loads
+  (a header's D+/D-) at the ESD part, not at the connector pads.
 - BGA: don't let tscircuit's router into a ball field (it tangles: 199 acute angles on a 54-ball SDRAM) and
   don't use its fanout (dogbone + pour crashes, tscircuit/core#4660; saved `pcbTracePaths` + `routeRemaining`
   crash, #4663). Use `[escape.<ref>]`. Saved paths, if ever needed: group-relative coordinates, the first
