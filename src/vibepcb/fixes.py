@@ -3220,6 +3220,92 @@ def snap_bends_to_45(project: KicadProject) -> list[str]:
     return changes
 
 
+STUB_COLLAPSE_MM = 0.6  # a piece this short between two bends may be dropped
+STUB_MOVE_MM = 1.0  # the new corner lies at most this far from the dropped piece's ends
+
+
+def collapse_bend_stubs(project: KicadProject) -> list[str]:
+    """Drop a short piece between two bends and extend its neighbours until they meet, where that bend is sharp.
+
+    The router turns a 45 deg diagonal onto a straight via a short third direction (seen: a diagonal, a 0.33 mm
+    vertical stub, then a horizontal: 135 + 90 deg, the 90 deg bend reported); the diagonal running on to the
+    horizontal is one 135 deg bend. Both bends must be plain (two tracks, not on a pad or via of the net) and nothing
+    may join the piece mid-way; done only if the extended pieces keep their clearance, the new bend is no sharper than
+    135 deg (or than the sharper old one) and the bends at their far ends don't get sharper. The path keeps its ends,
+    so it is safe on nets restored as routed (:func:`corner_touch_up`).
+    """
+    clearance, edge_clearance = _design_clearances(project)
+    changes: list[str] = []
+    skip: set[frozenset[tuple[int, int]]] = set()
+    for _ in range(CORNER_FIX_MAX_PASSES):
+        copper = _copper(project.pcb)
+        obstacles = copper.obstacles()
+        ends = _polyline_ends(copper)
+        done = False
+        for s in copper.segs:
+            length = math.dist(s.a, s.b)
+            key = _piece_key(s.a, s.b)
+            if key in skip or not tracks.EPS < length <= STUB_COLLAPSE_MM:
+                continue
+            sides = []
+            for p in (s.a, s.b):
+                others = [(t, e) for t, e in ends.get((s.net, s.layer, tracks._key(p)), []) if t is not s]
+                if len(others) != 1 or copper.on_pad_or_via(p, s.net, s.layer):
+                    break
+                sides.append((p, *others[0]))
+            if len(sides) != 2 or sides[0][1] is sides[1][1]:
+                continue
+            (pa, ta, ea), (pb, tb, eb) = sides
+            a, b = _far(ta, ea), _far(tb, eb)
+            before = min(tracks.interior_angle(a, pa, pb), tracks.interior_angle(pa, pb, b))
+            if before >= tracks.MIN_CORNER_DEG - CORNER_TOLERANCE_DEG:
+                continue  # nothing sharp_corners would report
+            skip.add(key)
+            x = _line_cross(a, (pa[0] - a[0], pa[1] - a[1]), b, (pb[0] - b[0], pb[1] - b[1]))
+            if (
+                x is None
+                or (x[0] - a[0]) * (pa[0] - a[0]) + (x[1] - a[1]) * (pa[1] - a[1]) <= 0  # ahead of both pieces
+                or (x[0] - b[0]) * (pb[0] - b[0]) + (x[1] - b[1]) * (pb[1] - b[1]) <= 0
+                or max(math.dist(x, pa), math.dist(x, pb)) > STUB_MOVE_MM
+            ):
+                continue
+            after = tracks.interior_angle(a, x, b)
+            if after < min(tracks.MIN_CORNER_DEG, before) - 1e-6:
+                continue
+            mid = [  # something joining the piece between its ends (a T, a via or pad centre on it)
+                q
+                for t in copper.segs_by_net.get(s.net, [])
+                if t.layer == s.layer and t is not s
+                for q in (t.a, t.b)
+                if min(math.dist(q, pa), math.dist(q, pb)) > tracks.EPS
+            ] + [c for c, _ in copper.vias_by_net.get(s.net, [])]
+            mid += [o.centre for o in copper.pads_by_net.get(s.net, []) if s.layer in o.layers]
+            if any(tracks.point_seg_distance(q, pa, pb) <= s.width / 2 for q in mid):
+                continue
+            ok = _fits(copper, obstacles, ta, a, x, clearance, edge_clearance) and _fits(
+                copper, obstacles, tb, b, x, clearance, edge_clearance
+            )
+            for seg, far, old in ((ta, a, pa), (tb, b, pb)):  # the bends at the far ends
+                nxt = _corner_at(ends, copper, seg, far)
+                if nxt is not None:
+                    was = tracks.interior_angle(old, far, nxt)
+                    ok = ok and tracks.interior_angle(x, far, nxt) >= min(tracks.MIN_CORNER_DEG, was) - 1e-6
+            if not ok:
+                continue
+            _set_end(ta, ea, x)
+            _set_end(tb, eb, x)
+            _drop(project.pcb, _source(s))
+            changes.append(
+                f"{s.net} {length:.2f} mm piece between bends at ({_mm(pa[0])}, {_mm(pa[1])}) dropped:"
+                f" {before:.1f} -> {after:.1f} deg"
+            )
+            done = True
+            break
+        if not done:
+            break
+    return changes
+
+
 def straighten_via_exits(project: KicadProject) -> list[str]:
     """Replace the stubs a track takes inside a via's copper by one piece from the via centre.
 
@@ -3307,14 +3393,22 @@ def straighten_via_exits(project: KicadProject) -> list[str]:
 
 
 def corner_touch_up(project: KicadProject) -> list[str]:
-    """The corner fixes that never cut a path (:func:`straighten_via_exits`, :func:`snap_bends_to_45`): run again on
+    """The corner fixes that never cut a path (:func:`straighten_via_exits`, :func:`snap_bends_to_45`,
+    :func:`collapse_bend_stubs`, :func:`tuck_corners_into_pads`): run again on
     the finished board, where a net restored as routed (``restore_nets``) skipped the clean-up. The caller re-checks
     connectivity with KiCad and undoes them if anything got disconnected."""
-    return straighten_via_exits(project) + snap_bends_to_45(project) + tuck_corners_into_pads(project)
+    return (
+        straighten_via_exits(project)
+        + snap_bends_to_45(project)
+        + collapse_bend_stubs(project)
+        + tuck_corners_into_pads(project)
+    )
 
 
 TUCK_REACH_MM = 0.5  # a sharp bend this close to a pad of its net may move onto it
 TUCK_STEPS = 20
+TUCK_GRID_MM = 0.025  # spots tried on the pad when none on the line to its centre fits
+TUCK_GRID_MAX = 60  # grid steps along the pad's longer side at most
 
 
 def tuck_corners_into_pads(project: KicadProject) -> list[str]:
@@ -3324,7 +3418,8 @@ def tuck_corners_into_pads(project: KicadProject) -> list[str]:
     45.8 deg 0.1 mm off the pad; three VCC tracks meeting at 41 deg beside a VBUS pad); on the pad the vertex is
     pad copper, which neither KiCad's ``track_angle`` nor :func:`sharp_corners` judges. Every track ending at the
     vertex moves with it, towards the pad centre, to the first spot inside the pad where all of them keep their
-    clearance.
+    clearance; if none on that line fits, to the nearest spot on the pad that does (seen: a hairpin at a 0.5 mm
+    pitch DAC pin, whose way to the pad centre passed the neighbouring pin).
     """
     clearance, edge_clearance = _design_clearances(project)
     changes = []
@@ -3353,17 +3448,43 @@ def tuck_corners_into_pads(project: KicadProject) -> list[str]:
         pad = min(pads, key=lambda o: o.distance(p, p))
         fars = [s.b if math.dist(s.a, p) <= tracks.EPS else s.a for s in at]
         others = [o for o in copper.obstacles() if o.net != net and layer in o.layers]
-        spot = None
-        for k in range(1, TUCK_STEPS + 1):
-            q = (p[0] + (pad.centre[0] - p[0]) * k / TUCK_STEPS, p[1] + (pad.centre[1] - p[1]) * k / TUCK_STEPS)
-            if not deep(q, pad):
-                continue
-            pairs = list(zip(at, fars, strict=True))
-            if all(o.distance(f, q) >= clearance + s.width / 2 - tracks.EPS for s, f in pairs for o in others) and all(
-                e.distance(f, q) >= edge_clearance + s.width / 2 for s, f in pairs for e in copper.edges
-            ):
-                spot = q
-                break
+        pairs = list(zip(at, fars, strict=True))
+        ends = _polyline_ends(copper)
+        nexts = [_corner_at(ends, copper, s, f) for s, f in pairs]  # the bends at the tracks' far ends
+
+        def clear(
+            q: tracks.Point,
+            p: tracks.Point = p,
+            pairs: list[tuple[tracks.Seg, tracks.Point]] = pairs,
+            nexts: list[tracks.Point | None] = nexts,
+            others: list[tracks.Obstacle] = others,
+            edges: list[tracks.Obstacle] = copper.edges,
+        ) -> bool:
+            for (_, f), nxt in zip(pairs, nexts, strict=True):  # no far bend gets sharper than 135 deg (or than it was)
+                if (
+                    nxt is not None
+                    and tracks.interior_angle(q, f, nxt)
+                    < min(tracks.MIN_CORNER_DEG, tracks.interior_angle(p, f, nxt)) - 1e-6
+                ):
+                    return False
+            return all(
+                o.distance(f, q) >= clearance + s.width / 2 - tracks.EPS for s, f in pairs for o in others
+            ) and all(e.distance(f, q) >= edge_clearance + s.width / 2 for s, f in pairs for e in edges)
+
+        line = [
+            (p[0] + (pad.centre[0] - p[0]) * k / TUCK_STEPS, p[1] + (pad.centre[1] - p[1]) * k / TUCK_STEPS)
+            for k in range(1, TUCK_STEPS + 1)
+        ]
+        spot = next((q for q in line if deep(q, pad) and clear(q)), None)
+        if spot is None:  # off the line to the centre (a hairpin beside a fine-pitch neighbour): nearest spot that fits
+            x0, y0, x1, y1 = pad.box
+            step = max(TUCK_GRID_MM, max(x1 - x0, y1 - y0) / TUCK_GRID_MAX)
+            grid = [
+                (x0 + i * step, y0 + j * step)
+                for i in range(int((x1 - x0) / step) + 1)
+                for j in range(int((y1 - y0) / step) + 1)
+            ]
+            spot = next((q for q in sorted(grid, key=lambda q: math.dist(q, p)) if deep(q, pad) and clear(q)), None)
         if spot is None:  # no room on the pad: a track may end at a via of the net next to the vertex instead
             if (moved := _reanchor_at_via(copper, net, p, at, fars, others, clearance)) is not None:
                 changes.append(f"{net} track meeting others at {angle:.1f} deg at ({_mm(p[0])}, {_mm(p[1])}) {moved}")
@@ -4613,6 +4734,7 @@ def apply_post_fill(
             ("square_tees", lambda: square_tees(project)),
             ("straighten_via_exits", lambda: straighten_via_exits(project)),
             ("snap_bends_to_45", lambda: snap_bends_to_45(project)),
+            ("collapse_bend_stubs", lambda: collapse_bend_stubs(project)),
             ("push_tracks_clear", lambda: push_tracks_clear(project)),
             ("relocate_vias", lambda: relocate_vias(project)),
             ("reroute_tracks", lambda: reroute_tracks(project)),
@@ -5172,6 +5294,7 @@ FIXES: dict[str, Fix] = {
     "square_tees": square_tees,
     "straighten_via_exits": straighten_via_exits,
     "snap_bends_to_45": snap_bends_to_45,
+    "collapse_bend_stubs": collapse_bend_stubs,
     "push_tracks_clear": push_tracks_clear,
     "reroute_tracks": reroute_tracks,
     "remove_antennas": remove_antennas,

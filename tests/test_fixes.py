@@ -805,6 +805,34 @@ def test_snap_bends_to_45(project: fixes.KicadProject) -> None:
     assert fixes.snap_bends_to_45(project) == []
 
 
+def test_collapse_bend_stubs(project: fixes.KicadProject) -> None:
+    # a 45 deg diagonal, a 0.33 mm vertical stub, a horizontal (135 + 90 deg): the diagonal runs on to the horizontal
+    pieces = [
+        sexpr.loads(f"(segment (start {a}) (end {b}) (width 0.15) (layer In1.Cu) (net 1))")
+        for a, b in (("60.33 66", "65 61.33"), ("65 61.33", "65 61"), ("65 61", "72 61"))
+    ]
+    project.pcb += pieces
+    assert [c for c in fixes.sharp_corners(project) if c[0] == "VCC"]
+    changes = fixes.collapse_bend_stubs(project)
+    assert len(changes) == 1
+    assert pieces[1] not in project.pcb
+    assert not [c for c in fixes.sharp_corners(project) if c[0] == "VCC"]
+    end = sexpr.child(pieces[0], "end")
+    assert end is not None
+    assert (round(float(str(end[1])), 3), float(str(end[2]))) == (65.33, 61.0)
+    assert fixes.collapse_bend_stubs(project) == []
+
+
+def test_collapse_bend_stubs_keeps_a_tee(project: fixes.KicadProject) -> None:
+    # a VCC track ends on the stub's middle: dropping the stub would cut it off
+    pieces = [
+        sexpr.loads(f"(segment (start {a}) (end {b}) (width 0.15) (layer In1.Cu) (net 1))")
+        for a, b in (("60 66", "65 61.4"), ("65 61.4", "65 61"), ("65 61", "72 61"), ("65 61.2", "62 61.2"))
+    ]
+    project.pcb += pieces
+    assert fixes.collapse_bend_stubs(project) == []
+
+
 def test_straighten_via_exits(project: fixes.KicadProject) -> None:
     # a track leaves a VCC via through a diagonal and a short stub (a 90 deg bend at the via's edge), then runs
     # horizontally: the stubs go, the track starts at the via centre
@@ -1370,6 +1398,27 @@ def test_tuck_corners_into_pads(project: fixes.KicadProject) -> None:
     assert len(changes) == 1
     assert "moved onto its pad" in changes[0]
     assert not any(n == "GND" and math.dist(q, p) < 0.5 for n, q, _ in fixes.sharp_corners(project))
+
+
+def test_tuck_corners_off_the_line_to_the_pad_centre(project: fixes.KicadProject) -> None:
+    # a GND hairpin at the top-left corner of the F.Cu GND pad (x 101.425-102.225, y from 101.525); a VCC track
+    # left of the pad blocks every spot on the way to the pad centre: the vertex goes to the pad's top right instead
+    p = (101.43, 101.47)
+    pieces = [
+        sexpr.loads(f'(segment (start {a}) (end {b}) (width 0.15) (layer "F.Cu") (net {n}))')
+        for a, b, n in (
+            (f"{p[0] - 0.5} {p[1] - 0.5}", f"{p[0]} {p[1]}", 2),
+            (f"{p[0]} {p[1]}", f"{p[0] - 0.5} {p[1] - 0.35}", 2),
+            ("101.15 101.6", "101.15 103", 1),
+        )
+    ]
+    project.pcb += pieces
+    changes = fixes.tuck_corners_into_pads(project)
+    assert changes == ["GND 2 track(s) meeting at 10.0 deg at (101.43, 101.47) moved onto its pad"]
+    end = sexpr.child(pieces[0], "end")
+    assert end is not None
+    assert float(str(end[1])) > 101.825  # right of the pad centre line, clear of the VCC track
+    assert fixes.tuck_corners_into_pads(project) == []
 
 
 def test_drop_folded_back_tracks(project: fixes.KicadProject) -> None:
