@@ -87,8 +87,8 @@ def _at(node: list[Node]) -> tuple[float, float]:
     return round(float(str(at[1])), 4), round(float(str(at[2])), 4)
 
 
-def _groups(sch: list[Node]) -> dict[tuple[str, str], str]:
-    """Connectivity as KiCad sees it: (reference, pin) -> group id."""
+def _groups(sch: list[Node], *, labels: bool = True) -> dict[tuple[str, str], str]:
+    """Connectivity as KiCad sees it: (reference, pin) -> group id (``labels=False``: by wire only)."""
     parent: dict[object, object] = {}
 
     def find(a: object) -> object:
@@ -107,7 +107,7 @@ def _groups(sch: list[Node]) -> dict[tuple[str, str], str]:
             if sexpr.head(xy) == "xy"
         )
         union(a, b)
-    for kind in ("label", "global_label"):
+    for kind in ("label", "global_label") if labels else ():
         for label in sexpr.children(sch, kind):
             union(_at(label), ("net", str(label[1])))
     pins = fixes._pin_positions(sch)
@@ -368,3 +368,105 @@ def test_unsectioned_decoupling_joins_its_chip() -> None:
     schgen._adopt_decoupling(parts, section_of, {"V3V3", "GND"})
     assert section_of["C1"] == "sensor"  # the nearest chip its supply powers
     assert "R1" not in section_of  # not a rail-to-rail part
+
+
+def _lib_symbol(name: str, left: list[str], right: list[str]) -> symlib.LibSymbol:
+    """A DIP-like library symbol: ``left`` pins top-down on the left, ``right`` bottom-up on the right."""
+    font = "(effects (font (size 1.27 1.27)))"
+    n = max(len(left), len(right))
+    top = (n - 1) * schgen.GRID / 2
+    pins = [
+        f'(pin passive line (at -10.16 {top - i * schgen.GRID:g} 0) (length 2.54) (name "{p}" {font})'
+        f' (number "{i + 1}" {font}))'
+        for i, p in enumerate(left)
+    ] + [
+        f'(pin passive line (at 10.16 {top - (n - 1 - i) * schgen.GRID:g} 180) (length 2.54) (name "{p}" {font})'
+        f' (number "{len(left) + i + 1}" {font}))'
+        for i, p in enumerate(right)
+    ]
+    node = sexpr.loads(
+        f'(symbol "{name}" (property "Reference" "U" (at 0 {top + 2.54:g} 0) {font})'
+        f' (property "Value" "{name}" (at 0 {-top - 2.54:g} 0) {font})'
+        f' (symbol "{name}_0_1" (rectangle (start -7.62 {top + 1.27:g}) (end 7.62 {-top - 1.27:g})'
+        " (stroke (width 0.254) (type default)) (fill (type background))))"
+        f' (symbol "{name}_1_1" {" ".join(pins)}))'
+    )
+    return symlib.LibSymbol(name, node, symlib.pins_of(node))
+
+
+def test_library_pin_trees_stay_at_their_pins(tmp_path: Path) -> None:
+    # a USB-serial chip (CH340C): series resistors on TXD / RXD, a cap on V3, labels on D+ / D-: every part
+    # wired to its own pin (rows fanned out), not moved off into a column of labels; V3's cap stands at the pin
+    parts: dict[str, tuple[str, list[tuple[str, int | None]]]] = {
+        "U1": (
+            "simple_chip",
+            [
+                ("GND", 0),
+                ("TXD", 1),
+                ("RXD", 2),
+                ("V3", 3),
+                ("DP", 4),
+                ("DN", 5),
+                ("NC", None),
+                ("OUT", None),
+                ("CTS", None),
+                ("DSR", None),
+                ("RI", None),
+                ("DCD", None),
+                ("DTR", None),
+                ("RTS", None),
+                ("R232", None),
+                ("VCC", 6),
+            ],
+        ),
+        "R9": ("simple_resistor", [("pin1", 1), ("pin2", 7)]),
+        "R10": ("simple_resistor", [("pin1", 2), ("pin2", 8)]),
+        "C30": ("simple_capacitor", [("pin1", 3), ("pin2", 0)]),
+        "J1": ("simple_chip", [("TX", 7), ("RX", 8), ("DP", 4), ("DN", 5), ("VCC", 6), ("GND", 0)]),
+    }
+    named = {0: "GND", 1: "CH340_TXD", 2: "CH340_RXD", 3: "CH340_V3", 4: "USB_P", 5: "USB_N", 6: "VCC", 7: "TXD",
+             8: "RXD"}  # fmt: skip
+    path = _circuit(tmp_path, parts, named)
+    circuit = json.loads(path.read_text())
+    chip = _lib_symbol("CH340C", ["GND", "TXD", "RXD", "V3", "DP", "DN", "NC", "OUT"],
+                       ["CTS", "DSR", "RI", "DCD", "DTR", "RTS", "R232", "VCC"])  # fmt: skip
+    all_parts = schgen._parts(circuit)
+    text = schgen._render(circuit, all_parts, {"U1": chip}, "board", None)
+    assert schgen.connectivity_errors(text, all_parts) == []
+    sch = sexpr.loads(text)
+    pins, wired = fixes._pin_positions(sch), _groups(sch, labels=False)
+    for ref, pin in (("R9", "2"), ("R10", "3"), ("C30", "4")):
+        near = next((n for n in ("1", "2") if wired[ref, n] == wired["U1", pin]), None)
+        assert near is not None, f"{ref} is not wired to U1 pin {pin}"
+        # beside its pin: left of the chip, within a fan-out of its pin row
+        assert pins[ref, near][0] < pins["U1", pin][0]
+        assert abs(pins[ref, near][1] - pins["U1", pin][1]) <= 6 * schgen.GRID + 1e-6
+    c_top, c_bottom = sorted([pins["C30", "1"], pins["C30", "2"]], key=lambda p: p[1])
+    assert c_top[0] == c_bottom[0]  # the V3 cap stands ...
+    assert _power_at(sch, c_bottom) == ("GND", 0)  # ... with GND below it
+    # one wire path from the pin to the resistor: no label of CH340_TXD between them breaks it
+    assert sum(1 for g in sexpr.children(sch, "global_label") if str(g[1]) == "CH340_TXD") == 1
+
+
+def test_first_pin_of_a_net_gets_no_stub(tmp_path: Path) -> None:
+    # a net on two neighbouring pins with nothing else on it in the block: both labels in line
+    parts: dict[str, tuple[str, list[tuple[str, int | None]]]] = {
+        "J1": ("simple_chip", [("DN1", 0), ("DP1", 1), ("DN2", 0), ("DP2", 1)]),
+        "U1": ("simple_chip", [("DN", 0), ("DP", 1)]),
+    }
+    path = _circuit(tmp_path, parts, {0: "USB_N", 1: "USB_P"})
+    tsx = tmp_path / "split.circuit.tsx"
+    tsx.write_text('{/* ===== a ===== */}\n<chip name="J1" />\n{/* ===== b ===== */}\n<chip name="U1" />\n')
+    sch = sexpr.loads(schgen.generate(path, "board", tsx, _no_library(tmp_path)))
+    pins = fixes._pin_positions(sch)
+    labels = [_at(g) for g in sexpr.children(sch, "global_label")]
+    reach = {
+        min(abs(x - pins["J1", n][0]) for x, y in labels if y == pins["J1", n][1]) for n in "1234"
+    }  # each pin's label: how far from the pin end
+    assert reach == {0.0}
+
+
+def test_text_width_matches_kicad_font() -> None:
+    # KiCad draws "TYPE-C-31-M-12" 18.4 mm wide at 1.27 mm; lower case is narrower
+    assert abs(schgen._text_w("TYPE-C-31-M-12") - 18.4) < 1.5
+    assert schgen._text_w("100nF") < schgen._text_w("100NF")

@@ -37,13 +37,13 @@ HALF = 1.27
 PIN_LENGTH = 2.54
 FONT = 1.27
 SMALL = 1.0  # reference / value of the two-terminal parts
-CHAR_W = 1.0  # width per character at 1.27 mm (generous)
+CHAR_W = 1.3  # width per capital / digit at 1.27 mm (KiCad font, measured: 18.4 mm for "TYPE-C-31-M-12")
 SMALL_CHAR_W = 1.0  # width per character at SMALL (KiCad font, measured)
 STUB = 2.54  # wire from a node to a part / label
 TWO_LEN = 7.62  # pin end to pin end of a two-terminal symbol
 TWO_TEXT = 2.286  # reference above / value below a horizontal two-terminal symbol
 BRANCH_EXTENT = 3.81  # room above / below the row of a two-terminal part
-MAX_JOG = 2 * GRID  # a library pin's tree may sit this far off its pin, else it moves next to the chip
+MAX_JOG = 8 * GRID  # a library pin's tree may sit this far off its pin (a fan-out), else it moves next to the chip
 LONG_PIN_ROW = 12  # on longer pin rows (MCUs) a tree must not push its neighbours at all
 CELL_GAP = 7.62
 BLOCK_PAD = 7.62
@@ -98,7 +98,11 @@ def _fmt(v: float) -> str:
 
 
 def _text_w(text: str) -> float:
-    return len(text) * CHAR_W
+    """Width of ``text`` at 1.27 mm: capitals and digits are wider than lower case, I / 1 / . narrower."""
+    return sum(0.5 * CHAR_W if c in _NARROW else 0.8 * CHAR_W if c.islower() else CHAR_W for c in text)
+
+
+_NARROW = set("Iil1.,:;'|!() ")
 
 
 def _font(size: float = FONT) -> str:
@@ -314,6 +318,8 @@ class Node:
     entries: list[Label | Rail | Branch] = field(default_factory=list)
     offset: float = 0.0  # a comb (see _combs): how far out its first cap stands, past the trees below it
     comb: bool = True  # False: drawn as a stack (the comb would have to stand too far from its pin)
+    flip: bool = False  # hanging caps (see _hangs) left of the pin: the first pin of a row, the others free
+    grounded: bool = False  # a signal pin's parts to ground, its label first (Block._ground_first)
 
 
 @dataclass
@@ -424,22 +430,19 @@ def _raw_extent(item: End | Branch, vertical: bool) -> tuple[float, float]:
 
 def _hangs(item: End, side: str) -> bool:
     """A supply pin on top of a chip with decoupling caps: drawn as a bus above it, caps hanging
-    down to GND (a tree growing upwards would stand the GND symbols on their heads)."""
-    return (
-        side == "up"
-        and isinstance(item, Node)
-        and len(item.entries) > 1
-        and isinstance(item.entries[0], Rail)
-        and all(isinstance(e, Branch) for e in item.entries[1:])
-    )
+    down to GND (a tree growing upwards would stand the GND symbols on their heads); a signal pin
+    with only caps to ground on it the same way, its label on top of the bus."""
+    return side == "up" and _decoupling(item)
 
 
 def _decoupling(item: End) -> bool:
-    """A supply pin's node: its rail symbol, then the decoupling caps (see Block._attach)."""
+    """A supply pin's node: its rail symbol, then the decoupling caps (see Block._attach); or a
+    signal pin's node with only parts to ground on it (a regulator's V3 cap, an RC filter's C):
+    its label, then those parts (see Block._ground_first)."""
     return (
         isinstance(item, Node)
         and len(item.entries) > 1
-        and isinstance(item.entries[0], Rail)
+        and (isinstance(item.entries[0], Rail) or (item.grounded and isinstance(item.entries[0], Label)))
         and all(isinstance(e, Branch) for e in item.entries[1:])
     )
 
@@ -452,7 +455,7 @@ def _combs(item: End, side: str) -> bool:
     return side in {"left", "right"} and _decoupling(item) and isinstance(item, Node) and item.comb
 
 
-COMB_MAX_OFFSET = 3 * GRID  # library symbols (fixed pin pitch): a comb standing further out is a stack
+COMB_MAX_OFFSET = 12 * GRID  # library symbols (fixed pin pitch): a comb standing further out is a stack
 COMB_DEPTH = TWO_LEN + 2 * GRID + 2 * HALF  # below the pin row: a standing cap and its GND symbol + name
 
 
@@ -492,9 +495,18 @@ def _comb_offset(
 
 
 def _hang_offsets(node: Node) -> tuple[list[float], float, float]:
-    """v offsets of the hanging caps right of the pin, and (before, after) of the whole drawing."""
+    """v offsets of the hanging caps right of the pin (``Node.flip``: left of it, each text still to
+    the right of its cap), and (before, after) of the whole drawing."""
     before, x = _extent(node.entries[0], True)
     offsets = []
+    if node.flip:
+        x = before
+        for entry in node.entries[1:]:
+            assert isinstance(entry, Branch)
+            x = _snap(x + 2 * GRID + HALF + _part_text(entry.part), HALF)
+            offsets.append(-x)
+            x += HALF
+        return offsets, _snap(x + GRID, HALF), before
     for entry in node.entries[1:]:
         assert isinstance(entry, Branch)
         x = _snap(x + GRID, HALF)
@@ -515,7 +527,10 @@ def _slot_extent(item: End, side: str) -> tuple[float, float]:
 def _slot_width(item: End, side: str, global_nets: set[str]) -> float:
     """Reach of a pin's attachment outwards from the pin."""
     if isinstance(item, Node) and _hangs(item, side):
-        return STUB + TWO_LEN + 2 * GRID + HALF + GRID
+        head = item.entries[0]
+        return (
+            STUB + TWO_LEN + 2 * GRID + HALF + (_width(head, global_nets) - STUB if isinstance(head, Label) else GRID)
+        )
     if isinstance(item, Node) and _combs(item, side):
         return _comb_offsets(item, side)[1] + _width(item.entries[0], global_nets)
     return _width(item, global_nets, side in {"up", "down"})
@@ -538,7 +553,7 @@ def _width(item: End | Branch, global_nets: set[str], vertical: bool = False) ->
     if isinstance(item, Node):
         return max((_width(e, global_nets, vertical) for e in item.entries), default=0.0)
     if isinstance(item, Label):
-        return STUB + _text_w(item.net) + (4 * HALF if item.net in global_nets else 3 * HALF)
+        return STUB + _text_w(item.net) + (3 * HALF if item.net in global_nets else 2 * HALF)
     if isinstance(item, Rail):
         return 2 * GRID + HALF if vertical else 2 * GRID + _text_w(item.net)
     return 0.0
@@ -767,9 +782,10 @@ class Sheet:
     def hanging(self, node: Node, f: Frame, u: float, v: float) -> None:
         """See :func:`_hangs`: pin up to a bus carrying the rail symbol, caps hanging from the bus."""
         top = u + STUB + TWO_LEN + 2 * GRID + HALF
-        assert isinstance(node.entries[0], Rail)
         self.wire(*f.pt(u, v), *f.pt(top, v))
-        self.rail(node.entries[0].net, *f.pt(top, v), "up")
+        head = node.entries[0]
+        assert isinstance(head, Rail | Label)
+        self.end(head, f, top, v)  # rail symbol / label on top, pointing up
         offsets, _, _ = _hang_offsets(node)
         down = Frame(*f.pt(top, 0), "down")
         prev = v
@@ -794,8 +810,9 @@ class Sheet:
             self.two(entry.part, entry.near, down, 0, 0)
             self.end(entry.end, down, TWO_LEN, 0)
         self.wire(*f.pt(prev, v), *f.pt(u + end, v))
-        assert isinstance(node.entries[0], Rail)
-        self.rail(node.entries[0].net, *f.pt(u + end, v), f.side)
+        head = node.entries[0]
+        assert isinstance(head, Rail | Label)
+        self.end(head, f, u + end, v)
 
     def node(self, node: Node, f: Frame, u: float = 0.0, v: float = 0.0) -> None:
         if _combs(node, f.side):
@@ -1026,6 +1043,7 @@ class Block:
                 end = Label(far.net)
             else:
                 end = self._build(far.net)
+                end = end if end.entries else Label(far.net)  # nothing hangs on it: no stub before its label
             node.entries.append(Branch(part, pin, far, end))
         return node
 
@@ -1044,7 +1062,8 @@ class Block:
             return node
         if pin.net in self.wired:
             return Label(pin.net)
-        return self._build(pin.net)
+        node = self._build(pin.net)
+        return node if node.entries else Label(pin.net)  # in line with the label of its next pin
 
     def _cells(self) -> list[Cell]:
         chips = [p for p in self.parts if not p.two]
@@ -1085,6 +1104,9 @@ class Block:
             root.entries.insert(0, Label(net))
             roots.append((self.ctx, root))
         bank = [p for p in self.parts if p.two and p.name not in self.placed]
+        for row in attached:
+            for a in row:
+                self._ground_first(a)
         self._label_nodes([*(a for row in attached for a in row), *(r for _, r in roots)])
         cells = []
         for chip, row in zip(chips, attached, strict=True):
@@ -1104,6 +1126,18 @@ class Block:
         cells += [self._root_cell(r) for owner, r in roots if owner not in {c.name for c in chips}]
         cells += [self._bank_cell(p) for p in bank if self.owner.get(p.name) not in {c.name for c in chips}]
         return cells
+
+    def _ground_first(self, item: End) -> None:
+        """A chip pin's node whose parts all go to ground: its label first, so it draws as a comb
+        (caps standing at the pin, GND below, the label at the end) and pushes no neighbour."""
+        if (
+            isinstance(item, Node)
+            and item.net not in self.rails
+            and item.entries
+            and all(isinstance(e, Branch) and isinstance(e.end, Rail) and is_ground(e.end.net) for e in item.entries)
+        ):
+            item.entries.insert(0, Label(item.net))
+            item.grounded = True
 
     def _label_nodes(self, tops: list[End]) -> None:
         """Label every wired net: KiCad names an unlabelled one after a pin of its own choice,
@@ -1190,8 +1224,8 @@ class Block:
                 break
             acc += h
         sides = [slots[:split], slots[split:]]
-        longest = max(len(p.name) for p in chip.pins)
-        half_w = _snap(max(2 * GRID, longest * CHAR_W + GRID))
+        longest = max(_text_w(p.name) for p in chip.pins) * SMALL / FONT  # pin names at SMALL
+        half_w = _snap(max(2 * GRID, longest + GRID))
         pin_y: dict[str, float] = {}
         side_h = []
         for side in sides:
@@ -1311,12 +1345,18 @@ class Block:
                     a = _strongest([attach_of[lp.number] for lp in run])
                     before, after = _slot_extent(a, side) if a is not None else (0.0, 0.0)
                     v_p = v_of(run[-1])
+                    if isinstance(a, Node) and _hangs(a, side) and not a.flip and prev_end == -math.inf:
+                        nxt = min((v for v in connected if v > v_p + 1e-6), default=math.inf)
+                        if v_p + after + HALF > nxt + 1e-6:  # the caps would push the pins after it
+                            a.flip = True
+                            before, after = _slot_extent(a, side)
                     v_s = v_p if a is None or prev_end == -math.inf else max(v_p, _snap(prev_end + before, HALF))
                     next_v = min((v for v in connected if v > v_p + 1e-6), default=math.inf)
                     pushes = v_s > v_p + 1e-6 or v_p + after + HALF > next_v + 1e-6
                     if (
                         isinstance(a, Node)
                         and a.net not in self.rails
+                        and not _combs(a, side)
                         and (v_s - v_p > MAX_JOG or (long_row and pushes))
                     ):
                         rest = [e for e in a.entries if not (isinstance(e, Label) and e.net == a.net)]
@@ -1365,14 +1405,17 @@ class Block:
                     after = COMB_DEPTH if _combs(a, side) else after
                     spans.append((v_s - before, v_s + after, u0 + _slot_width(a, side, self.global_nets)))
             end = -math.inf
+            u_col = 0.0  # one column: the trees' labels in line, past every attachment they sit beside
             for v_p, tree in outer:
                 before, after = _extent(tree, vertical)
                 v = v_p if end == -math.inf else max(v_p, _snap(end + max(before, HALF) + GRID, HALF))
                 lo, hi = v - max(before, HALF) - GRID, v + max(after, HALF) + GRID
                 clear = max((w for a, b, w in spans if a < hi and b > lo), default=0.0)
                 reach = _width(Label(tree.net), self.global_nets) - STUB
-                column.append((_snap(clear + 2 * GRID + reach), v, tree))
+                u_col = max(u_col, _snap(clear + 2 * GRID + reach))
+                column.append((0.0, v, tree))
                 end = v + max(after, HALF)
+            column = [(u_col, v, tree) for _, v, tree in column]
             plans.append((side, vertical, base, n_of, slots, lanes, u0, column))
 
         def draw_at(sheet: Sheet, cx: float, cy: float) -> None:
