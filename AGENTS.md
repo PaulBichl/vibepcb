@@ -184,6 +184,8 @@ test in `tests/test_fixes.py` against the fixtures in `tests/data/`.
   footprint name): before assigning pins by side, check where each pin group lands (port positions in
   the circuit JSON) and rotate the part so its groups face their partners. A bus too wide for one side:
   split it over both corners next to the partner, not around one corner.
+- Diodes / LEDs: tscircuit's pad 1 is the anode, JLCPCB's zero orientation has the cathode as pad 1 (left);
+  `fab` turns them by 180 deg in the CPL (`tscircuit.anode_first_refs`). Imported diode parts keep their own pads.
 - Check display/connector footprints' orientation against the datasheet in the 3D render
   (`fab` top PNG): a dip12 7-segment rotated 90 deg passed every check but read sideways.
 - Differential pairs (USB, LVDS): tscircuit's `<differentialpair>` only matches lengths, its router doesn't couple the

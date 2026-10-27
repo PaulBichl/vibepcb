@@ -21,6 +21,7 @@ from vibepcb import proc, sexpr
 from vibepcb.sexpr import Sym
 
 if TYPE_CHECKING:
+    from collections.abc import Collection
     from subprocess import CompletedProcess
 
     from vibepcb.sexpr import Node
@@ -310,13 +311,13 @@ def export_schematic_svg(sch: Path, out_dir: Path) -> Path:
     return out_dir / f"{sch.stem}.svg"
 
 
-def export_fab(pcb: Path, out_dir: Path, work_dir: Path) -> list[Path]:
+def export_fab(pcb: Path, out_dir: Path, work_dir: Path, *, rotate_180: Collection[str] = ()) -> list[Path]:
     """The fab set in ``out_dir``, one file per purpose; returns the files written.
 
     ``<stem>-gerbers.zip`` (gerbers + drill), ``<stem>-bom.csv`` and ``<stem>-cpl.csv`` in JLCPCB's
     PCBA upload format (BOM with MPN too, see :func:`jlcpcb_files`), ``<stem>-schematic.pdf`` and
     top / bottom 3D renders. Intermediate KiCad exports (single gerbers, KiCad BOM / positions) go
-    to ``work_dir``.
+    to ``work_dir``. ``rotate_180``: references turned by 180 deg in the CPL (see :func:`jlcpcb_files`).
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     for old in out_dir.iterdir():  # earlier layouts left more files here
@@ -340,7 +341,7 @@ def export_fab(pcb: Path, out_dir: Path, work_dir: Path) -> list[Path]:
     bom = export_bom(pcb, work_dir / f"{pcb.stem}-bom-kicad.csv")
     return [
         archive,
-        *jlcpcb_files(bom, pos, out_dir, pcb.stem),
+        *jlcpcb_files(bom, pos, out_dir, pcb.stem, rotate_180=rotate_180),
         export_schematic_pdf(pcb, out_dir),
         *export_renders(pcb, out_dir),
     ]
@@ -444,11 +445,13 @@ def publish_project(kicad_dir: Path, stem: str, target: Path) -> list[Path]:
     return written
 
 
-def jlcpcb_files(bom: Path, pos: Path, out_dir: Path, stem: str) -> list[Path]:
+def jlcpcb_files(bom: Path, pos: Path, out_dir: Path, stem: str, *, rotate_180: Collection[str] = ()) -> list[Path]:
     """BOM (Comment/Designator/Footprint/LCSC Part #, plus MPN and Qty) and CPL
     (Designator/Mid X/Mid Y/Layer/Rotation) in JLCPCB's PCBA upload format, from the KiCad exports.
 
-    Footprints without a reference (mounting holes) are left out of the CPL.
+    Footprints without a reference (mounting holes) are left out of the CPL. ``rotate_180``: references whose
+    footprint is the reverse of JLCPCB's zero orientation (tscircuit's diodes / LEDs: pad 1 = anode, JLCPCB places
+    a diode with its cathode on the left at 0 deg, IPC-7351), turned by 180 deg.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     jlc_bom, jlc_cpl = out_dir / f"{stem}-bom.csv", out_dir / f"{stem}-cpl.csv"
@@ -470,7 +473,7 @@ def jlcpcb_files(bom: Path, pos: Path, out_dir: Path, stem: str) -> list[Path]:
                         f"{float(row['PosX']):.4f}mm",
                         f"{float(row['PosY']):.4f}mm",
                         side,
-                        f"{float(row['Rot']):g}",
+                        f"{(float(row['Rot']) + (180 if row['Ref'] in rotate_180 else 0)) % 360:g}",
                     ]
                 )
     return [jlc_bom, jlc_cpl]

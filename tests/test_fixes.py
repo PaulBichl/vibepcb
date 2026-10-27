@@ -531,6 +531,8 @@ def test_jlcpcb_files(tmp_path: Path) -> None:
         "Designator,Mid X,Mid Y,Layer,Rotation",
         "R1,10.5000mm,-20.2500mm,Top,90",
     ]
+    out = kicad.jlcpcb_files(bom, pos, tmp_path / "fab", "b", rotate_180={"R1"})  # a tscircuit diode / LED
+    assert out[1].read_text(encoding="utf-8").splitlines()[1] == "R1,10.5000mm,-20.2500mm,Top,270"
 
 
 def test_repair_zero_width_tracks(project: fixes.KicadProject) -> None:

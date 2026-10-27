@@ -233,6 +233,21 @@ def board_clearance(circuit_json: Path) -> float | None:
     return float(value) if isinstance(value, int | float) else None
 
 
+def anode_first_refs(circuit_json: Path) -> set[str]:
+    """References whose pin 1 is an anode (tscircuit's ``<diode>`` / ``<led>``): their footprints are the reverse of
+    JLCPCB's zero orientation for diodes (cathode = pad 1, on the left), so the CPL turns them by 180 deg."""
+    elements = json.loads(circuit_json.read_text(encoding="utf-8"))
+    names = {e["source_component_id"]: e.get("name", "") for e in elements if e.get("type") == "source_component"}
+    return {
+        names[e["source_component_id"]]
+        for e in elements
+        if e.get("type") == "source_port"
+        and e.get("source_component_id") in names
+        and (e.get("pin_number") == 1 or e.get("name") == "pin1")
+        and "anode" in (e.get("port_hints") or [])
+    }
+
+
 def circuit_errors(circuit_json: Path, only: tuple[str, ...] | None = None) -> tuple[int, str]:
     """Blocking errors in a circuit JSON (``*_error`` elements; just the types in ``only``) and a short report."""
     elements = json.loads(circuit_json.read_text(encoding="utf-8"))

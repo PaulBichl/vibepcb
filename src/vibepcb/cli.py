@@ -652,6 +652,32 @@ def cmd_check(board: str, *, strict: bool = False) -> int:
             pcb.write_bytes(backup)
             drc = kicad.run_drc(pcb, reports / "drc.json")
         loaded = fixes.KicadProject.load(project, board)
+    if drc.errors:  # a last local touch-up of what is left (a T the split exposed, a gap a hair short), kept only
+        backup = pcb.read_bytes()  # if KiCad then reports fewer errors and nothing lost its connection
+        touched = (
+            fixes.tuck_corners_into_pads(loaded)
+            + fixes.reroute_tracks(loaded)
+            + folds(loaded)
+            + fixes.square_tees(loaded)
+            + fixes.push_tracks_clear(loaded)
+            + fixes.split_at_tees(loaded)
+            + folds(loaded)
+        )
+        if touched:
+            loaded.save()
+            after = kicad.run_drc(pcb, reports / "drc.json")
+            if (
+                after.errors < drc.errors
+                and after.unconnected <= drc.unconnected
+                and not _pad_spots(after) - _pad_spots(drc)
+            ):
+                drc = after
+                for change in touched:
+                    print(f"  final touch-up: {change}")
+            else:
+                pcb.write_bytes(backup)
+                drc = kicad.run_drc(pcb, reports / "drc.json")
+            loaded = fixes.KicadProject.load(project, board)
     corners = fixes.sharp_corners(loaded)
     unpoured = fixes.unpoured_copper_layers(loaded)
     summary = [str(erc), str(drc), f"Track bends: {len(corners)} sharper than 135 deg"]
@@ -762,7 +788,13 @@ def cmd_fab(board: str) -> int:
             warnings = tscircuit.availability_warnings(tscircuit.prepared_source(source, paths.work_dir(board) / "src"))
         print("\n".join(f"  {w}" for w in warnings) if warnings else "  all parts available")
     with _phase("fab exports (gerbers, BOM, CPL, PDF, renders)"):
-        fab_files = kicad.export_fab(pcb, paths.board_out(board) / "fab", paths.work_dir(board) / "fab")
+        circuit = paths.raw_dir(board) / f"{board}.circuit.json"
+        flipped = tscircuit.anode_first_refs(circuit) if circuit.exists() else set()
+        fab_files = kicad.export_fab(
+            pcb, paths.board_out(board) / "fab", paths.work_dir(board) / "fab", rotate_180=flipped
+        )
+    if flipped:
+        print(f"  CPL: {', '.join(sorted(flipped))} turned 180 deg (pad 1 = anode; JLCPCB: cathode = pad 1)")
     for f in fab_files:
         print(f"  {f.relative_to(paths.ROOT)}")
         _written(f)

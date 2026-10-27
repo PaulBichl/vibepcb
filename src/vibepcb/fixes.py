@@ -3276,27 +3276,37 @@ TUCK_STEPS = 20
 
 
 def tuck_corners_into_pads(project: KicadProject) -> list[str]:
-    """Move a sharp bend lying just outside a pad of its net onto that pad.
+    """Move a sharp bend or an acute junction lying just outside a pad of its net onto that pad.
 
-    The router sometimes turns a track a hair before the pad it ends at (seen: a USB-C D- pad, 45.8 deg 0.1 mm
-    off the pad); on the pad the bend is pad copper, which neither KiCad's ``track_angle`` nor
-    :func:`sharp_corners` judges. The bend slides towards the pad centre to the first spot inside the pad where
-    both of its tracks keep their clearance.
+    The router sometimes turns a track, or joins several, a hair before the pad they end at (seen: a USB-C D- pad,
+    45.8 deg 0.1 mm off the pad; three VCC tracks meeting at 41 deg beside a VBUS pad); on the pad the vertex is
+    pad copper, which neither KiCad's ``track_angle`` nor :func:`sharp_corners` judges. Every track ending at the
+    vertex moves with it, towards the pad centre, to the first spot inside the pad where all of them keep their
+    clearance.
     """
     clearance, edge_clearance = _design_clearances(project)
     changes = []
-    for net, p, angle in sharp_corners(project):
+    for net, p, angle in _acute_vertices(project):
         copper = _copper(project.pcb)
         at = [
             s
             for s in copper.segs_by_net.get(net, [])
             if math.dist(s.a, p) <= tracks.EPS or math.dist(s.b, p) <= tracks.EPS
         ]
-        if len(at) != 2 or at[0].layer != at[1].layer:
+        layers = {s.layer for s in at}
+        if len(at) < 2 or len(layers) != 1:
             continue
-        layer = at[0].layer
+        layer = next(iter(layers))
         pads = [o for o in copper.pads_by_net.get(net, []) if layer in o.layers and o.distance(p, p) <= TUCK_REACH_MM]
-        if not pads:
+        half = max(s.width for s in at) / 2
+
+        def deep(q: tracks.Point, o: tracks.Obstacle, half: float = half) -> bool:  # the vertex's copper all on the pad
+            return all(
+                o.distance(c, c) <= tracks.EPS
+                for c in ((q[0] + half, q[1]), (q[0] - half, q[1]), (q[0], q[1] + half), (q[0], q[1] - half))
+            )
+
+        if not pads or any(deep(p, o) for o in pads):
             continue
         pad = min(pads, key=lambda o: o.distance(p, p))
         fars = [s.b if math.dist(s.a, p) <= tracks.EPS else s.a for s in at]
@@ -3304,28 +3314,82 @@ def tuck_corners_into_pads(project: KicadProject) -> list[str]:
         spot = None
         for k in range(1, TUCK_STEPS + 1):
             q = (p[0] + (pad.centre[0] - p[0]) * k / TUCK_STEPS, p[1] + (pad.centre[1] - p[1]) * k / TUCK_STEPS)
-            if pad.distance(q, q) > tracks.EPS:
+            if not deep(q, pad):
                 continue
-            if all(
-                o.distance(f, q) >= clearance + s.width / 2 - tracks.EPS
-                for s, f in zip(at, fars, strict=True)
-                for o in others
-            ) and all(
-                e.distance(f, q) >= edge_clearance + s.width / 2
-                for s, f in zip(at, fars, strict=True)
-                for e in copper.edges
+            pairs = list(zip(at, fars, strict=True))
+            if all(o.distance(f, q) >= clearance + s.width / 2 - tracks.EPS for s, f in pairs for o in others) and all(
+                e.distance(f, q) >= edge_clearance + s.width / 2 for s, f in pairs for e in copper.edges
             ):
                 spot = q
                 break
-        if spot is None:
+        if spot is None:  # no room on the pad: a track may end at a via of the net next to the vertex instead
+            if (moved := _reanchor_at_via(copper, net, p, at, fars, others, clearance)) is not None:
+                changes.append(f"{net} track meeting others at {angle:.1f} deg at ({_mm(p[0])}, {_mm(p[1])}) {moved}")
             continue
         for s in at:
             key = "start" if math.dist(s.a, p) <= tracks.EPS else "end"
             node = sexpr.child(_source(s), key)
             assert node is not None
             node[1:3] = [Sym(_mm(spot[0])), Sym(_mm(spot[1]))]
-        changes.append(f"{net} bend of {angle:.1f} deg at ({_mm(p[0])}, {_mm(p[1])}) moved onto its pad")
+        changes.append(
+            f"{net} {len(at)} track(s) meeting at {angle:.1f} deg at ({_mm(p[0])}, {_mm(p[1])}) moved onto its pad"
+        )
     return changes
+
+
+REANCHOR_REACH_MM = 0.6  # a via of the net this close to an acute vertex may take one of its tracks
+
+
+def _reanchor_at_via(
+    copper: _Copper,
+    net: str,
+    p: tracks.Point,
+    at: list[tracks.Seg],
+    fars: list[tracks.Point],
+    others: list[tracks.Obstacle],
+    clearance: float,
+) -> str | None:
+    """Re-point one track of an acute vertex from the vertex to a nearby via of its net (the vertex keeps its other
+    tracks, so nothing comes apart); the first that keeps its clearance, shortest track first. Returns the change."""
+    vias = [c for c, r in copper.vias_by_net.get(net, []) if tracks.EPS < math.dist(c, p) <= REANCHOR_REACH_MM]
+    for c in sorted(vias, key=lambda c: (math.dist(c, p), c)):
+        for s, f in sorted(zip(at, fars, strict=True), key=lambda sf: math.dist(sf[1], p)):
+            if math.dist(f, c) <= tracks.EPS or any(
+                math.dist(c, t.a) <= tracks.EPS or math.dist(c, t.b) <= tracks.EPS for t in [s]
+            ):
+                continue
+            if all(o.distance(f, c) >= clearance + s.width / 2 - tracks.EPS for o in others):
+                key = "start" if math.dist(s.a, p) <= tracks.EPS else "end"
+                node = sexpr.child(_source(s), key)
+                assert node is not None
+                node[1:3] = [Sym(_mm(c[0])), Sym(_mm(c[1]))]
+                return f"re-pointed to the via at ({_mm(c[0])}, {_mm(c[1])})"
+    return None
+
+
+def _acute_vertices(project: KicadProject) -> list[tuple[str, tracks.Point, float]]:
+    """(net, point, smallest angle) of every track vertex with a bend sharper than 135 deg (two tracks, also where
+    :func:`sharp_corners` lets a nearby pad or a third track end count as cover) or two of its tracks meeting at an
+    acute angle (a junction of three or more)."""
+    out = {(n, (round(q[0], 6), round(q[1], 6))): a for n, q, a in sharp_corners(project)}
+    copper = _copper(project.pcb)
+    for net, segs in copper.segs_by_net.items():
+        ends: dict[tuple[str, tuple[int, int]], list[tuple[tracks.Point, tracks.Point]]] = {}
+        for s in segs:
+            for e, f in ((s.a, s.b), (s.b, s.a)):
+                ends.setdefault((s.layer, tracks._key(e)), []).append((e, f))
+        for group in ends.values():
+            if len(group) < 2:
+                continue
+            p = group[0][0]
+            worst = min(tracks.interior_angle(f, p, g) for (_, f), (_, g) in itertools.combinations(group, 2))
+            if worst < (tracks.MIN_CORNER_DEG - CORNER_TOLERANCE_DEG if len(group) == 2 else ACUTE_DEG):
+                key = (net, (round(p[0], 6), round(p[1], 6)))
+                out[key] = min(worst, out.get(key, 180.0))
+    return [(n, q, a) for (n, q), a in sorted(out.items())]
+
+
+ACUTE_DEG = 89.0  # KiCad's track_angle minimum (the house rule)
 
 
 def _piece_key(a: tracks.Point, b: tracks.Point) -> frozenset[tuple[int, int]]:
