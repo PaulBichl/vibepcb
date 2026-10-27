@@ -233,11 +233,18 @@ def board_clearance(circuit_json: Path) -> float | None:
     return float(value) if isinstance(value, int | float) else None
 
 
+ANODE_FIRST_FTYPES = ("simple_diode", "simple_led")
+
+
 def anode_first_refs(circuit_json: Path) -> set[str]:
     """References whose pin 1 is an anode (tscircuit's ``<diode>`` / ``<led>``): their footprints are the reverse of
     JLCPCB's zero orientation for diodes (cathode = pad 1, on the left), so the CPL turns them by 180 deg."""
     elements = json.loads(circuit_json.read_text(encoding="utf-8"))
-    names = {e["source_component_id"]: e.get("name", "") for e in elements if e.get("type") == "source_component"}
+    names = {  # capacitors carry an "anode" hint on pin 1 too (polarity of electrolytics): diodes and LEDs only
+        e["source_component_id"]: e.get("name", "")
+        for e in elements
+        if e.get("type") == "source_component" and e.get("ftype") in ANODE_FIRST_FTYPES
+    }
     return {
         names[e["source_component_id"]]
         for e in elements

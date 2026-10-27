@@ -141,7 +141,9 @@ def test_board_clearance(tmp_path: Path) -> None:
 def test_anode_first_refs(tmp_path: Path) -> None:
     circuit = tmp_path / "c.json"
     elements = [
-        {"type": "source_component", "source_component_id": "a", "name": "D1"},
+        {"type": "source_component", "source_component_id": "a", "name": "D1", "ftype": "simple_diode"},
+        {"type": "source_component", "source_component_id": "c", "name": "C1", "ftype": "simple_capacitor"},
+        {"type": "source_port", "source_component_id": "c", "name": "pin1", "pin_number": 1, "port_hints": ["anode"]},
         {"type": "source_port", "source_component_id": "a", "name": "pin1", "pin_number": 1, "port_hints": ["anode"]},
         {"type": "source_component", "source_component_id": "b", "name": "U1"},
         {"type": "source_port", "source_component_id": "b", "name": "pin1", "pin_number": 1, "port_hints": ["VCC"]},

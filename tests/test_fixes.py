@@ -1375,6 +1375,26 @@ def test_drop_folded_back_tracks(project: fixes.KicadProject) -> None:
     assert fixes.drop_folded_back_tracks(project) == []
 
 
+def test_mask_covered_pads(project: fixes.KicadProject) -> None:
+    # a pad the TSX covers with soldermask (a touch electrode) loses its mask layer
+    fp = next(f for f in sexpr.children(project.pcb, "footprint") if sexpr.property_value(f, "Reference") == "R1")
+    raw = project.directory.parent / ".work" / "raw"
+    raw.mkdir(parents=True)
+    elements = [
+        {"type": "source_component", "source_component_id": "sc", "name": "R1"},
+        {"type": "source_port", "source_port_id": "sp", "source_component_id": "sc", "pin_number": 1},
+        {"type": "pcb_port", "pcb_port_id": "pp", "source_port_id": "sp"},
+        {"type": "pcb_smtpad", "pcb_smtpad_id": "pad", "pcb_port_id": "pp", "is_covered_with_solder_mask": True},
+    ]
+    (raw / "board.circuit.json").write_text(json.dumps(elements), encoding="utf-8")
+    assert fixes.mask_covered_pads(project) == ["R1 pad 1: covered with soldermask (no mask opening)"]
+    pad1 = next(p for p in sexpr.children(fp, "pad") if str(p[1]) == "1")
+    layers = sexpr.child(pad1, "layers")
+    assert layers is not None
+    assert not any(str(x).endswith(".Mask") for x in layers[1:])
+    assert fixes.mask_covered_pads(project) == []
+
+
 def test_net_node_track_form(project: fixes.KicadProject) -> None:
     # tracks / vias take (net <id>); a pad's (net <id> "<name>") on a via crashes kicad-cli's DRC
     for n in [n for n in project.pcb if sexpr.head(n) in ("segment", "via")]:

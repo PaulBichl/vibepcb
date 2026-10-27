@@ -87,6 +87,39 @@ def _raw_circuit(project: KicadProject) -> Path:
     return work if work.exists() else project.directory.parent / "raw" / f"{stem}.circuit.json"
 
 
+def mask_covered_pads(project: KicadProject) -> list[str]:
+    """Pads the TSX covers with soldermask (``<smtpad coveredWithSolderMask />``) lose their mask opening.
+
+    tscircuit's KiCad export writes every pad with its mask layer, so a capacitive touch electrode came out as bare
+    copper (a finger on it needs a series resistor against ESD; under mask the sensor works through it).
+    """
+    circuit = _raw_circuit(project)
+    if not circuit.exists():
+        return []
+    elements = json.loads(circuit.read_text(encoding="utf-8"))
+    by_id = {e.get(f"{e['type']}_id"): e for e in elements if isinstance(e, dict) and "type" in e}
+    covered: set[tuple[str, str]] = set()
+    for e in elements:
+        if e.get("type") != "pcb_smtpad" or not e.get("is_covered_with_solder_mask"):
+            continue
+        port = by_id.get(e.get("pcb_port_id"), {})
+        source = by_id.get(port.get("source_port_id"), {})
+        comp = by_id.get(source.get("source_component_id"), {})
+        if comp.get("name") and source.get("pin_number") is not None:
+            covered.add((str(comp["name"]), str(source["pin_number"])))
+    changes = []
+    for ref, fp in _footprints_by_ref(project.pcb).items():
+        for pad in sexpr.children(fp, "pad"):
+            if (ref, str(pad[1])) not in covered or (layers := sexpr.child(pad, "layers")) is None:
+                continue
+            masks = [x for x in layers[1:] if str(x).endswith(".Mask")]
+            for m in masks:
+                layers.remove(m)
+            if masks:
+                changes.append(f"{ref} pad {pad[1]}: covered with soldermask (no mask opening)")
+    return changes
+
+
 def _escape_plans(project: KicadProject) -> list[fanout.Plan]:
     """The escape plans ``build`` saved next to the circuit JSON (``vibepcb.fanout``)."""
     name = f"{project.pcb_path.stem}.escapes.json"
@@ -5073,6 +5106,7 @@ FIXES: dict[str, Fix] = {
     "apply_rule_profiles": apply_rule_profiles,
     "apply_board_config": apply_board_config,  # before the routing: the router reads the net classes
     "apply_escapes": apply_escapes,
+    "mask_covered_pads": mask_covered_pads,
     "apply_pours": apply_pours,
     "pours_to_board_outline": pours_to_board_outline,
     "apply_keepouts": apply_keepouts,
