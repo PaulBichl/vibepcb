@@ -1126,18 +1126,19 @@ def add_part_numbers(project: KicadProject) -> list[str]:
 
 
 def mark_dnp_parts(project: KicadProject) -> list[str]:
-    """Mark tscircuit's ``doNotPlace`` parts DNP on the symbol and the footprint.
+    """Keep tscircuit's ``doNotPlace`` parts (bare pads: ISP headers, antenna / touch pads) out of BOM and CPL.
 
-    Neither the KiCad export nor ``schgen`` carries the flag, so unpopulated pads (ISP headers,
-    antenna / touch pads) landed in the fab BOM and CPL. ``fab`` exports both with ``--exclude-dnp``
-    (BOM from the symbols, CPL from the footprints), so both get it.
+    Neither the KiCad export nor ``schgen`` carries the flag, so those pads landed in the fab BOM and CPL. They
+    are board features, not parts left off: the symbol goes ``in_bom no`` and the footprint ``board_only`` /
+    out of BOM and position files, like a test point. (A KiCad DNP flag drew a big red cross over each of them
+    in the schematic, as if the antenna or the touch pad were missing from the board.)
     """
     circuit = _raw_circuit(project)
     if not circuit.exists():
         return []
     elements = json.loads(circuit.read_text(encoding="utf-8"))
     names = {e["source_component_id"]: str(e.get("name")) for e in elements if e.get("type") == "source_component"}
-    dnp = {
+    unplaced = {
         names[e["source_component_id"]]
         for e in elements
         if e.get("type") == "pcb_component" and e.get("do_not_place") and e.get("source_component_id") in names
@@ -1145,24 +1146,32 @@ def mark_dnp_parts(project: KicadProject) -> list[str]:
     changes = []
     for symbol in sexpr.children(project.sch, "symbol"):
         ref = sexpr.property_value(symbol, "Reference") or ""
-        flag = sexpr.child(symbol, "dnp")
-        if ref in dnp and (flag is None or flag[1] != Sym("yes")):
-            if flag is None:
-                symbol.append([Sym("dnp"), Sym("yes")])
-            else:
-                flag[1] = Sym("yes")
-            changes.append(f"{ref}: symbol DNP")
+        if ref not in unplaced:
+            continue
+        flag, dnp = sexpr.child(symbol, "in_bom"), sexpr.child(symbol, "dnp")
+        changed = False
+        if flag is not None and flag[1] != Sym("no"):
+            flag[1] = Sym("no")
+            changed = True
+        if dnp is not None and dnp[1] != Sym("no"):
+            dnp[1] = Sym("no")
+            changed = True
+        if changed:
+            changes.append(f"{ref}: symbol out of the BOM (board feature)")
+    wanted = [Sym("board_only"), Sym("exclude_from_pos_files"), Sym("exclude_from_bom")]
     for fp in sexpr.children(project.pcb, "footprint"):
         ref = sexpr.property_value(fp, "Reference") or ""
-        attr = sexpr.child(fp, "attr")
-        if ref not in dnp or (attr is not None and Sym("dnp") in attr):
+        if ref not in unplaced:
             continue
+        attr = sexpr.child(fp, "attr")
         if attr is None:
             props = [i for i, item in enumerate(fp) if sexpr.head(item) == "property"]
-            fp.insert(props[-1] + 1 if props else len(fp), [Sym("attr"), Sym("dnp")])
+            fp.insert(props[-1] + 1 if props else len(fp), [Sym("attr"), *wanted])
+        elif missing := [w for w in wanted if w not in attr]:
+            attr.extend(missing)
         else:
-            attr.append(Sym("dnp"))
-        changes.append(f"{ref}: footprint DNP")
+            continue
+        changes.append(f"{ref}: footprint board_only, out of BOM and CPL")
     return changes
 
 
@@ -4245,6 +4254,43 @@ def apply_board_config(project: KicadProject) -> list[str]:
     return changes
 
 
+# KiCad's own net class defaults for the schematic side (what KiCad writes for a new class)
+NETCLASS_SCHEMATIC_DEFAULTS: dict[str, Any] = {
+    "wire_width": 6,  # mils
+    "bus_width": 12,
+    "line_style": 0,
+    "schematic_color": "rgba(0, 0, 0, 0.000)",  # transparent = the colour theme's
+    "pcb_color": "rgba(0, 0, 0, 0.000)",
+}
+
+
+def complete_netclasses(project: KicadProject) -> list[str]:
+    """Give every net class of the .kicad_pro the schematic keys KiCad expects (wire width, colour, line style).
+
+    tscircuit's export and the rule fixes write the PCB keys only; without ``wire_width`` / ``schematic_color``
+    KiCad drew every schematic wire with no stroke at all: the plotted SVG / PDF (and the preview) showed parts
+    and labels but none of the wires between them.
+    """
+    pro = project.pcb_path.with_suffix(".kicad_pro")
+    if not pro.exists():
+        return []
+    data = json.loads(pro.read_text(encoding="utf-8"))
+    classes = data.setdefault("net_settings", {}).setdefault("classes", [])
+    if not any(c.get("name") == "Default" for c in classes):
+        classes.insert(0, {"name": "Default"})
+    changes = []
+    for cls in classes:
+        missing = {k: v for k, v in NETCLASS_SCHEMATIC_DEFAULTS.items() if k not in cls}
+        if "priority" not in cls:
+            missing["priority"] = 2147483647 if cls.get("name") == "Default" else 0  # KiCad's: Default lowest
+        if missing:
+            cls.update(missing)
+            changes.append(f"{pro.name}: net class {cls.get('name')}: schematic keys {', '.join(missing)}")
+    if changes:
+        pro.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    return changes
+
+
 def apply_rule_profiles(project: KicadProject) -> list[str]:
     """Design / manufacturing rule profiles (``[rules]`` in ``vibepcb.toml``, see ``vibepcb.rules``).
 
@@ -5105,6 +5151,7 @@ FIXES: dict[str, Fix] = {
     "propagate_split_pad_nets": propagate_split_pad_nets,
     "apply_rule_profiles": apply_rule_profiles,
     "apply_board_config": apply_board_config,  # before the routing: the router reads the net classes
+    "complete_netclasses": complete_netclasses,  # after the classes are written: their schematic keys
     "apply_escapes": apply_escapes,
     "mask_covered_pads": mask_covered_pads,
     "apply_pours": apply_pours,

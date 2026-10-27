@@ -242,11 +242,20 @@ def test_mark_dnp_parts(project: fixes.KicadProject) -> None:
         {"type": "pcb_component", "source_component_id": "s2", "do_not_place": False},
     ]  # fmt: skip
     (raw / "board.circuit.json").write_text(json.dumps(circuit), encoding="utf-8")
-    assert fixes.mark_dnp_parts(project) == ["D1: symbol DNP", "D1: footprint DNP"]
+    # a bare-pad board feature: out of BOM / CPL, no DNP cross over it in the schematic
+    assert fixes.mark_dnp_parts(project) == [
+        "D1: symbol out of the BOM (board feature)",
+        "D1: footprint board_only, out of BOM and CPL",
+    ]
     d1 = next(s for s in sexpr.children(project.sch, "symbol") if sexpr.property_value(s, "Reference") == "D1")
-    assert sexpr.child(d1, "dnp") == [Sym("dnp"), Sym("yes")]
+    assert sexpr.child(d1, "in_bom") == [Sym("in_bom"), Sym("no")]
+    dnp = sexpr.child(d1, "dnp")
+    assert dnp is None or dnp[1] == Sym("no")
     fp = next(f for f in sexpr.children(project.pcb, "footprint") if sexpr.property_value(f, "Reference") == "D1")
-    assert sexpr.child(fp, "attr") == [Sym("attr"), Sym("dnp")]
+    attr = sexpr.child(fp, "attr")
+    assert attr is not None
+    assert {Sym("board_only"), Sym("exclude_from_pos_files"), Sym("exclude_from_bom")} <= set(attr[1:])
+    assert Sym("dnp") not in attr
     assert fixes.mark_dnp_parts(project) == []
 
 
@@ -1393,6 +1402,20 @@ def test_mask_covered_pads(project: fixes.KicadProject) -> None:
     assert layers is not None
     assert not any(str(x).endswith(".Mask") for x in layers[1:])
     assert fixes.mask_covered_pads(project) == []
+
+
+def test_complete_netclasses(project: fixes.KicadProject) -> None:
+    # without the schematic keys KiCad plots every wire with no stroke (an invisible schematic)
+    pro = project.pcb_path.with_suffix(".kicad_pro")
+    pro.write_text(json.dumps({"net_settings": {"classes": [{"name": "Default", "clearance": 0.2}, {"name": "PWR"}]}}))
+    changes = fixes.complete_netclasses(project)
+    assert len(changes) == 2
+    classes = json.loads(pro.read_text())["net_settings"]["classes"]
+    assert classes[0]["wire_width"] == 6
+    assert classes[0]["schematic_color"] == "rgba(0, 0, 0, 0.000)"
+    assert classes[0]["clearance"] == 0.2  # kept
+    assert classes[0]["priority"] > classes[1]["priority"]
+    assert fixes.complete_netclasses(project) == []
 
 
 def test_net_node_track_form(project: fixes.KicadProject) -> None:
