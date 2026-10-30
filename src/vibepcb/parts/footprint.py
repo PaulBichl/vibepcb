@@ -224,10 +224,11 @@ def _rect(box: Box, layer: str, width: float) -> list[Node]:
 
 
 def _dot(x: float, y: float, radius: float, layer: str) -> list[Node]:
+    """A filled dot of outer ``radius`` (circle radius / 2 + stroke width / 2)."""
     return [
         Sym("fp_circle"),
         [Sym("center"), _r(x), _r(y)],
-        [Sym("end"), _r(x + radius), _r(y)],
+        [Sym("end"), _r(x + radius / 2), _r(y)],
         _stroke(radius),
         [Sym("fill"), Sym("yes")],
         [Sym("layer"), layer],
@@ -314,8 +315,8 @@ def build(spec: Spec, std: Standard, name: str | None = None) -> Footprint:
         extent = extent.union(p.box)
     placement = _snap_out(extent.grow(margin), std.num("footprint", "placement_grid"))
     silk = silk_outline(spec, std, pads, body)
-    # the designator (up to 4 characters, ~0.8 x size each) fits inside the body
-    text_size = min(std.num("choices", "assembly_text"), (body.x1 - body.x0) * 0.8 / 3.2, (body.y1 - body.y0) * 0.5)
+    # the designator (up to 5 characters, ~0.8 x size each) fits inside the body
+    text_size = min(std.num("choices", "assembly_text"), (body.x1 - body.x0) / 5, (body.y1 - body.y0) * 0.5)
     text_size = max(round(text_size, 2), 0.3)
 
     tree: list[Node] = [
@@ -341,7 +342,7 @@ def build(spec: Spec, std: Standard, name: str | None = None) -> Footprint:
         tree.append(_line((0, -cross, 0, cross), mech15, mech_w))
     mark, how = polarity_pad(spec, pads)
     if mark is not None:
-        _polarity(tree, spec, std, mark, how, body, pads, mech15, silk_w)
+        _polarity(tree, std, mark, how, body, pads, mech15, silk_w, text_size)
     # KiCad's own views
     tree.append(_rect(body, "F.Fab", mech_w))
     tree.append(_text("${REFERENCE}", 0, 0, "F.Fab", text_size))
@@ -362,7 +363,6 @@ def build(spec: Spec, std: Standard, name: str | None = None) -> Footprint:
 
 def _polarity(
     tree: list[Node],
-    spec: Spec,
     std: Standard,
     mark: Pad,
     how: str,
@@ -370,6 +370,7 @@ def _polarity(
     pads: list[Pad],
     mech15: str,
     silk_w: float,
+    designator: float,
 ) -> None:
     """Polarity on Mechanical 15 (inside the body) and on the silkscreen (outside, clear of the pads)."""
     mech_w = std.num("choices", "mech_width")
@@ -385,14 +386,19 @@ def _polarity(
             tree.append(_line((x - s, 0, x + s, 0), mech15, mech_w))
             tree.append(_line((x, -s, x, s), mech15, mech_w))
         else:
-            r = min(0.25, (body.x1 - body.x0) / 10, (body.y1 - body.y0) / 10)
-            px = min(max(mark.x, body.x0 + 2 * r), body.x1 - 2 * r)
-            py = min(max(mark.y, body.y0 + 2 * r), body.y1 - 2 * r)
+            # a dot in the body corner nearest pin 1, the PIN1 text beside it if it clears the designator
+            r = min(0.2, (body.x1 - body.x0) / 10, (body.y1 - body.y0) / 10)
+            cx, cy = (body.x0 + body.x1) / 2, (body.y0 + body.y1) / 2
+            px = body.x0 + 1.5 * r if mark.x <= cx else body.x1 - 1.5 * r
+            py = body.y0 + 1.5 * r if mark.y <= cy else body.y1 - 1.5 * r
             tree.append(_dot(px, py, r, mech15))
             if text := std.text("footprint", "pin1_text"):
-                size = min(0.5, (body.y1 - body.y0) / 6)
-                tx = px + 3 * r + size * len(text) * 0.35
-                if tx + size * len(text) * 0.35 < body.x1:
+                size = min(0.4, (body.y1 - body.y0) / 6)
+                width = size * 0.8 * len(text)
+                tx = px + 1.5 * r + width / 2 if px < cx else px - 1.5 * r - width / 2
+                fits = body.x0 + 0.05 < tx - width / 2 and tx + width / 2 < body.x1 - 0.05
+                clear = abs(py - cy) - size / 2 > designator / 2 + 0.1
+                if fits and clear:
                     tree.append(_text(text, tx, py, mech15, size))
     if not std.flag("footprint", "silk_polarity"):
         return

@@ -1,0 +1,109 @@
+# Part spec for TPS62133RGTR (format: vibepcb/parts/spec.py). Pages are PDF pages of the datasheet
+# SLVSAG7F (tps62130.pdf, revised November 2021): pin table page 3, package outline RGT0016C page 40.
+
+[part]
+mpn = "TPS62133RGTR"
+manufacturer = "Texas Instruments"
+description = "3-17 V 3 A step-down converter, 5.0 V fixed output, VQFN-16 3 x 3 mm"
+datasheet = "https://www.ti.com/lit/ds/symlink/tps62130.pdf"
+source = "manual"
+lifecycle = "unknown"
+kind = "ic"
+
+[package]
+# RGT0016C VQFN, 1 mm max height: body 2.9-3.1 square, 0.8-1.0 high, terminals 16X 0.3-0.5 long,
+# 16X 0.18-0.30 wide, pitch 0.5, exposed thermal pad 1.68 +-0.07 (unnumbered in the datasheet: pin 17 here)
+family = "QFN"
+pins = 16
+pitch = 0.5
+span = [2.9, 3.1]
+body = { l = [2.9, 3.1], w = [2.9, 3.1], h = [0.8, 1.0] }
+lead = { l = [0.3, 0.5], w = [0.18, 0.3] }
+exposed_pad = { l = [1.61, 1.68, 1.75], w = [1.61, 1.68, 1.75], number = "17" }
+page = 40
+
+[[pin]]
+number = "1"
+name = "SW"
+type = "power_out"
+page = 3
+[[pin]]
+number = "2"
+name = "SW"
+type = "power_out"
+page = 3
+[[pin]]
+number = "3"
+name = "SW"
+type = "power_out"
+page = 3
+[[pin]]
+number = "4"
+name = "PG"
+type = "open_collector"  # open drain output, needs a pull-up
+page = 3
+[[pin]]
+number = "5"
+name = "FB"
+type = "input"
+page = 3
+[[pin]]
+number = "6"
+name = "AGND"
+type = "power_in"
+page = 3
+[[pin]]
+number = "7"
+name = "FSW"
+type = "input"
+page = 3
+[[pin]]
+number = "8"
+name = "DEF"
+type = "input"
+page = 3
+[[pin]]
+number = "9"
+name = "SS/TR"
+type = "input"
+page = 3
+[[pin]]
+number = "10"
+name = "AVIN"
+type = "power_in"
+page = 3
+[[pin]]
+number = "11"
+name = "PVIN"
+type = "power_in"
+page = 3
+[[pin]]
+number = "12"
+name = "PVIN"
+type = "power_in"
+page = 3
+[[pin]]
+number = "13"
+name = "EN"
+type = "input"
+page = 3
+[[pin]]
+number = "14"
+name = "VOS"
+type = "input"
+page = 3
+[[pin]]
+number = "15"
+name = "PGND"
+type = "power_in"
+page = 3
+[[pin]]
+number = "16"
+name = "PGND"
+type = "power_in"
+page = 3
+[[pin]]
+number = "17"
+name = "EP"
+type = "power_in"  # exposed thermal pad: to AGND, PGND and the ground plane
+page = 3

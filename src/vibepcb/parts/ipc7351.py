@@ -150,7 +150,28 @@ def _two_rows(pins: int) -> tuple[list[int], list[int]]:
     return list(range(n)), [slot for slot in reversed(range(n)) if slot != n // 2]
 
 
-def calculate(package: Package, density: str = "N", kind: str = "ic") -> Pattern:
+EP_CLEARANCE = 0.2  # min copper gap between a terminal pad and the exposed pad (KiCad generator's IPC rule)
+
+
+def _clear_exposed_pad(pads: list[Pad], ep: Pad, gap: float) -> list[Pad]:
+    """Trim the inner (heel) end of terminal pads that come closer than ``gap`` to the exposed pad."""
+    out = []
+    for p in pads:
+        if abs(p.x) > abs(p.y) and abs(p.y) < ep.w / 2 + p.w / 2 + gap:  # left / right row facing the EP
+            outer = abs(p.x) + p.l / 2
+            inner = max(abs(p.x) - p.l / 2, ep.l / 2 + gap)
+            sign = 1 if p.x > 0 else -1
+            p = Pad(p.number, round(sign * (outer + inner) / 2, 4), p.y, round(outer - inner, 4), p.w)
+        elif abs(p.y) >= abs(p.x) and abs(p.x) < ep.l / 2 + p.l / 2 + gap:  # top / bottom row
+            outer = abs(p.y) + p.w / 2
+            inner = max(abs(p.y) - p.w / 2, ep.w / 2 + gap)
+            sign = 1 if p.y > 0 else -1
+            p = Pad(p.number, p.x, round(sign * (outer + inner) / 2, 4), p.l, round(outer - inner, 4))
+        out.append(p)
+    return out
+
+
+def calculate(package: Package, density: str = "N", kind: str = "ic", ep_clearance: float = EP_CLEARANCE) -> Pattern:
     """The land pattern of an IPC family package, pads numbered in IPC zero orientation (pin 1 top left)."""
     if package.style is None:
         msg = f"family {package.family} has no IPC calculation (needs an explicit [land])"
@@ -198,9 +219,8 @@ def calculate(package: Package, density: str = "N", kind: str = "ic") -> Pattern
                 n += 1
                 pads.append(Pad(str(n), x, -row_y.centre, row_y.x, row_y.pad_length))
     if ep := package.exposed_pad:
-        pads.append(
-            Pad(ep.number, 0.0, 0.0, round(ep.w.nom, 4), round(ep.l.nom, 4))
-        )  # l runs along the body length (y)
+        ep_pad = Pad(ep.number, 0.0, 0.0, round(ep.w.nom, 4), round(ep.l.nom, 4))  # ep.l runs along y
+        pads = [*_clear_exposed_pad(pads, ep_pad, ep_clearance), ep_pad]
     return Pattern(pads, rows, f, name(package, density, kind))
 
 

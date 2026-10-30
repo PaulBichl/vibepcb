@@ -94,6 +94,13 @@ def test_qfn_pin_order_and_exposed_pad() -> None:
     assert (pads["17"].x, pads["17"].y, pads["17"].l) == (0.0, 0.0, 1.7)
     assert pattern.name == "QFN50P300X300X100-17N"
     assert pattern.fillets.toe == 0.3
+    # terminal pads keep 0.2 mm from the exposed pad (inner end trimmed, outer end kept)
+    ep = pads["17"]
+    for n in ("1", "5", "9", "13"):
+        b = pads[n]
+        gap = max(abs(b.x) - b.l / 2 - ep.l / 2, abs(b.y) - b.w / 2 - ep.w / 2)
+        assert gap >= ipc7351.EP_CLEARANCE - 1e-9
+    assert pads["1"].x - pads["1"].l / 2 == pytest.approx(-pattern.rows[0].z / 2)
     # pads stay apart at the corner
     assert pads["1"].x + pads["1"].l / 2 < pads["16"].x - pads["16"].l / 2
 
