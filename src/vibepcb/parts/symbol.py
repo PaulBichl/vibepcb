@@ -278,7 +278,28 @@ def build(spec: Spec, std: Standard, footprint_name: str) -> Symbol:
         [Sym("symbol"), f"{name}_1_1", *pin_nodes],
         [Sym("embedded_fonts"), Sym("no")],
     ]
+    paint(tree, std)
     return Symbol(name, pins, box, pin_at, tree)
+
+
+def _rgba(rgb: list[int]) -> list[Node]:
+    return [Sym("color"), *[Sym(str(v)) for v in rgb], Sym("1")]
+
+
+def paint(tree: list[Node], std: Standard) -> None:
+    """The standard's colours (§1.3 / §1.4): body graphics in the border colour, designator and pin texts black.
+
+    KiCad draws pin lines in its theme colour (a pin has no colour of its own); Altium gives imported pins its
+    own pin colour, black by the standard's preferences.
+    """
+    border = std.value("symbol", "body_color")
+    text = std.value("symbol", "text_color")
+    for node in sexpr.walk(tree):
+        head = sexpr.head(node)
+        if head == "stroke":
+            node.append(_rgba(border))
+        elif head == "font":
+            node.append(_rgba(text))
 
 
 def _lone_opamp(

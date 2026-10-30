@@ -20,6 +20,9 @@ from vibepcb.parts import footprint, model3d, spec, standard, symbol
 if TYPE_CHECKING:
     from pathlib import Path
 
+# KiCad's default theme colours for pin lines, pin numbers and pin names: a KiCad symbol can't carry a pin colour,
+# Altium takes it from its preferences (§1.4: black), so the preview shows that colour
+KICAD_PIN_COLOURS = ("#840000", "#A90000", "#006464")
 FOOTPRINT_LAYERS = "F.Cu,F.Mask,F.SilkS,User.13,User.15"
 
 
@@ -104,5 +107,11 @@ def build(mpn: str, *, standard_name: str = standard.DEFAULT, path: Path | None 
         (target / "footprint.svg", ["fp", "export", "svg", "--layers", FOOTPRINT_LAYERS, str(pretty)], "footprint"),
     ):
         if written := _export(args, what, svg, built):
+            if what == "symbol":
+                pin = "#" + "".join(f"{v:02X}" for v in std.value("symbol", "text_color"))
+                text = written.read_text(encoding="utf-8")
+                for colour in KICAD_PIN_COLOURS:
+                    text = text.replace(colour, pin)
+                written.write_text(text, encoding="utf-8")
             built.previews.append(written)
     return built

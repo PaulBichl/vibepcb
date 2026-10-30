@@ -51,7 +51,7 @@ def test_footprint_follows_the_standard(part: str) -> None:
         assert fp.placement.x0 <= b.x0 - 0.1 + 1e-6
         assert fp.placement.x1 >= b.x1 + 0.1 - 1e-6
     # pads: rounded rectangles, mask and paste expansion 0
-    pads = [n for n in sexpr.children(tree, "pad") if n[1] != "PIN1"]
+    pads = list(sexpr.children(tree, "pad"))
     assert len(pads) == len(fp.pads)
     for pad in pads:
         assert pad[3] == "roundrect"
@@ -74,11 +74,15 @@ def test_footprint_follows_the_standard(part: str) -> None:
 
 def test_ic_has_pin1_marks() -> None:
     fp = build("LM358DR")
-    # pad 1 copied onto Mech 15 as PIN1: same place and size, no copper, mask or paste (§2.1, Figure 11)
-    copy = next(n for n in sexpr.children(fp.tree, "pad") if n[1] == "PIN1")
-    assert sexpr.child(copy, "layers") == ["layers", "User.15"]
-    assert sexpr.child(copy, "at") == ["at", "-2.475", "-1.905"]
-    assert sexpr.child(copy, "size") == ["size", "1.95", "0.6"]
+    # pad 1 copied onto Mech 15 as PIN1 (§2.1, Figure 11): in KiCad its outline + name, no copper pad
+    assert [n[1] for n in sexpr.children(fp.tree, "pad")] == [str(i) for i in range(1, 9)]
+    text = next(n for n in sexpr.walk(fp.tree) if sexpr.head(n) == "fp_text" and n[2] == "PIN1")
+    assert sexpr.child(text, "layer") == ["layer", "User.15"]
+    assert sexpr.child(text, "at") == ["at", "-2.475", "-1.905", "0"]
+    outlines = [
+        n for n in sexpr.children(fp.tree, "fp_rect") if sexpr.child(n, "start") == ["start", "-3.45", "-2.205"]
+    ]
+    assert [sexpr.child(n, "layer") for n in outlines] == [["layer", "User.15"]]
     dots = [n for n in sexpr.walk(fp.tree) if sexpr.head(n) == "fp_circle"]
     assert {sexpr.child(d, "layer")[1] for d in dots} == {"User.13", "User.15", "F.SilkS"}  # type: ignore[index]
     silk_dot = next(d for d in dots if sexpr.child(d, "layer") == ["layer", "F.SilkS"])
@@ -89,7 +93,7 @@ def test_ic_has_pin1_marks() -> None:
 
 def test_resistor_has_no_polarity() -> None:
     fp = build("RC0603FR-0710KL")
-    assert not [n for n in sexpr.children(fp.tree, "pad") if n[1] == "PIN1"]
+    assert not [n for n in sexpr.walk(fp.tree) if sexpr.head(n) == "fp_text" and n[2] == "PIN1"]
     circles = [n for n in sexpr.walk(fp.tree) if sexpr.head(n) == "fp_circle"]
     assert [sexpr.child(c, "layer") for c in circles] == [["layer", "User.15"]]  # the centre cross only
     assert fp.name == "RESC1608X50N"

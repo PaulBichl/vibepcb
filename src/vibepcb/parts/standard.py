@@ -47,6 +47,8 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "comment_empty_hidden": False,
         "parameters": [],
         "body_fill": False,
+        "body_color": [0, 0, 0],
+        "text_color": [0, 0, 0],
         "reference_prefix": {"ic": "U"},
     },
     "footprint": {

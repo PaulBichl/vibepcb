@@ -281,15 +281,24 @@ def _circle(x: float, y: float, radius: float, layer: str, width: float) -> list
     ]
 
 
-def pin1_copy(pad: Pad, layer: str, name: str, std: Standard) -> list[Node]:
-    """Pad 1 copied onto the assembly layer and named PIN1 (§2.1 note, Figure 11): no copper, no mask, no paste."""
-    node = _pad(Pad(name, pad.x, pad.y, pad.l, pad.w, pad.shape, pad.rotation), std)
-    layers = sexpr.child(node, "layers")
-    if layers is not None:
-        layers[1:] = [layer]
-    return [
-        n for n in node if not (isinstance(n, list) and sexpr.head(n) in ("solder_mask_margin", "solder_paste_margin"))
-    ]
+def pin1_copy(pad: Pad, layer: str, name: str, std: Standard) -> list[list[Node]]:
+    """Pad 1 copied onto the assembly layer, named PIN1 (§2.1 note, Figure 11).
+
+    A KiCad pad always has copper, so in KiCad the copy is pad 1's outline plus the name as text; the Altium script
+    (``altium_script``) places a real pad on Mechanical 15 instead.
+    """
+    b = pad.box
+    width = std.num("choices", "mech_width")
+    size = max(min((b.y1 - b.y0) * 0.7, (b.x1 - b.x0) / (0.8 * len(name)), 0.6), 0.15)
+    angle = 90 if (b.y1 - b.y0) > (b.x1 - b.x0) * 1.2 else 0  # upright pads: the name runs along them
+    if angle:
+        size = max(min((b.x1 - b.x0) * 0.7, (b.y1 - b.y0) / (0.8 * len(name)), 0.6), 0.15)
+    text = _text(name, pad.x, pad.y, layer, size)
+    if angle:
+        at = sexpr.child(text, "at")
+        if at is not None:
+            at[3] = Sym("90")
+    return [_rect(b, layer, width), text]
 
 
 def _property(key: str, value: str, x: float, y: float, layer: str, size: float, *, hide: bool) -> list[Node]:
@@ -440,7 +449,7 @@ def _polarity(
         else:
             # pad 1 copied to Mech 15 as PIN1 (Figure 11); a pin-1 circle on Mech 13 in the body corner
             if text := std.text("footprint", "pin1_text"):
-                tree.append(pin1_copy(mark, mech15, text, std))
+                tree += pin1_copy(mark, mech15, text, std)
             r = min(0.3, (body.x1 - body.x0) / 8, (body.y1 - body.y0) / 8)
             cx, cy = (body.x0 + body.x1) / 2, (body.y0 + body.y1) / 2
             px = body.x0 + 1.6 * r if mark.x <= cx else body.x1 - 1.6 * r

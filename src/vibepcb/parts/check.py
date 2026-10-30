@@ -131,8 +131,6 @@ def _footprint_rules(built: Built, std: Standard, report: Report) -> None:
     pin1 = std.text("footprint", "pin1_text")
     for pad in sexpr.children(fp.tree, "pad"):
         number = pad[1]
-        if number == pin1:  # the pad-1 copy on the assembly layer: no copper, no mask
-            continue
         m = sexpr.child(pad, "solder_mask_margin")
         if m is None or abs(float(str(m[1])) - mask) > EPS:
             report.errors.append(
@@ -196,12 +194,8 @@ def _footprint_rules(built: Built, std: Standard, report: Report) -> None:
     texts = {str(n[2]): sexpr.child(n, "layer") for n in sexpr.walk(fp.tree) if sexpr.head(n) == "fp_text"}
     if std.flag("footprint", "assembly_designator") and texts.get(".Designator") != ["layer", mech15]:
         report.errors.append(f"no .Designator on {mech15} ({std.rule('footprint', 'assembly_designator').source})")
-    copies = [n for n in sexpr.children(fp.tree, "pad") if n[1] == pin1]
-    if (
-        pin1
-        and built.spec.kind in ("ic", "opamp", "connector", "transistor")
-        and (len(copies) != 1 or sexpr.child(copies[0], "layers") != ["layers", mech15])
-    ):
+    ic = built.spec.kind in ("ic", "opamp", "connector", "transistor")
+    if pin1 and ic and texts.get(pin1) != ["layer", mech15]:
         report.errors.append(f"pad 1 not copied to {mech15} as {pin1} ({std.rule('footprint', 'pin1_text').source})")
 
 
