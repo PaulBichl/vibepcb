@@ -20,9 +20,23 @@ if TYPE_CHECKING:
 
     from vibepcb.parts.build import Built
 
-IMPORT_STEPS = """# Import {mpn} into Altium Designer 26
+IMPORT_STEPS = """# {mpn} into Altium Designer 26
 
-Files: `{sym}` (symbol), `{pretty}/` (footprint `{fp}`), `{step}` (3D body), `{sidecar}` (for the clean-up script).
+Files: `{script}` (Altium script), `{sym}` (symbol), `{pretty}/` (footprint `{fp}`), `{step}` (3D body),
+`{sidecar}` (what the KiCad route may lose).
+
+## Native route (preferred): run the script
+
+Builds the symbol and footprint as Altium objects, everything the standard asks for included (PIN1 pad on
+Mechanical 15, pins black, .Designator TrueType, 3D body on Mechanical 13).
+
+1. Put `{step}` next to the script and set `ScriptDir` at the top of `{script}` to that folder (with a trailing
+   backslash), or leave it empty and keep both in Altium's current folder.
+2. Open the target PcbLib, File » Run Script, pick `{script}`, run `CreateFootprint`.
+3. Open the target SchLib, run `CreateSymbol` (it links footprint `{fp}`).
+4. Check the result against the datasheet; report anything the script got wrong (it is generated, fix the generator).
+
+## KiCad route (fallback)
 
 1. File » Import Wizard » KiCad Design Files. Add `{sym}` and the `{pretty}` folder as library files
    (`.kicad_mod` imports although the wizard's file list doesn't advertise it).
@@ -79,6 +93,9 @@ def export(built: Built, target: Path) -> list[Path]:
     if built.step_file:
         written.append(target / built.step_file.name)
         shutil.copyfile(built.step_file, written[-1])
+    if built.script_file:
+        written.append(target / built.script_file.name)
+        shutil.copyfile(built.script_file, written[-1])
     side = target / f"{name}.altium.json"
     side.write_text(json.dumps(sidecar(built), indent=2) + "\n", encoding="utf-8")
     steps = target / f"IMPORT-{name}.md"
@@ -90,6 +107,7 @@ def export(built: Built, target: Path) -> list[Path]:
             fp=built.footprint.name,
             step=built.step_file.name if built.step_file else "(no STEP: CadQuery missing)",
             sidecar=side.name,
+            script=built.script_file.name if built.script_file else "(no script)",
             standard=built.standard.name,
         ),
         encoding="utf-8",

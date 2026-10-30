@@ -702,7 +702,13 @@ in `PART-PLAN.md`, the agent's workflow in `AGENTS.md` (Components).
 | `symbol.py` | KiCad 9 symbol: 2 mm grid and pins, inputs left / outputs right / supply top / ground and EP bottom, numbered repeats, designator top left (Arial), empty hidden Value, Datasheet / Description empty (no parameters, §1.3); op-amp triangles, two-terminal drawings |
 | `model3d.py` | optional CadQuery STEP: max body box, leads to the max span, QFN terminals, pin-1 dimple |
 | `check.py` | `check.txt`: errors (KiCad load, pins vs pads, each rule with its §), warnings (lifecycle, calculated land), manual items |
+| `altium_script.py` | `<MPN>.pas`, the native Altium route: a DelphiScript whose `CreateFootprint` / `CreateSymbol` build the part as Altium objects from the same geometry (y flipped for footprints): pads with manual mask / paste 0, overlay, Mech 13 body + 3D body, Mech 15 outline / cross / `.Designator` TrueType / PIN1 pad, symbol body in the border colour, black pins, Arial designator, empty hidden comment, footprint link. Written from Altium's scripting reference, not run here: check it on one part in Altium |
 | `altium.py` | `export --altium`: files, `IMPORT-<MPN>.md`, sidecar JSON (layer map, line widths, field visibility) |
+
+Two routes into Altium: the generated script (`<MPN>.pas`, preferred: Altium objects, so a PIN1 pad on Mech 15,
+pin colours and the 3D body on Mech 13 are possible) and the KiCad files through Altium's importer (fallback: a
+KiCad pad always has copper, symbols carry no pin colour, the 3D model is only a link). The KiCad files also feed
+the previews and the check.
 
 Files are written in **KiCad 9 format** (footprint `20241229`, symbol `20241209`) because Altium 26's KiCad
 importer reads up to KiCad 9; KiCad 10's `kicad-cli` loads them for the previews and the load check.

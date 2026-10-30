@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from vibepcb import kicad, paths, proc
-from vibepcb.parts import footprint, model3d, spec, standard, symbol
+from vibepcb.parts import altium_script, footprint, model3d, spec, standard, symbol
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -49,6 +49,7 @@ class Built:
     symbol_file: Path
     footprint_file: Path
     step_file: Path | None
+    script_file: Path | None = None  # the Altium DelphiScript (native route)
     notes: list[str] = field(default_factory=list)  # skipped steps
     load_errors: list[str] = field(default_factory=list)  # kicad-cli could not read / export a file
     previews: list[Path] = field(default_factory=list)
@@ -102,6 +103,8 @@ def build(mpn: str, *, standard_name: str = standard.DEFAULT, path: Path | None 
         built.notes.append(f"no 3D model: {reason}")
     else:
         built.step_file = step
+    built.script_file = target / f"{spec.file_name(s.mpn)}.pas"
+    built.script_file.write_text(altium_script.script(built), encoding="utf-8")
     for svg, args, what in (
         (target / "symbol.svg", ["sym", "export", "svg", str(symbol_file)], "symbol"),
         (target / "footprint.svg", ["fp", "export", "svg", "--layers", FOOTPRINT_LAYERS, str(pretty)], "footprint"),

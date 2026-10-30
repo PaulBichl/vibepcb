@@ -232,8 +232,8 @@ New schematic symbol + footprint + rough 3D body for a part, following the house
 3. `hatch run pcb part all <MPN>` (`hatch run parts:pcb part all <MPN>` for the STEP): `out/parts/<MPN>/`
    with `check.txt`. Look at `symbol.png` and `footprint.png` against the datasheet yourself; fix the spec, not
    the output, until the check has no errors.
-4. `hatch run pcb part export <MPN> --altium <dir>`: the import set (KiCad 9 files, `IMPORT-<MPN>.md`, sidecar
-   JSON). Altium import findings (layer map, what the importer keeps): `docs/TOOLING.md` section 14.
+4. `hatch run pcb part export <MPN> --altium <dir>`: the Altium script `<MPN>.pas` (run in Altium: builds the
+   part natively, the preferred route) plus the KiCad 9 files for the importer, `IMPORT-<MPN>.md`, sidecar JSON. Altium import findings (layer map, what the importer keeps): `docs/TOOLING.md` section 14.
 
 The spec's author must not grade it: a human (or a fresh reviewer) checks the spec against the datasheet pages
 it names before the part goes into a library.
