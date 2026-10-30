@@ -1,0 +1,121 @@
+# Test fixture (shape of a QFN-16 with EP, not checked against the datasheet: do not use as a library part).
+[part]
+mpn = "TPS62133RGTR"
+manufacturer = "Texas Instruments"
+description = "3-17 V 3 A step-down converter, 3.3 V fixed"
+datasheet = "https://www.ti.com/lit/ds/symlink/tps62130.pdf"
+source = "manual"
+lifecycle = "active"
+kind = "ic"
+
+[package]
+family = "QFN"
+pins = 16
+pitch = 0.5
+span = [2.9, 3.1]
+body = { l = [2.9, 3.1], w = [2.9, 3.1], h = [1.0] }
+lead = { l = [0.3, 0.5], w = [0.18, 0.3] }
+exposed_pad = { l = [1.58, 1.78], w = [1.58, 1.78], number = "17" }
+page = 34
+
+[[pin]]
+number = "1"
+name = "SW"
+type = "power_out"
+page = 3
+
+[[pin]]
+number = "2"
+name = "SW"
+type = "power_out"
+page = 3
+
+[[pin]]
+number = "3"
+name = "SW"
+type = "power_out"
+page = 3
+
+[[pin]]
+number = "4"
+name = "PG"
+type = "open_collector"
+page = 3
+
+[[pin]]
+number = "5"
+name = "FB"
+type = "input"
+page = 3
+
+[[pin]]
+number = "6"
+name = "AGND"
+type = "power_in"
+page = 3
+
+[[pin]]
+number = "7"
+name = "FSW"
+type = "input"
+page = 3
+
+[[pin]]
+number = "8"
+name = "DEF"
+type = "input"
+page = 3
+
+[[pin]]
+number = "9"
+name = "SS/TR"
+type = "input"
+page = 3
+
+[[pin]]
+number = "10"
+name = "AVIN"
+type = "power_in"
+page = 3
+
+[[pin]]
+number = "11"
+name = "PVIN"
+type = "power_in"
+page = 3
+
+[[pin]]
+number = "12"
+name = "PVIN"
+type = "power_in"
+page = 3
+
+[[pin]]
+number = "13"
+name = "EN"
+type = "input"
+page = 3
+
+[[pin]]
+number = "14"
+name = "VOS"
+type = "input"
+page = 3
+
+[[pin]]
+number = "15"
+name = "PGND"
+type = "power_in"
+page = 3
+
+[[pin]]
+number = "16"
+name = "PGND"
+type = "power_in"
+page = 3
+
+[[pin]]
+number = "17"
+name = "EP"
+type = "power_in"
+page = 3

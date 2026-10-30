@@ -297,7 +297,7 @@ def _package(raw: dict[str, Any]) -> Package:
     if package.sides == 4 and package.pins % 2:
         msg = f"{where}: a four-sided package needs an even pin count"
         raise SpecError(msg)
-    if package.sides == 2 and package.style != "chip" and package.pins % 2:
+    if package.sides == 2 and package.family not in ("chip", "SOT") and package.pins % 2:
         msg = f"{where}: a two-row package needs an even pin count (use family 'custom' with [land] otherwise)"
         raise SpecError(msg)
     return package

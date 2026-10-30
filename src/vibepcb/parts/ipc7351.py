@@ -135,6 +135,21 @@ def _column(n: int, pitch: float) -> list[float]:
     return [round((i - (n - 1) / 2) * pitch, 4) for i in range(n)]
 
 
+def _two_rows(pins: int) -> tuple[list[int], list[int]]:
+    """Pitch slots (top = 0) of the left pins (counted down) and the right pins (counted up).
+
+    Even counts fill both rows; odd SOT packages leave a slot free as JEDEC draws them: SOT-23-3 has pins 1 / 2
+    at the outer left slots and pin 3 in the middle right, SOT-23-5 has 1-3 left and 4 / 5 at the outer right.
+    """
+    if pins % 2 == 0:
+        n = pins // 2
+        return list(range(n)), list(reversed(range(n)))
+    if pins == 3:
+        return [0, 2], [1]
+    n = (pins + 1) // 2
+    return list(range(n)), [slot for slot in reversed(range(n)) if slot != n // 2]
+
+
 def calculate(package: Package, density: str = "N", kind: str = "ic") -> Pattern:
     """The land pattern of an IPC family package, pads numbered in IPC zero orientation (pin 1 top left)."""
     if package.style is None:
@@ -157,12 +172,11 @@ def calculate(package: Package, density: str = "N", kind: str = "ic") -> Pattern
         row = land_row(package.span, package.lead_l, package.lead_w, f)
         rows.append(row)
         if package.sides == 2:
-            per_side = package.pins // 2
-            ys = _column(per_side, package.pitch)
-            pads += [Pad(str(i + 1), -row.centre, y, row.pad_length, row.x) for i, y in enumerate(ys)]
-            pads += [
-                Pad(str(per_side + i + 1), row.centre, y, row.pad_length, row.x) for i, y in enumerate(reversed(ys))
-            ]
+            left, right = _two_rows(package.pins)
+            ys = _column(max(*left, *right) + 1, package.pitch)
+            numbers = iter(range(1, package.pins + 1))
+            pads += [Pad(str(next(numbers)), -row.centre, ys[slot], row.pad_length, row.x) for slot in left]
+            pads += [Pad(str(next(numbers)), row.centre, ys[slot], row.pad_length, row.x) for slot in right]
         else:
             pins_x = package.pins_x if package.pins_x is not None else package.pins // 4
             pins_y = (package.pins - 2 * pins_x) // 2

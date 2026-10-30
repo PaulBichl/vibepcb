@@ -1,0 +1,59 @@
+# Test fixture (JEDEC MS-012 SOIC-8 numbers; pinout of a dual op-amp), not a reviewed library part.
+[part]
+mpn = "LM358DR"
+manufacturer = "Texas Instruments"
+description = "Dual operational amplifier"
+datasheet = "https://www.ti.com/lit/ds/symlink/lm358.pdf"
+source = "manual"
+lifecycle = "active"
+kind = "opamp"
+
+[package]
+family = "SOIC"
+pins = 8
+pitch = 1.27
+span = [5.8, 6.2]
+body = { l = [4.8, 5.0], w = [3.8, 4.0], h = [1.75] }
+lead = { l = [0.4, 1.27], w = [0.31, 0.51] }
+page = 30
+
+[[pin]]
+number = "1"
+name = "OUT1"
+type = "output"
+page = 3
+[[pin]]
+number = "2"
+name = "IN1-"
+type = "input"
+page = 3
+[[pin]]
+number = "3"
+name = "IN1+"
+type = "input"
+page = 3
+[[pin]]
+number = "4"
+name = "GND"
+type = "power_in"
+page = 3
+[[pin]]
+number = "5"
+name = "IN2+"
+type = "input"
+page = 3
+[[pin]]
+number = "6"
+name = "IN2-"
+type = "input"
+page = 3
+[[pin]]
+number = "7"
+name = "OUT2"
+type = "output"
+page = 3
+[[pin]]
+number = "8"
+name = "VCC"
+type = "power_in"
+page = 3

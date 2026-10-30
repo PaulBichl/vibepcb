@@ -107,3 +107,31 @@ def test_custom_family_has_no_calculation() -> None:
     custom = Package(family="custom", pins=1, pitch=0, body_l=d(1, 1), body_w=d(1, 1), height=1, page=1)
     with pytest.raises(ValueError, match="explicit"):
         ipc7351.calculate(custom)
+
+
+@pytest.mark.parametrize(
+    ("pins", "expected"),
+    [
+        (3, {"1": (-1, -0.95), "2": (-1, 0.95), "3": (1, 0.0)}),
+        (5, {"1": (-1, -0.95), "2": (-1, 0.0), "3": (-1, 0.95), "4": (1, 0.95), "5": (1, -0.95)}),
+        (6, {"1": (-1, -0.95), "3": (-1, 0.95), "4": (1, 0.95), "6": (1, -0.95)}),
+    ],
+)
+def test_sot23_pin_slots(pins: int, expected: dict[str, tuple[int, float]]) -> None:
+    sot = Package(
+        family="SOT",
+        pins=pins,
+        pitch=0.95,
+        body_l=d(2.8, 3.0),
+        body_w=d(1.5, 1.7),
+        height=1.45,
+        span=d(2.6, 3.0),
+        lead_l=d(0.3, 0.6),
+        lead_w=d(0.3, 0.5),
+        page=1,
+    )
+    pads = {p.number: p for p in ipc7351.calculate(sot).pads}
+    for number, (side, y) in expected.items():
+        assert (pads[number].x > 0) == (side > 0)
+        assert pads[number].y == y
+    assert ipc7351.calculate(sot).name == f"SOT95P280X145-{pins}N"

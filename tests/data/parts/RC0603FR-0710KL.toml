@@ -1,0 +1,28 @@
+# Test fixture (0603 chip resistor numbers), not a reviewed library part.
+[part]
+mpn = "RC0603FR-0710KL"
+manufacturer = "Yageo"
+description = "10 kOhm 1 % 0.1 W 0603 thick film resistor"
+datasheet = "https://www.yageo.com/upload/media/product/productsearch/datasheet/rchip/PYu-RC_Group_51_RoHS_L_12.pdf"
+source = "manual"
+lifecycle = "active"
+kind = "resistor"
+
+[package]
+family = "chip"
+pins = 2
+pitch = 0
+body = { l = [1.5, 1.7], w = [0.7, 0.9], h = [0.4, 0.5] }
+lead = { l = [0.15, 0.45] }
+page = 5
+
+[[pin]]
+number = "1"
+name = "1"
+type = "passive"
+page = 5
+[[pin]]
+number = "2"
+name = "2"
+type = "passive"
+page = 5
