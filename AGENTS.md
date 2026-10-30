@@ -223,9 +223,9 @@ New schematic symbol + footprint + rough 3D body for a part, following the house
 2. Fill the spec from the datasheet (format: `src/vibepcb/parts/spec.py`):
    - every table carries the datasheet `page` its numbers come from; dimensions as the drawing gives them
      (`[min, max]` or `[min, nom, max]`), for the package code of this MPN only;
-   - `[package]` from the package drawing: the land pattern is **calculated** (IPC-7351B, medium density, §2);
-     `[land]` with explicit pads only for families the standard leaves to the datasheet (`custom`,
-     `connector`, `tht`);
+   - `[package]` from the package drawing. Land pattern (§2, Figure 5): the datasheet's recommended / example
+     land **when it gives one** (`[land]` with `size` + `centres` for IPC families, `[[land.pad]]` for custom,
+     THT, connectors); only without one it is calculated (IPC-7351B, medium density);
    - pin names exactly as the pin table, the electrical type from the pin description, the exposed pad as its
      own pin; `side` only to override the standard's placement.
    - Stop and ask when the datasheet is ambiguous (two package drawings for one code, pins missing).

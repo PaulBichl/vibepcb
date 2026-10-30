@@ -10,7 +10,7 @@ Pads come from the IPC-7351B calculation (``ipc7351``) or, for families the stan
   the designator, pin-1 / polarity marks and the PIN1 text;
 - silkscreen: body outline clipped to keep its clearance from the pads (and, at connectors, out of the space in
   front of the pins), polarity marks;
-- KiCad's own views: F.Fab body + designator, F.CrtYd = the placement outline.
+- KiCad's courtyard F.CrtYd = the placement outline (nothing on F.Fab: the standard's layers are Mech 13 / 15).
 """
 
 from __future__ import annotations
@@ -32,6 +32,8 @@ VERSION = "20241229"  # KiCad 9 footprint file format (Altium 26 imports KiCad u
 GENERATOR = "vibepcb"
 CROSS = 0.5  # half length of the centre cross on Mechanical 15, mm
 EPS = 1e-6
+DESIGNATOR = ".Designator"  # Altium special string: the component's designator (§2.1)
+FACE = "Arial"  # the standard's font (§1.3 / §1.4); TrueType on the assembly layer (§2.1)
 
 
 @dataclass(frozen=True)
@@ -115,21 +117,35 @@ def pads_of(spec: Spec, std: Standard) -> tuple[list[Pad], list[str], float | No
     shift applied (the drawing's origin, usually the body centre, moves by it too)."""
     notes: list[str] = []
     toe: float | None = None
-    if spec.land is not None:
-        raw = [Pad(p.number, p.x, p.y, p.l, p.w, p.shape, p.rotation, p.drill) for p in spec.land.pads]
-        notes.append(f"land pattern from the datasheet, page {spec.land.page}")
+    pkg = spec.package
+    land = spec.land
+    if land is not None and land.pads:
+        raw = [Pad(p.number, p.x, p.y, p.l, p.w, p.shape, p.rotation, p.drill) for p in land.pads]
+        notes.append(f"land pattern from the datasheet, page {land.page}")
+        rows = []
+    elif land is not None and land.size is not None:  # the datasheet's land as rows (§2: given dimensions first)
+        length, width = land.size
+        rows = [ipc7351.row_from_land(length, width, land.centres)]
+        if pkg.sides == 4:
+            rows.append(ipc7351.row_from_land(length, width, land.centres_y))
+        raw = [Pad(p.number, p.x, p.y, p.l, p.w) for p in ipc7351.arrange(pkg, *rows)]
+        if pkg.exposed_pad:
+            ex, ey = land.exposed_pad or (pkg.exposed_pad.w.nom, pkg.exposed_pad.l.nom)
+            raw.append(Pad(pkg.exposed_pad.number, 0.0, 0.0, ex, ey))
+        notes.append(f"land pattern from the datasheet, page {land.page}")
     else:
         density = std.text("footprint", "density")
-        pattern = ipc7351.calculate(spec.package, density, spec.kind)
+        pattern = ipc7351.calculate(pkg, density, spec.kind)
         raw = [Pad(p.number, p.x, p.y, p.l, p.w) for p in pattern.pads]
+        rows = pattern.rows
         f = pattern.fillets
         notes.append(
-            f"land pattern calculated: {f.source}, density {density} (toe {f.toe}, heel {f.heel}, side {f.side})"
+            f"land pattern calculated (the datasheet gives none): {f.source}, density {density}"
+            f" (toe {f.toe}, heel {f.heel}, side {f.side})"
         )
-        pkg = spec.package
-        span = pkg.body_l if pkg.style == "chip" else pkg.span
-        if span is not None:
-            toe = round((pattern.rows[0].z - span.max) / 2, 4)
+    span = pkg.body_l if pkg.style == "chip" else pkg.span
+    if rows and span is not None:  # copper beyond the lead tip with the part centred at nominal size (§2, Fig. 7)
+        toe = round((rows[0].z - span.nom) / 2, 4)
     boxes = [p.box for p in raw]
     cx = (min(b.x0 for b in boxes) + max(b.x1 for b in boxes)) / 2
     cy = (min(b.y0 for b in boxes) + max(b.y1 for b in boxes)) / 2
@@ -235,12 +251,45 @@ def _dot(x: float, y: float, radius: float, layer: str) -> list[Node]:
     ]
 
 
-def _font(size: float) -> list[Node]:
-    return [Sym("effects"), [Sym("font"), [Sym("size"), _r(size), _r(size)], [Sym("thickness"), _r(size * 0.15)]]]
+def _font(size: float, face: str = "") -> list[Node]:
+    font: list[Node] = [Sym("font")]
+    if face:  # a TrueType face (§2.1: .Designator in a True Type font)
+        font.append([Sym("face"), face])
+    font += [[Sym("size"), _r(size), _r(size)], [Sym("thickness"), _r(size * 0.15)]]
+    return [Sym("effects"), font]
 
 
-def _text(text: str, x: float, y: float, layer: str, size: float) -> list[Node]:
-    return [Sym("fp_text"), Sym("user"), text, [Sym("at"), _r(x), _r(y), Sym("0")], [Sym("layer"), layer], _font(size)]
+def _text(text: str, x: float, y: float, layer: str, size: float, face: str = "") -> list[Node]:
+    return [
+        Sym("fp_text"),
+        Sym("user"),
+        text,
+        [Sym("at"), _r(x), _r(y), Sym("0")],
+        [Sym("layer"), layer],
+        _font(size, face),
+    ]
+
+
+def _circle(x: float, y: float, radius: float, layer: str, width: float) -> list[Node]:
+    return [
+        Sym("fp_circle"),
+        [Sym("center"), _r(x), _r(y)],
+        [Sym("end"), _r(x + radius), _r(y)],
+        _stroke(width),
+        [Sym("fill"), Sym("no")],
+        [Sym("layer"), layer],
+    ]
+
+
+def pin1_copy(pad: Pad, layer: str, name: str, std: Standard) -> list[Node]:
+    """Pad 1 copied onto the assembly layer and named PIN1 (§2.1 note, Figure 11): no copper, no mask, no paste."""
+    node = _pad(Pad(name, pad.x, pad.y, pad.l, pad.w, pad.shape, pad.rotation), std)
+    layers = sexpr.child(node, "layers")
+    if layers is not None:
+        layers[1:] = [layer]
+    return [
+        n for n in node if not (isinstance(n, list) and sexpr.head(n) in ("solder_mask_margin", "solder_paste_margin"))
+    ]
 
 
 def _property(key: str, value: str, x: float, y: float, layer: str, size: float, *, hide: bool) -> list[Node]:
@@ -300,10 +349,10 @@ def build(spec: Spec, std: Standard, name: str | None = None) -> Footprint:
     pads, notes, toe, (dx, dy) = pads_of(spec, std)
     body = body_box(spec)
     body = Box(body.x0 + dx, body.y0 + dy, body.x1 + dx, body.y1 + dy)
-    if spec.land is None:
-        name = name or ipc7351.name(spec.package, std.text("footprint", "density"), spec.kind)
-    else:
+    if spec.land is not None and spec.land.name:
         name = name or spec.land.name
+    elif spec.package.style is not None:  # IPC-7351 package name, whoever drew the land
+        name = name or ipc7351.name(spec.package, std.text("footprint", "density"), spec.kind)
     name = name or f"{spec.package.family.upper()}_{spec.mpn}"
     mech13 = std.text("layers", "mech13")
     mech15 = std.text("layers", "mech15")
@@ -330,7 +379,7 @@ def build(spec: Spec, std: Standard, name: str | None = None) -> Footprint:
         [Sym("layer"), "F.Cu"],
         [Sym("descr"), f"{spec.package.family} {spec.package.pins} pins; {notes[0]}; {spec.datasheet}"],
         [Sym("tags"), f"{spec.package.family} {name}"],
-        _property("Reference", "REF**", 0, 0, mech15, text_size, hide=False),
+        _property("Reference", "REF**", 0, 0, mech15, text_size, hide=True),
         _property("Value", name, 0, placement.y1 + 1, "F.Fab", 1.0, hide=True),
         [Sym("attr"), Sym("through_hole" if any(p.drill for p in pads) else "smd")],
     ]
@@ -338,16 +387,17 @@ def build(spec: Spec, std: Standard, name: str | None = None) -> Footprint:
     tree.append(_rect(body, mech13, mech_w))
     # Mechanical 15: placement outline, centre cross, polarity, PIN1
     tree.append(_rect(placement, mech15, mech_w))
-    if std.flag("footprint", "centre_cross"):
+    if std.flag("footprint", "centre_cross"):  # the reference point: a cross with a small circle (Figure 11)
         cross = min(CROSS, (placement.x1 - placement.x0) / 4, (placement.y1 - placement.y0) / 4)
         tree.append(_line((-cross, 0, cross, 0), mech15, mech_w))
         tree.append(_line((0, -cross, 0, cross), mech15, mech_w))
+        tree.append(_circle(0, 0, cross * 0.4, mech15, mech_w))
+    if std.flag("footprint", "assembly_designator"):  # Altium's special string, TrueType (§2.1)
+        tree.append(_text(DESIGNATOR, 0, -text_size, mech15, text_size, FACE))
     mark, how = polarity_pad(spec, pads)
     if mark is not None:
-        _polarity(tree, std, mark, how, body, pads, mech15, silk_w, text_size)
-    # KiCad's own views
-    tree.append(_rect(body, "F.Fab", mech_w))
-    tree.append(_text("${REFERENCE}", 0, 0, "F.Fab", text_size))
+        _polarity(tree, std, mark, how, body, pads, mech13, mech15, silk_w)
+    # KiCad's courtyard (its DRC needs one); no F.Fab copy: the standard's assembly layers are Mech 13 / 15
     tree.append(_rect(placement, "F.CrtYd", std.num("choices", "courtyard_width")))
     tree += [_line(s, "F.SilkS", silk_w) for s in silk]
     tree += [_pad(p, std) for p in pads]
@@ -370,9 +420,9 @@ def _polarity(
     how: str,
     body: Box,
     pads: list[Pad],
+    mech13: str,
     mech15: str,
     silk_w: float,
-    designator: float,
 ) -> None:
     """Polarity on Mechanical 15 (inside the body) and on the silkscreen (outside, clear of the pads)."""
     mech_w = std.num("choices", "mech_width")
@@ -388,20 +438,14 @@ def _polarity(
             tree.append(_line((x - s, 0, x + s, 0), mech15, mech_w))
             tree.append(_line((x, -s, x, s), mech15, mech_w))
         else:
-            # a dot in the body corner nearest pin 1, the PIN1 text beside it if it clears the designator
-            r = min(0.2, (body.x1 - body.x0) / 10, (body.y1 - body.y0) / 10)
-            cx, cy = (body.x0 + body.x1) / 2, (body.y0 + body.y1) / 2
-            px = body.x0 + 1.5 * r if mark.x <= cx else body.x1 - 1.5 * r
-            py = body.y0 + 1.5 * r if mark.y <= cy else body.y1 - 1.5 * r
-            tree.append(_dot(px, py, r, mech15))
+            # pad 1 copied to Mech 15 as PIN1 (Figure 11); a pin-1 circle on Mech 13 in the body corner
             if text := std.text("footprint", "pin1_text"):
-                size = min(0.4, (body.y1 - body.y0) / 6)
-                width = size * 0.8 * len(text)
-                tx = px + 1.5 * r + width / 2 if px < cx else px - 1.5 * r - width / 2
-                fits = body.x0 + 0.05 < tx - width / 2 and tx + width / 2 < body.x1 - 0.05
-                clear = abs(py - cy) - size / 2 > designator / 2 + 0.1
-                if fits and clear:
-                    tree.append(_text(text, tx, py, mech15, size))
+                tree.append(pin1_copy(mark, mech15, text, std))
+            r = min(0.3, (body.x1 - body.x0) / 8, (body.y1 - body.y0) / 8)
+            cx, cy = (body.x0 + body.x1) / 2, (body.y0 + body.y1) / 2
+            px = body.x0 + 1.6 * r if mark.x <= cx else body.x1 - 1.6 * r
+            py = body.y0 + 1.6 * r if mark.y <= cy else body.y1 - 1.6 * r
+            tree.append(_circle(px, py, r, mech13, mech_w))
     if not std.flag("footprint", "silk_polarity"):
         return
     # silkscreen: a dot just outside pad 1's outer corner (ICs, connectors); a bar / + outside the marked pad

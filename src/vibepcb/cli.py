@@ -79,6 +79,10 @@ from vibepcb import (
     tscircuit,
     verify,
 )
+from vibepcb.parts import altium as part_altium
+from vibepcb.parts import build as part_build
+from vibepcb.parts import check as part_check
+from vibepcb.parts import fetch, spec, standard
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -895,9 +899,6 @@ def cmd_docs() -> int:
 
 
 def cmd_part_fetch(mpn: str, manufacturer: str | None, datasheet: str | None) -> int:
-    from vibepcb.parts import build as part_build
-    from vibepcb.parts import fetch, spec
-
     if datasheet:
         info = fetch.PartInfo(mpn, manufacturer or "", "", "", datasheet, "unknown", "manual")
         with contextlib.suppress(fetch.FetchError):
@@ -947,9 +948,6 @@ def cmd_part_fetch(mpn: str, manufacturer: str | None, datasheet: str | None) ->
 
 
 def cmd_part_build(mpn: str, standard_name: str, *, check: bool) -> int:
-    from vibepcb.parts import build as part_build
-    from vibepcb.parts import check as part_check
-
     built = part_build.build(mpn, standard_name=standard_name)
     for svg in built.previews:
         _png(svg, svg.with_suffix(".png"), 800)
@@ -968,10 +966,6 @@ def cmd_part_build(mpn: str, standard_name: str, *, check: bool) -> int:
 
 
 def cmd_part_export(mpn: str, standard_name: str, altium: str) -> int:
-    from vibepcb.parts import altium as part_altium
-    from vibepcb.parts import build as part_build
-    from vibepcb.parts import check as part_check
-
     built = part_build.build(mpn, standard_name=standard_name)
     report = part_check.run(built)
     if not report.ok:
@@ -984,8 +978,6 @@ def cmd_part_export(mpn: str, standard_name: str, altium: str) -> int:
 
 
 def cmd_part(args: argparse.Namespace) -> int:
-    from vibepcb.parts import fetch, spec, standard
-
     try:
         match args.action:
             case "fetch":

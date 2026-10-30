@@ -128,8 +128,11 @@ def _footprint_rules(built: Built, std: Standard, report: Report) -> None:
     mask = std.num("footprint", "mask_expansion")
     paste = std.num("footprint", "paste_expansion")
     shape = std.text("footprint", "pad_shape")
+    pin1 = std.text("footprint", "pin1_text")
     for pad in sexpr.children(fp.tree, "pad"):
         number = pad[1]
+        if number == pin1:  # the pad-1 copy on the assembly layer: no copper, no mask
+            continue
         m = sexpr.child(pad, "solder_mask_margin")
         if m is None or abs(float(str(m[1])) - mask) > EPS:
             report.errors.append(
@@ -190,15 +193,16 @@ def _footprint_rules(built: Built, std: Standard, report: Report) -> None:
         report.errors.append(f"no component outline on {mech13} ({std.rule('layers', 'mech13').source})")
     if mech15 not in layers:
         report.errors.append(f"no assembly information on {mech15} ({std.rule('layers', 'mech15').source})")
-    ref = sexpr.property_node(fp.tree, "Reference")
-    if std.flag("footprint", "assembly_designator") and (ref is None or sexpr.child(ref, "layer") != ["layer", mech15]):
-        report.errors.append(f"designator not on {mech15} ({std.rule('footprint', 'assembly_designator').source})")
-    texts = [n[2] for n in sexpr.walk(fp.tree) if sexpr.head(n) == "fp_text"]
-    pin1 = std.text("footprint", "pin1_text")
-    if pin1 and built.spec.kind in ("ic", "opamp", "connector", "transistor") and pin1 not in texts:
-        report.warnings.append(
-            f"no {pin1} text on {mech15} (body too small?) ({std.rule('footprint', 'pin1_text').source})"
-        )
+    texts = {str(n[2]): sexpr.child(n, "layer") for n in sexpr.walk(fp.tree) if sexpr.head(n) == "fp_text"}
+    if std.flag("footprint", "assembly_designator") and texts.get(".Designator") != ["layer", mech15]:
+        report.errors.append(f"no .Designator on {mech15} ({std.rule('footprint', 'assembly_designator').source})")
+    copies = [n for n in sexpr.children(fp.tree, "pad") if n[1] == pin1]
+    if (
+        pin1
+        and built.spec.kind in ("ic", "opamp", "connector", "transistor")
+        and (len(copies) != 1 or sexpr.child(copies[0], "layers") != ["layers", mech15])
+    ):
+        report.errors.append(f"pad 1 not copied to {mech15} as {pin1} ({std.rule('footprint', 'pin1_text').source})")
 
 
 def run(built: Built) -> Report:

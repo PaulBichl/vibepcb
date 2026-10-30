@@ -47,6 +47,10 @@ def test_symbol_follows_the_standard(part: str) -> None:
     keys = [n[1] for n in sym.tree if isinstance(n, list) and sexpr.head(n) == "property"]
     assert keys == ["Reference", "Value", "Footprint", "Datasheet", "Description"]
     assert sexpr.property_value(sym.tree, "Footprint") == f"{symbol.LIBRARY}:FP"
+    assert sexpr.property_value(sym.tree, "Datasheet") == ""  # no parameters (§1.3)
+    assert sexpr.property_value(sym.tree, "Description") == ""
+    font = sexpr.child(sexpr.child(ref, "effects") or [], "font") or []
+    assert sexpr.child(font, "face") == ["face", "Arial"]  # designator Arial (§1.3)
 
 
 def test_pin_sides() -> None:

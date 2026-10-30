@@ -27,6 +27,7 @@ if TYPE_CHECKING:
 
 VERSION = "20241209"  # KiCad 9 symbol library format (Altium 26 imports KiCad up to 9)
 GENERATOR = "vibepcb"
+FACE = "Arial"  # §1.3 designator Arial 8
 LIBRARY = "vibepcb_parts"  # footprint library nickname in the Footprint field
 _GROUND = re.compile(r"^(A|D|P|S)?(GND|VSS|VEE|V-|EP_?GND|PAD_?GND)\d*$|GND", re.IGNORECASE)
 _SUPPLY = re.compile(r"^(A|D|P)?(V|VCC|VDD|VIN|VBAT|VBUS|VS|V\+|AVIN|PVIN|AVDD|DVDD|IOVDD|VIO)", re.IGNORECASE)
@@ -138,18 +139,24 @@ def _r(v: float) -> Sym:
     return Sym(f"{v:.4f}".rstrip("0").rstrip(".") if v != 0 else "0")
 
 
-def _effects(size: float, justify: str = "") -> list[Node]:
-    node: list[Node] = [Sym("effects"), [Sym("font"), [Sym("size"), _r(size), _r(size)]]]
+def _effects(size: float, justify: str = "", face: str = "") -> list[Node]:
+    font: list[Node] = [Sym("font")]
+    if face:
+        font.append([Sym("face"), face])
+    font.append([Sym("size"), _r(size), _r(size)])
+    node: list[Node] = [Sym("effects"), font]
     if justify:
         node.append([Sym("justify"), *[Sym(j) for j in justify.split()]])
     return node
 
 
-def _property(key: str, value: str, x: float, y: float, size: float, *, hide: bool, justify: str = "") -> list[Node]:
+def _property(
+    key: str, value: str, x: float, y: float, size: float, *, hide: bool, justify: str = "", face: str = ""
+) -> list[Node]:
     node: list[Node] = [Sym("property"), key, value, [Sym("at"), _r(x), _r(y), Sym("0")]]
     if hide:
         node.append([Sym("hide"), Sym("yes")])
-    node.append(_effects(size, justify))
+    node.append(_effects(size, justify, face))
     return node
 
 
@@ -260,11 +267,13 @@ def build(spec: Spec, std: Standard, footprint_name: str) -> Symbol:
             ref_size,
             hide=not std.flag("symbol", "designator_visible"),
             justify="left bottom",
+            face=FACE,
         ),
         _property("Value", "" if hide_value else spec.mpn, 0, 0, size, hide=hide_value),
         _property("Footprint", f"{LIBRARY}:{footprint_name}", 0, 0, size, hide=True),
-        _property("Datasheet", spec.datasheet, 0, 0, size, hide=True),
-        _property("Description", spec.description, 0, 0, size, hide=True),
+        # §1.3 no parameters: KiCad's own fields stay, empty (the datasheet / description live in the part spec)
+        _property("Datasheet", "", 0, 0, size, hide=True),
+        _property("Description", "", 0, 0, size, hide=True),
         [Sym("symbol"), f"{name}_0_1", *graphics],
         [Sym("symbol"), f"{name}_1_1", *pin_nodes],
         [Sym("embedded_fonts"), Sym("no")],

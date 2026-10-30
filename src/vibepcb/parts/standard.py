@@ -50,7 +50,7 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "reference_prefix": {"ic": "U"},
     },
     "footprint": {
-        "land_pattern": "ipc7351",
+        "land_pattern": "datasheet_first",
         "density": "N",
         "manual_families": ["tht", "connector", "custom"],
         "origin": "pads_centre",

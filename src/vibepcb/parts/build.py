@@ -20,7 +20,7 @@ from vibepcb.parts import footprint, model3d, spec, standard, symbol
 if TYPE_CHECKING:
     from pathlib import Path
 
-FOOTPRINT_LAYERS = "F.Cu,F.Mask,F.SilkS,F.Fab,F.CrtYd,User.13,User.15"
+FOOTPRINT_LAYERS = "F.Cu,F.Mask,F.SilkS,User.13,User.15"
 
 
 def parts_dir() -> Path:

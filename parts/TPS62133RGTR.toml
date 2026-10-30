@@ -1,5 +1,6 @@
 # Part spec for TPS62133RGTR (format: vibepcb/parts/spec.py). Pages are PDF pages of the datasheet
-# SLVSAG7F (tps62130.pdf, revised November 2021): pin table page 3, package outline RGT0016C page 40.
+# SLVSAG7F (tps62130.pdf, revised November 2021): pin table page 3, package outline RGT0016C page 40,
+# example board layout page 41.
 
 [part]
 mpn = "TPS62133RGTR"
@@ -21,6 +22,14 @@ body = { l = [2.9, 3.1], w = [2.9, 3.1], h = [0.8, 1.0] }
 lead = { l = [0.3, 0.5], w = [0.18, 0.3] }
 exposed_pad = { l = [1.61, 1.68, 1.75], w = [1.61, 1.68, 1.75], number = "17" }
 page = 40
+
+[land]
+# RGT0016C example board layout: 16X (0.6) x 16X (0.24) pads, (2.8) pad centre to pad centre both ways,
+# thermal pad (1.68) square
+page = 41
+size = [0.6, 0.24]
+centres = 2.8
+exposed_pad = [1.68, 1.68]
 
 [[pin]]
 number = "1"

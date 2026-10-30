@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import shutil
 import subprocess
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -50,7 +51,7 @@ def test_footprint_follows_the_standard(part: str) -> None:
         assert fp.placement.x0 <= b.x0 - 0.1 + 1e-6
         assert fp.placement.x1 >= b.x1 + 0.1 - 1e-6
     # pads: rounded rectangles, mask and paste expansion 0
-    pads = list(sexpr.children(tree, "pad"))
+    pads = [n for n in sexpr.children(tree, "pad") if n[1] != "PIN1"]
     assert len(pads) == len(fp.pads)
     for pad in pads:
         assert pad[3] == "roundrect"
@@ -60,19 +61,26 @@ def test_footprint_follows_the_standard(part: str) -> None:
     layers = [sexpr.child(n, "layer") for n in sexpr.walk(tree) if sexpr.head(n) in ("fp_rect", "fp_line")]
     assert ["layer", "User.13"] in layers
     assert ["layer", "User.15"] in layers
-    ref = sexpr.property_node(tree, "Reference")
-    assert ref is not None
-    assert sexpr.child(ref, "layer") == ["layer", "User.15"]
+    designator = next(n for n in sexpr.walk(tree) if sexpr.head(n) == "fp_text" and n[2] == ".Designator")
+    assert sexpr.child(designator, "layer") == ["layer", "User.15"]
+    font = sexpr.child(sexpr.child(designator, "effects") or [], "font") or []
+    assert sexpr.child(font, "face") == ["face", "Arial"]  # TrueType (§2.1)
+    assert not [
+        n for n in sexpr.walk(tree) if sexpr.child(n, "layer") == ["layer", "F.Fab"] and sexpr.head(n) != "property"
+    ]
     assert fp.toe is not None
     assert fp.toe >= STD.num("footprint", "toe_min")
 
 
 def test_ic_has_pin1_marks() -> None:
     fp = build("LM358DR")
-    texts = [n[2] for n in sexpr.walk(fp.tree) if sexpr.head(n) == "fp_text"]
-    assert "PIN1" in texts
+    # pad 1 copied onto Mech 15 as PIN1: same place and size, no copper, mask or paste (§2.1, Figure 11)
+    copy = next(n for n in sexpr.children(fp.tree, "pad") if n[1] == "PIN1")
+    assert sexpr.child(copy, "layers") == ["layers", "User.15"]
+    assert sexpr.child(copy, "at") == ["at", "-2.475", "-1.905"]
+    assert sexpr.child(copy, "size") == ["size", "1.95", "0.6"]
     dots = [n for n in sexpr.walk(fp.tree) if sexpr.head(n) == "fp_circle"]
-    assert {sexpr.child(d, "layer")[1] for d in dots} == {"User.15", "F.SilkS"}  # type: ignore[index]
+    assert {sexpr.child(d, "layer")[1] for d in dots} == {"User.13", "User.15", "F.SilkS"}  # type: ignore[index]
     silk_dot = next(d for d in dots if sexpr.child(d, "layer") == ["layer", "F.SilkS"])
     centre = sexpr.child(silk_dot, "center")
     assert centre is not None
@@ -81,7 +89,9 @@ def test_ic_has_pin1_marks() -> None:
 
 def test_resistor_has_no_polarity() -> None:
     fp = build("RC0603FR-0710KL")
-    assert not [n for n in sexpr.walk(fp.tree) if sexpr.head(n) == "fp_circle"]
+    assert not [n for n in sexpr.children(fp.tree, "pad") if n[1] == "PIN1"]
+    circles = [n for n in sexpr.walk(fp.tree) if sexpr.head(n) == "fp_circle"]
+    assert [sexpr.child(c, "layer") for c in circles] == [["layer", "User.15"]]  # the centre cross only
     assert fp.name == "RESC1608X50N"
 
 
@@ -152,3 +162,25 @@ def test_kicad_loads_the_footprint(tmp_path: Path) -> None:
     )
     assert run.returncode == 0, run.stderr
     assert (tmp_path / f"{fp.name}.svg").is_file()
+
+
+def test_datasheet_land_wins_over_the_calculation() -> None:
+    # §2 / Figure 5: the datasheet's footprint dimensions when it gives them, calculated values otherwise
+    data = tomllib.loads((DATA / "TPS62133RGTR.toml").read_text(encoding="utf-8"))
+    data["land"] = {"page": 41, "size": [0.6, 0.24], "centres": 2.8, "exposed_pad": [1.68, 1.68]}
+    fp = footprint.build(spec.parse(data), STD)
+    pads = {p.number: p for p in fp.pads}
+    assert (pads["1"].x, pads["1"].y, pads["1"].l, pads["1"].w) == (-1.4, -0.75, 0.6, 0.24)
+    assert (pads["5"].x, pads["5"].y, pads["5"].l, pads["5"].w) == (-0.75, 1.4, 0.24, 0.6)
+    assert (pads["17"].l, pads["17"].w) == (1.68, 1.68)
+    assert fp.notes[0] == "land pattern from the datasheet, page 41"
+    assert fp.name == "QFN50P300X300X100-17N"
+    assert fp.toe == 0.2  # (2.8 + 0.6 - 3.0) / 2 at the nominal body
+
+
+def test_land_rows_need_an_ipc_family() -> None:
+    data = tomllib.loads((DATA / "TPS62133RGTR.toml").read_text(encoding="utf-8"))
+    data["package"]["family"] = "custom"
+    data["land"] = {"page": 41, "size": [0.6, 0.24], "centres": 2.8}
+    with pytest.raises(spec.SpecError, match="no pad rows"):
+        spec.parse(data)

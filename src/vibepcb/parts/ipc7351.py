@@ -171,53 +171,64 @@ def _clear_exposed_pad(pads: list[Pad], ep: Pad, gap: float) -> list[Pad]:
     return out
 
 
+def arrange(package: Package, row: LandRow, row_y: LandRow | None = None) -> list[Pad]:
+    """Terminal pads of a package from its land row(s), numbered in IPC zero orientation (pin 1 top left)."""
+    if package.style == "chip":
+        return [Pad("1", -row.centre, 0.0, row.pad_length, row.x), Pad("2", row.centre, 0.0, row.pad_length, row.x)]
+    pads: list[Pad] = []
+    if package.sides == 2:
+        left, right = _two_rows(package.pins)
+        ys = _column(max(*left, *right) + 1, package.pitch)
+        numbers = iter(range(1, package.pins + 1))
+        pads += [Pad(str(next(numbers)), -row.centre, ys[slot], row.pad_length, row.x) for slot in left]
+        pads += [Pad(str(next(numbers)), row.centre, ys[slot], row.pad_length, row.x) for slot in right]
+        return pads
+    row_y = row_y or row
+    pins_x = package.pins_x if package.pins_x is not None else package.pins // 4
+    pins_y = (package.pins - 2 * pins_x) // 2
+    ys = _column(pins_y, package.pitch)
+    xs = _column(pins_x, package.pitch)
+    n = 0
+    for y in ys:  # left, top to bottom
+        n += 1
+        pads.append(Pad(str(n), -row.centre, y, row.pad_length, row.x))
+    for x in xs:  # bottom, left to right
+        n += 1
+        pads.append(Pad(str(n), x, row_y.centre, row_y.x, row_y.pad_length))
+    for y in reversed(ys):  # right, bottom to top
+        n += 1
+        pads.append(Pad(str(n), row.centre, y, row.pad_length, row.x))
+    for x in reversed(xs):  # top, right to left
+        n += 1
+        pads.append(Pad(str(n), x, -row_y.centre, row_y.x, row_y.pad_length))
+    return pads
+
+
+def row_from_land(pad_length: float, pad_width: float, centres: float) -> LandRow:
+    """A land row as a datasheet draws it: pad size and pad centre to pad centre across the package."""
+    return LandRow(round(centres + pad_length, 4), round(centres - pad_length, 4), pad_width)
+
+
 def calculate(package: Package, density: str = "N", kind: str = "ic", ep_clearance: float = EP_CLEARANCE) -> Pattern:
     """The land pattern of an IPC family package, pads numbered in IPC zero orientation (pin 1 top left)."""
     if package.style is None:
         msg = f"family {package.family} has no IPC calculation (needs an explicit [land])"
         raise ValueError(msg)
     f = fillets(package, density)
-    pads: list[Pad] = []
     rows: list[LandRow] = []
     if package.style == "chip":
         if package.lead_l is None:
             msg = "chip package without lead.l"
             raise ValueError(msg)
-        row = land_row(package.body_l, package.lead_l, package.lead_w or package.body_w, f)
-        rows.append(row)
-        pads = [Pad("1", -row.centre, 0.0, row.pad_length, row.x), Pad("2", row.centre, 0.0, row.pad_length, row.x)]
+        rows.append(land_row(package.body_l, package.lead_l, package.lead_w or package.body_w, f))
     else:
         if package.span is None or package.lead_l is None or package.lead_w is None:
             msg = f"{package.family} package needs span, lead.l and lead.w"
             raise ValueError(msg)
-        row = land_row(package.span, package.lead_l, package.lead_w, f)
-        rows.append(row)
-        if package.sides == 2:
-            left, right = _two_rows(package.pins)
-            ys = _column(max(*left, *right) + 1, package.pitch)
-            numbers = iter(range(1, package.pins + 1))
-            pads += [Pad(str(next(numbers)), -row.centre, ys[slot], row.pad_length, row.x) for slot in left]
-            pads += [Pad(str(next(numbers)), row.centre, ys[slot], row.pad_length, row.x) for slot in right]
-        else:
-            pins_x = package.pins_x if package.pins_x is not None else package.pins // 4
-            pins_y = (package.pins - 2 * pins_x) // 2
-            row_y = land_row(package.span_y or package.span, package.lead_l, package.lead_w, f)
-            rows.append(row_y)
-            ys = _column(pins_y, package.pitch)
-            xs = _column(pins_x, package.pitch)
-            n = 0
-            for y in ys:  # left, top to bottom
-                n += 1
-                pads.append(Pad(str(n), -row.centre, y, row.pad_length, row.x))
-            for x in xs:  # bottom, left to right
-                n += 1
-                pads.append(Pad(str(n), x, row_y.centre, row_y.x, row_y.pad_length))
-            for y in reversed(ys):  # right, bottom to top
-                n += 1
-                pads.append(Pad(str(n), row.centre, y, row.pad_length, row.x))
-            for x in reversed(xs):  # top, right to left
-                n += 1
-                pads.append(Pad(str(n), x, -row_y.centre, row_y.x, row_y.pad_length))
+        rows.append(land_row(package.span, package.lead_l, package.lead_w, f))
+        if package.sides == 4:
+            rows.append(land_row(package.span_y or package.span, package.lead_l, package.lead_w, f))
+    pads = arrange(package, *rows)
     if ep := package.exposed_pad:
         ep_pad = Pad(ep.number, 0.0, 0.0, round(ep.w.nom, 4), round(ep.l.nom, 4))  # ep.l runs along y
         pads = [*_clear_exposed_pad(pads, ep_pad, ep_clearance), ep_pad]

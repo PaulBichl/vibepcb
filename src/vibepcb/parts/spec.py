@@ -20,10 +20,14 @@ Everything after the spec is deterministic. Every dimension is given as the draw
     exposed_pad = { l = [..], w = [..], number = "9" } # optional
     page = 30
 
-    [land]                               # only families in the standard's manual list (custom, tht, connector)
-    page = 31
-    [[land.pad]]
-    number = "1"; x = -2.7; y = -1.905; l = 1.55; w = 0.6   # mm, l along x; optional shape, drill, rotation
+    [land]                               # the datasheet's recommended land pattern, when it has one (§2):
+    page = 31                            #   used as given; without [land] it is calculated (IPC-7351B)
+    size = [1.55, 0.6]                   # pad length across the row x width
+    centres = 5.4                        # pad centre to pad centre across the package (C)
+    # exposed_pad = [1.7, 1.7]           # thermal pad land, default: the package's nominal pad
+    # custom / THT / connectors: explicit pads instead
+    # [[land.pad]]
+    # number = "1"; x = -2.7; y = -1.905; l = 1.55; w = 0.6   # mm, l along x; optional shape, drill, rotation
 
     [[pin]]
     number = "1"; name = "OUT1"; type = "output"; page = 3
@@ -152,9 +156,15 @@ class LandPad:
 
 @dataclass(frozen=True)
 class Land:
-    pads: list[LandPad]
+    """The datasheet's recommended land pattern: explicit pads, or for IPC families the drawing's few numbers."""
+
+    pads: list[LandPad]  # explicit pads (custom / THT / connectors); empty when given by row
     page: int
-    name: str = ""  # footprint name (the package's, e.g. HC49-US_P4.88); default <family>_<mpn>
+    name: str = ""  # footprint name for explicit pads (the package's, e.g. HC49-US_P4.88mm)
+    size: tuple[float, float] | None = None  # terminal pad: length across the row x width
+    centres: float = 0.0  # pad centre to pad centre across the package
+    centres_y: float = 0.0  # four-sided packages: the other direction (default = centres)
+    exposed_pad: tuple[float, float] | None = None  # thermal pad x, y size (default: the package's nominal)
 
 
 @dataclass(frozen=True)
@@ -184,7 +194,7 @@ class Spec:
     @property
     def pad_numbers(self) -> list[str]:
         """The pads the package has: 1..pins, plus the exposed pad."""
-        if self.land:
+        if self.land and self.land.pads:
             return list(dict.fromkeys(p.number for p in self.land.pads))
         numbers = [str(i) for i in range(1, self.package.pins + 1)]
         if self.package.exposed_pad and self.package.exposed_pad.number not in numbers:
@@ -306,7 +316,26 @@ def _package(raw: dict[str, Any]) -> Package:
 
 def _land(raw: dict[str, Any]) -> Land:
     where = "[land]"
-    _known(raw, {"pad", "page", "name"}, where)
+    _known(raw, {"pad", "page", "name", "size", "centres", "centres_y", "exposed_pad"}, where)
+    if "size" in raw:  # the datasheet's land as a row: pad size + centre distance
+        if "pad" in raw:
+            msg = f"{where}: give either size / centres or [[land.pad]], not both"
+            raise SpecError(msg)
+        size = _pair(raw["size"], f"{where}.size")
+        centres = float(_req(raw, "centres", where, (int, float)))
+        ep = _pair(raw["exposed_pad"], f"{where}.exposed_pad") if "exposed_pad" in raw else None
+        if centres <= size[0]:
+            msg = f"{where}: centres ({centres}) must exceed the pad length ({size[0]})"
+            raise SpecError(msg)
+        return Land(
+            [],
+            _page(raw, where),
+            "",
+            size,
+            centres,
+            float(raw.get("centres_y", centres)),
+            ep,
+        )
     pads = []
     for i, p in enumerate(_req(raw, "pad", where, list)):
         w = f"[[land.pad]] #{i + 1}"
@@ -337,6 +366,14 @@ def _land(raw: dict[str, Any]) -> Land:
         msg = f"{where}.name: letters, digits and . _ + - only, got {name!r}"
         raise SpecError(msg)
     return Land(pads, _page(raw, where), name)
+
+
+def _pair(value: Any, where: str) -> tuple[float, float]:
+    ok = isinstance(value, list) and len(value) == 2
+    if not ok or not all(isinstance(v, int | float) and not isinstance(v, bool) and v > 0 for v in value):
+        msg = f"{where}: [length, width] in mm, both > 0, got {value!r}"
+        raise SpecError(msg)
+    return float(value[0]), float(value[1])
 
 
 def _pins(raw: list[dict[str, Any]]) -> list[Pin]:
@@ -405,6 +442,9 @@ def parse(data: dict[str, Any]) -> Spec:
 def validate(spec: Spec) -> None:
     """Cross-checks: pins complete and unique, land present where the family needs one."""
     pkg = spec.package
+    if spec.land is not None and spec.land.size is not None and pkg.style is None:
+        msg = f"[land]: family {pkg.family} has no pad rows; list the pads as [[land.pad]]"
+        raise SpecError(msg)
     if pkg.style is None and spec.land is None:
         msg = f"[land]: family {pkg.family} has no IPC calculation; give the datasheet land pattern as [[land.pad]]"
         raise SpecError(msg)

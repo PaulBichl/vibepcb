@@ -695,11 +695,11 @@ in `PART-PLAN.md`, the agent's workflow in `AGENTS.md` (Components).
 | Module | Does |
 |--------|------|
 | `standard.py` | `rules/parts/<name>.toml`: every rule `{ value, source = "§..." }`, open choices `{ value, reason }`, `[unexpressed]` items for the manual check; unknown keys fail |
-| `spec.py` | `parts/<MPN>.toml`: part, package drawing (dimensions min / nom / max, datasheet pages), explicit `[land]`, pins; validation; skeleton |
+| `spec.py` | `parts/<MPN>.toml`: part, package drawing (dimensions min / nom / max, datasheet pages), the datasheet's `[land]` (pad size + centres, or explicit pads), pins; validation; skeleton |
 | `fetch.py` | DigiKey v4 (OAuth2 client credentials, token cached without the secret) then Mouser; exact MPN match; answers + datasheet cached in `~/.cache/vibepcb/parts/<MPN>/` |
 | `ipc7351.py` | IPC-7351B Z / G / X (RMS heel tolerance, F 0.05, P 0.025), fillet tables 3-2, 3-3, 3-5/3-6, 3-15; pads in IPC zero orientation; IPC names (`SOIC127P600X175-8N`); SOT-23-3/5 slots |
-| `footprint.py` | KiCad 9 `(footprint ...)`: roundrect pads, mask / paste 0, Mech 13 body, Mech 15 placement outline / cross / designator / PIN1 / polarity, silk clipped 0.2 mm from pads (and out of connector pin fronts), F.Fab, F.CrtYd, model link |
-| `symbol.py` | KiCad 9 symbol: 2 mm grid and pins, inputs left / outputs right / supply top / ground and EP bottom, numbered repeats, designator top left, empty hidden Value; op-amp triangles, two-terminal drawings |
+| `footprint.py` | KiCad 9 `(footprint ...)`: pads from the datasheet land, else IPC-7351B (§2, Figure 5); roundrect, mask / paste 0; Mech 13 body + pin-1 circle; Mech 15 placement outline, cross with circle, `.Designator` (Arial TrueType), pad 1 copied as PIN1 (no copper), cathode / + marks; silk clipped 0.2 mm from pads (out of connector pin fronts) with a pin-1 dot; F.CrtYd; no F.Fab; model link |
+| `symbol.py` | KiCad 9 symbol: 2 mm grid and pins, inputs left / outputs right / supply top / ground and EP bottom, numbered repeats, designator top left (Arial), empty hidden Value, Datasheet / Description empty (no parameters, §1.3); op-amp triangles, two-terminal drawings |
 | `model3d.py` | optional CadQuery STEP: max body box, leads to the max span, QFN terminals, pin-1 dimple |
 | `check.py` | `check.txt`: errors (KiCad load, pins vs pads, each rule with its §), warnings (lifecycle, calculated land), manual items |
 | `altium.py` | `export --altium`: files, `IMPORT-<MPN>.md`, sidecar JSON (layer map, line widths, field visibility) |
