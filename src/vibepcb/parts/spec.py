@@ -202,7 +202,7 @@ def dim(value: Any, where: str) -> Dim:
     if isinstance(value, list) and all(isinstance(v, int | float) and not isinstance(v, bool) for v in value):
         if len(value) == 2:
             lo, hi = map(float, value)
-            d = Dim(lo, (lo + hi) / 2, hi)
+            d = Dim(lo, round((lo + hi) / 2, 4), hi)
         elif len(value) == 3:
             d = Dim(*map(float, value))
         elif len(value) == 1:
