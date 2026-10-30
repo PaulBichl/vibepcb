@@ -16,6 +16,9 @@ keywords = ["pcb", "tscircuit", "kicad", "llm", "eda"]
 dependencies = []  # stdlib only: KiCad files are edited via vibepcb.sexpr (kiutils/kicad-skip lose KiCad 9 data)
 
 [project.optional-dependencies]
+parts = [
+    "cadquery",       # `pcb part build`: rough 3D body as STEP (optional; skipped with a note without it)
+]
 dev = [
     "pre-commit",
     "ruff",           # code formatter and linter
@@ -102,6 +105,11 @@ update-precommit = [
     "pre-commit autoupdate --freeze",
     "pre-commit install",
 ]
+
+# `pcb part` with 3D models: `hatch run parts:pcb part all <MPN>` (CadQuery is large, so not in the default env)
+[tool.hatch.envs.parts]
+template = "default"
+features = ["dev", "parts"]
 
 [tool.hatch.envs.all]
 dev-mode = true  # local usage -> editable

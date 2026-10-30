@@ -22,6 +22,11 @@ vibepcb rules <board>   the merged design / manufacturing rule profiles ([rules]
 vibepcb clone <board> <new>  copy a board and its build (variants to compare, no rebuild)
 vibepcb list            list the boards under boards/
 vibepcb docs            download tscircuit's LLM docs to docs/tscircuit-llms.txt
+vibepcb part fetch <MPN> [--manufacturer M] [--datasheet URL|FILE]  DigiKey / Mouser lookup, datasheet download,
+                        spec skeleton parts/<MPN>.toml (fill it in from the datasheet)
+vibepcb part build|check|all <MPN> [--standard NAME]  spec + component standard -> symbol, footprint, STEP,
+                        previews, check.txt in out/parts/<MPN>/
+vibepcb part export <MPN> --altium DIR  the import set for Altium (KiCad 9 files, import steps, sidecar JSON)
 vibepcb doctor          check the setup (node, bun, tsci + patches, KiCad, symbol library, rsvg, network); exit 1 on FAIL
 """
 
@@ -889,6 +894,114 @@ def cmd_docs() -> int:
     return 0
 
 
+def cmd_part_fetch(mpn: str, manufacturer: str | None, datasheet: str | None) -> int:
+    from vibepcb.parts import build as part_build
+    from vibepcb.parts import fetch, spec
+
+    if datasheet:
+        info = fetch.PartInfo(mpn, manufacturer or "", "", "", datasheet, "unknown", "manual")
+        with contextlib.suppress(fetch.FetchError):
+            found = fetch.lookup(mpn, manufacturer=manufacturer)
+            found.datasheet_url = datasheet
+            info = found
+    else:
+        info = fetch.lookup(mpn, manufacturer=manufacturer)
+    for key, value in (
+        ("part", info.mpn),
+        ("manufacturer", info.manufacturer or "?"),
+        ("description", info.description),
+        ("package", info.package or "?"),
+        ("lifecycle", info.lifecycle),
+        ("source", info.source),
+    ):
+        print(f"{key:13}{value}")
+    if info.lifecycle not in ("active", "unknown"):
+        print(f"warning: {info.mpn} is {info.lifecycle}", file=sys.stderr)
+    try:
+        pdf = fetch.download_datasheet(info)
+    except fetch.FetchError as e:
+        print(f"warning: {e}", file=sys.stderr)
+    else:
+        info.datasheet = str(pdf)
+        print(f"{'datasheet':13}{pdf}" + (" (+ .txt)" if pdf.with_suffix(".txt").is_file() else ""))
+    target = part_build.spec_path(info.mpn)
+    if target.is_file():
+        print(f"spec exists: {target.relative_to(paths.ROOT)} (left as it is)")
+        return 0
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        spec.skeleton(
+            mpn=info.mpn,
+            manufacturer=info.manufacturer,
+            description=info.description,
+            datasheet=info.datasheet_url,
+            source=info.source,
+            lifecycle=info.lifecycle,
+            package_hint=info.package,
+        ),
+        encoding="utf-8",
+    )
+    print(f"spec skeleton: {target.relative_to(paths.ROOT)} - fill in [package] and [[pin]] from the datasheet")
+    _written(target)
+    return 0
+
+
+def cmd_part_build(mpn: str, standard_name: str, *, check: bool) -> int:
+    from vibepcb.parts import build as part_build
+    from vibepcb.parts import check as part_check
+
+    built = part_build.build(mpn, standard_name=standard_name)
+    for svg in built.previews:
+        _png(svg, svg.with_suffix(".png"), 800)
+    for note in built.notes:
+        print(f"note: {note}")
+    print(f"symbol {built.symbol.name}, footprint {built.footprint.name}: {built.dir.relative_to(paths.ROOT)}/")
+    _written(built.dir)
+    if not check:
+        return 0
+    report = part_check.run(built)
+    target = built.dir / "check.txt"
+    target.write_text(report.text(), encoding="utf-8")
+    print(report.text(), end="")
+    _written(target)
+    return 0 if report.ok else 1
+
+
+def cmd_part_export(mpn: str, standard_name: str, altium: str) -> int:
+    from vibepcb.parts import altium as part_altium
+    from vibepcb.parts import build as part_build
+    from vibepcb.parts import check as part_check
+
+    built = part_build.build(mpn, standard_name=standard_name)
+    report = part_check.run(built)
+    if not report.ok:
+        print(report.text(), end="")
+        print(f"error: {mpn} fails its check; fix the spec before exporting", file=sys.stderr)
+        return 1
+    for path in part_altium.export(built, Path(altium)):
+        print(f"  {path}")
+    return 0
+
+
+def cmd_part(args: argparse.Namespace) -> int:
+    from vibepcb.parts import fetch, spec, standard
+
+    try:
+        match args.action:
+            case "fetch":
+                return cmd_part_fetch(args.mpn, args.manufacturer, args.datasheet)
+            case "build" | "check" | "all":
+                return cmd_part_build(args.mpn, args.standard, check=args.action != "build")
+            case _:
+                if not args.altium:
+                    print("error: export needs --altium <dir>", file=sys.stderr)
+                    return 2
+                return cmd_part_export(args.mpn, args.standard, args.altium)
+    except (fetch.FetchError, spec.SpecError, standard.StandardError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+
 def cmd_doctor() -> int:
     checks = doctor.collect()
     print(doctor.table(checks))
@@ -979,6 +1092,13 @@ def main(argv: list[str] | None = None) -> int:
     cost_parser = sub.add_parser("cost")
     cost_parser.add_argument("board")
     cost_parser.add_argument("--qty", type=int, help="boards to build (default: [cost] qty, else 5)")
+    part_parser = sub.add_parser("part", help="components from a part number (see PART-PLAN.md)")
+    part_parser.add_argument("action", choices=["fetch", "build", "check", "all", "export"])
+    part_parser.add_argument("mpn")
+    part_parser.add_argument("--manufacturer", help="pick the maker when several list the MPN")
+    part_parser.add_argument("--datasheet", help="datasheet URL or file, when no distributor answers")
+    part_parser.add_argument("--standard", default="altium-students-2022", help="rules/parts/<name>.toml")
+    part_parser.add_argument("--altium", help="export: folder for the Altium import set")
     sub.add_parser("rules").add_argument("board")
     sub.add_parser("list")
     sub.add_parser("docs")
@@ -1000,6 +1120,8 @@ def main(argv: list[str] | None = None) -> int:
                 return cmd_doctor()
             case "rules":
                 return cmd_rules(args.board)
+            case "part":
+                return cmd_part(args)
             case "cost":
                 return cmd_cost(args.board, args.qty)
             case "clone":
