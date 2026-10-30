@@ -295,11 +295,13 @@ def footprint_calls(built: Built) -> list[str]:
             if pin1 is not None and text == pin1_name:
                 continue
             at = sexpr.child(node, "at") or []
-            size = _num(sexpr.child(sexpr.child(node, "effects") or [], "font") or [], "size")
+            text_h = _num(sexpr.child(sexpr.child(node, "effects") or [], "font") or [], "size")
             x, y = float(str(at[1])), float(str(at[2]))
             # Altium places text by its lower left corner: shift from KiCad's centre (Arial ~0.6 x height wide)
-            width = 0.6 * size * len(text)
-            calls.append(f"AddText(Fp, {_q(text)}, {_f(x - width / 2)}, {_f(-y - size / 2)}, {_f(size)}, 0, {layer});")
+            width = 0.6 * text_h * len(text)
+            calls.append(
+                f"AddText(Fp, {_q(text)}, {_f(x - width / 2)}, {_f(-y - text_h / 2)}, {_f(text_h)}, 0, {layer});"
+            )
     if pin1 is not None:  # §2.1 note, Figure 11: pad 1 copied onto Mech 15, named PIN1 (no copper on Mech 15)
         calls.append(
             f"AddPad(Fp, {_q(pin1_name)}, {_f(pin1.x)}, {_f(-pin1.y)}, {_f(pin1.l)}, {_f(pin1.w)}, 0, 0,"
