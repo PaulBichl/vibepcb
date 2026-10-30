@@ -27,7 +27,7 @@ designator_font_pt = { value = 8, source = "§1.3 designator font Arial 8" }
 comment_empty_hidden = { value = true, source = "§1.3 comment value left empty and hidden" }
 parameters = { value = [], source = "§1.3 no parameters are added" }
 body_fill = { value = false, source = "§1.4 rectangle/polygon: draw solid no, fill color no" }
-reference_prefix = { value = { ic = "U", resistor = "R", capacitor = "C", inductor = "L", diode = "D", led = "D", connector = "J", transistor = "Q", crystal = "Y" }, source = "§1.3 designator is part dependent (D?, R?, U?)" }
+reference_prefix = { value = { ic = "U", opamp = "U", resistor = "R", capacitor = "C", polar_capacitor = "C", inductor = "L", diode = "D", led = "D", connector = "J", transistor = "Q", crystal = "Y" }, source = "§1.3 designator is part dependent (D?, R?, U?)" }
 
 [footprint]
 land_pattern = { value = "ipc7351", source = "§2 IPC Compliant Wizard from the datasheet drawing; calculated values where none are given" }

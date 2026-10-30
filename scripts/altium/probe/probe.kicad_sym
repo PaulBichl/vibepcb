@@ -12,19 +12,23 @@
 		)
 		(property "Value" ""
 			(at 0 0 0)
-			(effects (font (size 1.524 1.524)) (hide yes))
+			(hide yes)
+			(effects (font (size 1.524 1.524)))
 		)
 		(property "Footprint" "probe:PROBE_SOIC127P600X175-8N"
 			(at 0 0 0)
-			(effects (font (size 1.524 1.524)) (hide yes))
+			(hide yes)
+			(effects (font (size 1.524 1.524)))
 		)
 		(property "Datasheet" "https://example.com/probe.pdf"
 			(at 0 0 0)
-			(effects (font (size 1.524 1.524)) (hide yes))
+			(hide yes)
+			(effects (font (size 1.524 1.524)))
 		)
 		(property "Description" "probe: which fields and visibility survive the import"
 			(at 0 0 0)
-			(effects (font (size 1.524 1.524)) (hide yes))
+			(hide yes)
+			(effects (font (size 1.524 1.524)))
 		)
 		(property "ProbeVisible" "this parameter should be visible"
 			(at 0 -10 0)
