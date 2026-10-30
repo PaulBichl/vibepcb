@@ -1346,8 +1346,9 @@ class Block:
                 else:
                     runs.append([lp])
             while True:  # a comb that would stand too far out goes back to a stack of caps (Node.comb)
-                slots = []
-                outer: list[tuple[float, Node]] = []  # trees moved off their pin: (pin row, tree)
+                slots: list[tuple[list[symlib.LibPin], End, float, float]] = []
+                # trees moved off their pin: (pin row, tree without its label, the whole tree, slot index)
+                outer: list[tuple[float, Node, Node, int]] = []
                 prev_end = -math.inf
                 long_row = len(pins) > LONG_PIN_ROW
                 connected = [v_of(run[-1]) for run in runs if any(attach_of[lp.number] is not None for lp in run)]
@@ -1371,7 +1372,7 @@ class Block:
                     ):
                         rest = [e for e in a.entries if not (isinstance(e, Label) and e.net == a.net)]
                         if rest:
-                            outer.append((v_p, Node(a.net, rest)))
+                            outer.append((v_p, Node(a.net, rest), a, len(slots)))
                         a = Label(a.net)
                         before, after = _slot_extent(a, side)
                         v_s = v_p if prev_end == -math.inf else max(v_p, _snap(prev_end + before, HALF))
@@ -1400,32 +1401,42 @@ class Block:
                        and a.offset > COMB_MAX_OFFSET]  # fmt: skip
                 if not far:
                     if vertical:  # above / below the chip: packed under it, from a label
-                        moved += [Node(tree.net, [Label(tree.net), *tree.entries]) for _, tree in outer]
+                        moved += [Node(tree.net, [Label(tree.net), *tree.entries]) for _, tree, _, _ in outer]
                         outer = []
                     break
                 for a in far:
                     a.comb, a.offset = False, 0.0
-            # the moved trees: one column outside the pin attachments, each as level with its pin as the
-            # trees above it allow, its trunk starting at a label that faces the pin's own label
-            column: list[tuple[float, float, Node]] = []
-            spans = []  # rows and reach of each pin attachment
-            for _, a, _, v_s in slots:
+            # the moved trees: each just outside the pin attachments it sits beside, as level with its pin as
+            # the trees above it allow; level with the pin and with nothing in the way, a wire runs to it straight
+            # from the pin (its label stays on the tree), else its trunk starts at a label facing the pin's label
+            column: list[tuple[float, float, Node, int | None]] = []  # (u, v, tree, slot drawn by it)
+            spans = []  # slot, rows and reach of each pin attachment
+            for i, (_, a, _, v_s) in enumerate(slots):
                 if a is not None:
                     before, after = _slot_extent(a, side)
                     after = COMB_DEPTH if _combs(a, side) else after
-                    spans.append((v_s - before, v_s + after, u0 + _slot_width(a, side, self.global_nets)))
+                    spans.append((i, v_s - before, v_s + after, u0 + _slot_width(a, side, self.global_nets)))
             end = -math.inf
-            u_col = 0.0  # one column: the trees' labels in line, past every attachment they sit beside
-            for v_p, tree in outer:
+            for v_p, tree, whole, slot in outer:
+                straight = end == -math.inf or _snap(end + max(_extent(whole, vertical)[0], HALF) + GRID, HALF) <= v_p
+                straight = straight and not any(
+                    j != slot and lo < v_p - 1e-6 and hi > v_p + 1e-6 for j, lo, hi, _ in spans
+                )  # nothing standing across the pin's row
+                straight = straight and not any(
+                    j != slot and min(slots[j][2], slots[j][3]) - 1e-6 <= v_p <= max(slots[j][2], slots[j][3]) + 1e-6
+                    for j in lanes
+                )  # no jog lane crossing it
+                if straight:
+                    tree = whole
                 before, after = _extent(tree, vertical)
                 v = v_p if end == -math.inf else max(v_p, _snap(end + max(before, HALF) + GRID, HALF))
                 lo, hi = v - max(before, HALF) - GRID, v + max(after, HALF) + GRID
-                clear = max((w for a, b, w in spans if a < hi and b > lo), default=0.0)
-                reach = _width(Label(tree.net), self.global_nets) - STUB
-                u_col = max(u_col, _snap(clear + 2 * GRID + reach))
-                column.append((0.0, v, tree))
+                clear = max(
+                    (w for j, a, b, w in spans if a < hi and b > lo and not (straight and j == slot)), default=0.0
+                )
+                reach = 0.0 if straight else _width(Label(tree.net), self.global_nets) - STUB
+                column.append((_snap(max(clear + 2 * GRID, u0 + STUB) + reach), v, tree, slot if straight else None))
                 end = v + max(after, HALF)
-            column = [(u_col, v, tree) for _, v, tree in column]
             plans.append((side, vertical, base, n_of, slots, lanes, u0, column))
 
         def draw_at(sheet: Sheet, cx: float, cy: float) -> None:
@@ -1462,6 +1473,7 @@ class Block:
             for side, vertical, base, n_of, slots, lanes, u0, column in plans:
                 f = Frame(cx, cy + base, side) if vertical else Frame(cx + base, cy, side)
                 sign = -1 if side in {"left", "up"} else 1
+                direct = {slot for _, _, _, slot in column if slot is not None}
                 for i, (run, a, v_p, v_s) in enumerate(slots):
                     if a is None:
                         continue  # unconnected pin: no wire (fixes.schematic_no_connects flags it)
@@ -1484,10 +1496,13 @@ class Block:
                         start = max(u0, STUB)
                         sheet.wire(*f.pt(0, v_p), *f.pt(start, v_p))
                         sheet.end(a, f, start, v_p)
-                    else:
+                    elif i not in direct:
                         sheet.end(a, f, 0, v_p)
-                for u_col, v, tree in column:
-                    sheet.label(tree.net, *f.pt(u_col, v), _INWARD[side])
+                for u_col, v, tree, slot in column:
+                    if slot is None:
+                        sheet.label(tree.net, *f.pt(u_col, v), _INWARD[side])
+                    else:
+                        sheet.wire(*f.pt(0, v), *f.pt(u_col, v))
                     sheet.node(tree, f, u_col, v)
 
         # dry run for the cell's extent, then place it by its top-left corner
@@ -1575,11 +1590,12 @@ Shape = tuple[list[tuple[float, float]], float, float]  # a block's cell spots, 
 Spots = list[tuple[float, float]]
 
 
-def _room(paper: tuple[float, float]) -> tuple[float, float, Box]:
+def _room(paper: tuple[float, float], cut: tuple[float, float] = (0.0, 0.0)) -> tuple[float, float, Box]:
     """Room for the drawing on a sheet, as ``fixes.fit_schematic_sheet`` places it (border, texts sticking
-    out, its grid shift), and the title block's corner of that room, which no block may cover."""
+    out, its grid shift), and the title block's corner of that room, which no block may cover; ``cut``
+    makes the room that much narrower / lower."""
     edge = fixes.SHEET_FRAME_MM + 3 * GRID
-    w, h = paper[0] - 2 * edge, paper[1] - 2 * edge
+    w, h = paper[0] - 2 * edge - cut[0], paper[1] - 2 * edge - cut[1]
     tw, th = fixes.TITLE_BLOCK_MM
     return w, h, (w - tw, h - th, w, h)
 
@@ -1617,21 +1633,34 @@ def _shape_choices(options: dict[tuple[float, float], Spots]) -> list[Shape]:
 
 
 def _misfit(
-    sizes: list[tuple[float, float]], spots: Spots, w: float, h: float, room: tuple[float, float, Box]
+    sizes: list[tuple[float, float]],
+    spots: Spots,
+    w: float,
+    h: float,
+    room: tuple[float, float, Box],
+    *,
+    centred: bool = False,
 ) -> float:
-    """How far a packing overflows the room or covers the title block (0: it fits)."""
+    """How far a packing overflows the room or covers the title block (0: it fits); ``centred``: with the
+    packing centred in the room."""
     room_w, room_h, corner = room
     over = max(0.0, w - room_w) + max(0.0, h - room_h)
-    for (bw, bh), (x, y) in zip(sizes, spots, strict=True):
+    dx, dy = ((room_w - w) / 2, (room_h - h) / 2) if centred else (0.0, 0.0)
+    for (bw, bh), (x0, y0) in zip(sizes, spots, strict=True):
+        x, y = x0 + dx, y0 + dy
         if _overlap((x, y, x + bw, y + bh), corner):
             over += min(x + bw - corner[0], y + bh - corner[1])
     return over
 
 
-def _arrange(shapes: list[list[Shape]]) -> tuple[list[int], Spots]:
+def _arrange(
+    shapes: list[list[Shape]], *, centred: bool = False, cut: tuple[float, float] = (0.0, 0.0)
+) -> tuple[list[int], Spots]:
     """Pick a shape per block and the blocks' top-left corners: the smallest paper that holds them all
     (clear of its title block) and the packing with the least bounding box on it (``fixes.fit_schematic_sheet``
-    centres it on the sheet)."""
+    centres it on the sheet). ``centred``: clear of the title block when centred, as an unframed drawing must
+    be (fit_schematic_sheet places it by its anchor points: pushed to the top, labels standing up would stick
+    out of the frame); ``cut``: a smaller room (see :func:`_room`)."""
 
     def sizes(choice: list[int]) -> list[tuple[float, float]]:
         return [opts[i][1:] for opts, i in zip(shapes, choice, strict=True)]
@@ -1639,14 +1668,19 @@ def _arrange(shapes: list[list[Shape]]) -> tuple[list[int], Spots]:
     def best(choice: list[int], room: tuple[float, float, Box]) -> tuple[tuple[float, float], Spots]:
         dims = sizes(choice)
         return min(
-            (((_misfit(dims, spots, w, h, room), w * h), spots) for spots, w, h in _packings(dims, room[0], room[1])),
+            (
+                ((_misfit(dims, spots, w, h, room, centred=centred), w * h), spots)
+                for spots, w, h in _packings(dims, room[0], room[1])
+            ),
             key=lambda r: r[0],
         )
 
+    if not shapes:
+        return [], []
     smallest = [0] * len(shapes)  # each block's least-area shape first
     need = sum((w + CELL_GAP) * (h + CELL_GAP) for w, h in sizes(smallest))
     for paper in PAPERS:
-        room = _room(paper)
+        room = _room(paper, cut)
         if need > room[0] * room[1]:
             continue
         choice = list(smallest)
@@ -1924,25 +1958,73 @@ def _render(
     framed = len(blocks) > 1 or bool(titles and titles[0])
     pad = BLOCK_PAD if framed else 0.0
     head = 2 * TITLE if framed else 0.0
-    shapes = []
-    for block in blocks:
-        title_w = len(block.title or "other") * TITLE * 0.9 if framed else 0.0  # the frame holds its title
-        dims = [(c.width, c.height) for c in block.cells]
-        options: dict[tuple[float, float], Spots] = {}
-        for spots, w, h in _packings(dims, math.inf, math.inf):
-            options.setdefault((_snap(max(w, title_w) + 2 * pad), _snap(h + 2 * pad + head)), spots)
-        shapes.append(_shape_choices(options))
-    choice, origins = _arrange(shapes)
-    layouts = [(block, *opts[i]) for block, opts, i in zip(blocks, shapes, choice, strict=True)]
-    for (block, spots, w, h), (bx, by) in zip(layouts, origins, strict=True):
-        bx, by = bx + SHEET_MARGIN, by + SHEET_MARGIN
-        if framed:
+    if framed:
+        shapes = []
+        for block in blocks:
+            title_w = len(block.title or "other") * TITLE * 0.9  # the frame holds its title
+            dims = [(c.width, c.height) for c in block.cells]
+            options: dict[tuple[float, float], Spots] = {}
+            for spots, w, h in _packings(dims, math.inf, math.inf):
+                options.setdefault((_snap(max(w, title_w) + 2 * pad), _snap(h + 2 * pad + head)), spots)
+            shapes.append(_shape_choices(options))
+        choice, origins = _arrange(shapes)
+        layouts = [(block, *opts[i]) for block, opts, i in zip(blocks, shapes, choice, strict=True)]
+        for (block, spots, w, h), (bx, by) in zip(layouts, origins, strict=True):
+            bx, by = bx + SHEET_MARGIN, by + SHEET_MARGIN
             sheet.frame(bx, by, bx + w, by + h)
             sheet.text(block.title or "other", bx + pad, by + pad + TITLE, TITLE)
-        for cell, (cx, cy) in zip(block.cells, spots, strict=True):
-            cell.draw(sheet, bx + pad + cx, by + pad + head + cy)
-
+            for cell, (cx, cy) in zip(block.cells, spots, strict=True):
+                cell.draw(sheet, bx + pad + cx, by + pad + head + cy)
+    else:  # no frame: the cells themselves go round the title block, which the drawing centred must clear
+        # fit_schematic_sheet places it by its anchor points, not by its texts: should that put texts
+        # outside the frame or onto the title block, the room shrinks by that much and it is drawn again
+        cells = [c for block in blocks for c in block.cells]
+        # (fit picking a smaller paper than the room's can defeat that: then the try that sticks out least)
+        cut = (0.0, 0.0)
+        tries: list[tuple[float, int, str]] = []
+        for _ in range(4):
+            sheet = Sheet(stem, global_nets, _negative(rails, parts))
+            _, origins = _arrange([[([(0.0, 0.0)], c.width, c.height)] for c in cells], centred=True, cut=cut)
+            for cell, (cx, cy) in zip(cells, origins, strict=True):
+                cell.draw(sheet, SHEET_MARGIN + cx, SHEET_MARGIN + cy)
+            sheet.finish()
+            text = _sheet_text(sheet)
+            over = _sheet_overflow(text, sheet)
+            tries.append((over[0] + over[1], len(tries), text))
+            if over == (0.0, 0.0):
+                break
+            cut = (cut[0] + over[0], cut[1] + over[1])
+        return min(tries)[2]
     sheet.finish()
+    return _sheet_text(sheet)
+
+
+def _sheet_overflow(text: str, sheet: Sheet) -> tuple[float, float]:
+    """How far the drawing's texts stick out of the frame or into the title block (x, y) once
+    ``fixes.fit_schematic_sheet`` has placed it."""
+    sch = sexpr.loads(text)
+    items = [n for n in sch if isinstance(n, list) and sexpr.head(n) not in fixes._SHEET_META]
+    anchors = [
+        (fixes._num(c, 1), fixes._num(c, 2)) for i in items for c in sexpr.walk(i) if sexpr.head(c) in fixes._COORDS
+    ]
+    placement = fixes._sheet_placement(anchors + list(fixes._pin_positions(sch).values()))
+    if placement is None or not sheet.points:
+        return 0.0, 0.0
+    paper, dx, dy = placement
+    w, h = fixes.PAPER_SIZES_MM[paper]
+    frame = fixes.SHEET_FRAME_MM
+    drawn = [(x + dx, y + dy) for x, y in sheet.points] + [(b[2] + dx, b[3] + dy) for b in sheet.boxes]
+    drawn += [(b[0] + dx, b[1] + dy) for b in sheet.boxes]
+    xs, ys = [p[0] for p in drawn], [p[1] for p in drawn]
+    corner_x, corner_y = w - frame - fixes.TITLE_BLOCK_MM[0], h - frame - fixes.TITLE_BLOCK_MM[1]
+    into = max((min(x - corner_x, y - corner_y) for x, y in drawn if x > corner_x and y > corner_y), default=0.0)
+    over_x = max(0.0, frame - min(xs), max(xs) - (w - frame)) + into
+    over_y = max(0.0, frame - min(ys), max(ys) - (h - frame)) + into
+    return (_snap(over_x + HALF, HALF) if over_x else 0.0), (_snap(over_y + HALF, HALF) if over_y else 0.0)
+
+
+def _sheet_text(sheet: Sheet) -> str:
+    """The ``.kicad_sch`` text of a finished sheet."""
     xs, ys = [p[0] for p in sheet.points] or [0.0], [p[1] for p in sheet.points] or [0.0]
     width, height = max(xs) + SHEET_MARGIN, max(ys) + SHEET_MARGIN
     # A0 or smaller: fit_schematic_sheet picks the paper; beyond A0 a user sheet that holds it

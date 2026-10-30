@@ -8,6 +8,8 @@ from vibepcb import fixes, schgen, sexpr, symlib
 if TYPE_CHECKING:
     from pathlib import Path
 
+    import pytest
+
     from vibepcb.sexpr import Node
 
 KEY = "connectivity_net"
@@ -515,3 +517,85 @@ def test_blocks_take_their_own_shapes_for_the_smallest_sheet() -> None:
 def test_block_shapes_drop_dominated_ones() -> None:
     options: dict[tuple[float, float], schgen.Spots] = {(100.0, 50.0): [], (120.0, 60.0): [], (60.0, 90.0): []}
     assert [(w, h) for _, w, h in schgen._shape_choices(options)] == [(100.0, 50.0), (60.0, 90.0)]
+
+
+def test_moved_tree_level_with_its_pin_is_wired_to_it(tmp_path: Path) -> None:
+    # an MCU-like pin row (14 pins): the LED + resistor trees on A5 / A6 would push their neighbours, so they
+    # move beside the chip; A5's stands level with its pin and nothing crosses the row: one wire from the
+    # pin, the net's one label on the tree. A6's tree had to move down: it keeps a label pair.
+    named = {0: "GND", 1: "LED_A", 2: "LED_B", 3: "VCC", 4: "N_A", 5: "N_B"}
+    left = []
+    for i in range(1, 15):
+        net = {5: 1, 6: 2}.get(i, 10 + i)
+        left.append((f"A{i}", net))
+        named.setdefault(net, f"SIG{i}")
+    parts: dict[str, tuple[str, list[tuple[str, int | None]]]] = {
+        "U1": ("simple_chip", [*left, ("VCC", 3), ("GND", 0)]),
+        "J1": ("simple_chip", [(f"P{i}", n) for i, (_, n) in enumerate(left, 1) if n >= 10]),
+        "R1": ("simple_resistor", [("pin1", 1), ("pin2", 4)]),
+        "D1": ("simple_diode", [("anode", 4), ("cathode", 0)]),
+        "R2": ("simple_resistor", [("pin1", 2), ("pin2", 5)]),
+        "D2": ("simple_diode", [("anode", 5), ("cathode", 0)]),
+    }
+    path = _circuit(tmp_path, parts, named)
+    circuit = json.loads(path.read_text())
+    chip = _lib_symbol("MCU", [p for p, _ in left], ["GND", "VCC"])
+    all_parts = schgen._parts(circuit)
+    text = schgen._render(circuit, all_parts, {"U1": chip}, "board", None)
+    assert schgen.connectivity_errors(text, all_parts) == []
+    sch = sexpr.loads(text)
+    pins, wired = fixes._pin_positions(sch), _groups(sch, labels=False)
+    labels = [str(g[1]) for g in sexpr.children(sch, "global_label")]
+    assert wired["R1", "1"] == wired["U1", "5"]
+    assert pins["R1", "1"][0] < pins["U1", "5"][0]  # beside the chip, on the pin's side
+    assert labels.count("LED_A") == 1
+    assert wired["R2", "1"] != wired["U1", "6"]
+    assert labels.count("LED_B") == 2
+
+
+def _top_symbol(name: str, top: list[str]) -> symlib.LibSymbol:
+    """A display-like library symbol: ``top`` pins leaving upwards."""
+    font = "(effects (font (size 1.27 1.27)))"
+    half = len(top) * schgen.GRID / 2
+    pins = [
+        f'(pin passive line (at {-half + (i + 0.5) * schgen.GRID:g} 7.62 270) (length 2.54) (name "{p}" {font})'
+        f' (number "{i + 1}" {font}))'
+        for i, p in enumerate(top)
+    ]
+    node = sexpr.loads(
+        f'(symbol "{name}" (property "Reference" "U" (at {half + 1.27:g} 6.35 0) {font})'
+        f' (property "Value" "{name}" (at 0 -6.35 0) {font})'
+        f' (symbol "{name}_0_1" (rectangle (start {-half:g} 5.08) (end {half:g} -5.08)'
+        " (stroke (width 0.254) (type default)) (fill (type background))))"
+        f' (symbol "{name}_1_1" {" ".join(pins)}))'
+    )
+    return symlib.LibSymbol(name, node, symlib.pins_of(node))
+
+
+def test_unframed_drawing_stays_inside_the_sheet_frame(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # no TSX sections: no frames, whose corners would tell fit_schematic_sheet the drawing's extent; it
+    # places the drawing by its anchor points, so the long labels and texts of three displays stick out of
+    # the sheet frame at first: the drawing is laid out again in a smaller room until they do not
+    parts: dict[str, tuple[str, list[tuple[str, int | None]]]] = {}
+    named: dict[int, str] = {}
+    for d in range(1, 4):
+        parts[f"U{d}"] = ("simple_chip", [(f"S{k}", k + 10 * (d - 1)) for k in range(1, 9)])
+        named |= {k + 10 * (d - 1): f"DISPLAY_SEGMENT_{k}_{d}" for k in range(1, 9)}
+    for d in range(1, 4):
+        parts[f"J{d}"] = ("simple_chip", [(f"P{k}", k + 10 * (d - 1)) for k in range(1, 9)])
+    path = _circuit(tmp_path, parts, named)
+    circuit = json.loads(path.read_text())
+    symbols = {f"U{d}": _top_symbol(f"DISP{d}", [f"S{k}" for k in range(1, 9)]) for d in range(1, 4)}
+    overflow = schgen._sheet_overflow
+    tries: list[tuple[float, float]] = []
+
+    def spy(text: str, sheet: schgen.Sheet) -> tuple[float, float]:
+        tries.append(overflow(text, sheet))
+        return tries[-1]
+
+    monkeypatch.setattr(schgen, "_sheet_overflow", spy)
+    all_parts = schgen._parts(circuit)
+    text = schgen._render(circuit, all_parts, symbols, "board", None)
+    assert schgen.connectivity_errors(text, all_parts) == []
+    assert len(tries) > 1  # the first layout stuck out
+    assert tries[-1] == (0.0, 0.0)
