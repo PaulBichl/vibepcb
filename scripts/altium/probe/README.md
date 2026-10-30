@@ -7,10 +7,11 @@ Import: File » Import Wizard » KiCad Design Files; add `probe.kicad_sym` and t
 
 | Look at | In the probe | Report |
 |---------|--------------|--------|
-| Layer map | F.Fab (body + "F.Fab" text + `${REFERENCE}`), F.CrtYd (outer rect), User.13 (body rect), User.15 (outer rect, centre cross, PIN1 dot + text, Reference property) | which Altium layer each one lands on (Mechanical 13 / 15 wanted) |
+| Layer map | F.Fab (body + "F.Fab" text + `${REFERENCE}`), F.CrtYd (outer rect), User.13 (body rect), User.15 (outer rect, centre cross, PIN1 pad, dot, `.Designator`, Reference property) | which Altium layer each one lands on (Mechanical 13 / 15 wanted) |
 | Line widths | F.Fab / User.13 0.1, F.CrtYd / User.15 outline 0.05, cross 0.07, silk 0.15 mm | kept or reset |
 | Pads | rounded rectangle 1.55 x 0.6, ratio 0.25, mask and paste expansion 0 | still rounded rect, expansions 0 (not "from rules") |
-| Reference text | on User.15 at the centre | becomes `.Designator` on Mechanical 15? |
+| Designator | Reference property on User.15; a text `.Designator` (Arial TrueType) on User.15 | which becomes Altium's designator, does `.Designator` show the designator (special string) |
+| PIN1 pad | a copy of pad 1 named PIN1, only on User.15 (no copper / mask / paste) | lands as a pad on Mechanical 15? no copper, no DRC / net issues |
 | 3D link | `${KIPRJMOD}/PROBE_SOIC8.step` (no file) | ignored / error |
 | Symbol fields | Reference visible top left, Value empty + hidden, Footprint / Datasheet / Description hidden, ProbeVisible visible | which become parameters, which visibility survives |
 | Symbol pins | 2 mm length, 2 mm pitch, electrical types input / output / power / no-connect | lengths, types, on Altium's grid |
