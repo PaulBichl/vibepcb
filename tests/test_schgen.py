@@ -496,3 +496,22 @@ def test_part_stands_at_the_pin_of_the_chip_it_sits_next_to(tmp_path: Path) -> N
     assert by_wire["C1", "1"] == by_wire["U2", "2"]  # wired to U2's IN pin
     assert by_wire["C1", "1"] != by_wire["R1", "2"]  # R1's end is joined by the label only
     assert schgen.connectivity_errors(text, schgen._parts(elements)) == []
+
+
+def test_blocks_take_their_own_shapes_for_the_smallest_sheet() -> None:
+    # A's least-area shape (200 x 110) leaves no room for B on A4 (stacked 175 mm high, side by side 330 mm
+    # wide); A's wide shape (250 x 95) does: B fits underneath, clear of the title block
+    shapes: list[list[schgen.Shape]] = [[([], 200.0, 110.0), ([], 250.0, 95.0)], [([], 125.0, 60.0)]]
+    choice, spots = schgen._arrange(shapes)
+    assert choice == [1, 0]
+    sizes = [(250.0, 95.0), (125.0, 60.0)]
+    w = max(x + bw for (bw, _), (x, _) in zip(sizes, spots, strict=True))
+    h = max(y + bh for (_, bh), (_, y) in zip(sizes, spots, strict=True))
+    assert schgen._misfit(sizes, spots, w, h, schgen._room(schgen.PAPERS[0])) == 0  # A4
+    (ax, ay), (bx, by) = spots
+    assert not schgen._overlap((ax, ay, ax + 250, ay + 95), (bx, by, bx + 125, by + 60))
+
+
+def test_block_shapes_drop_dominated_ones() -> None:
+    options: dict[tuple[float, float], schgen.Spots] = {(100.0, 50.0): [], (120.0, 60.0): [], (60.0, 90.0): []}
+    assert [(w, h) for _, w, h in schgen._shape_choices(options)] == [(100.0, 50.0), (60.0, 90.0)]

@@ -45,15 +45,16 @@ TWO_TEXT = 2.286  # reference above / value below a horizontal two-terminal symb
 BRANCH_EXTENT = 3.81  # room above / below the row of a two-terminal part
 MAX_JOG = 8 * GRID  # a library pin's tree may sit this far off its pin (a fan-out), else it moves next to the chip
 LONG_PIN_ROW = 12  # on longer pin rows (MCUs) a tree must not push its neighbours at all
-CELL_GAP = 7.62
-BLOCK_PAD = 7.62
+CELL_GAP = 5.08
+BLOCK_PAD = 2.54
 TITLE = 2.54  # block title font
 SHEET_MARGIN = 15.24
-A0_USABLE = (1189.0 - 2 * 12.0, 841.0 - 2 * 12.0 - 40.0)  # fit_schematic_sheet's frame + title block
 INTERNAL_PORT = "_internal_"
 NAMESPACE = uuid.UUID("5b0e6c3e-6f43-4a51-9f7b-2c3f6d1e8a10")
 VALUE_KEYS = ("display_resistance", "display_capacitance", "display_inductance", "manufacturer_part_number")
 RAIL_DOWN, RAIL_UP, RAIL_NEG = "Custom:rail_down", "Custom:rail_up", "Custom:rail_neg"  # fixes.RAIL_LIB_PREFIX
+SHAPES = 8  # shapes per block tried in the sheet layout
+PACK_STEPS = 12  # row widths / column heights tried per arrangement of the blocks
 PAPERS = ((297.0, 210.0), (420.0, 297.0), (594.0, 420.0), (841.0, 594.0), (1189.0, 841.0))  # A4 .. A0
 
 _SECTION = re.compile(r"\{/\*\s*=+\s*(.*?)\s*=+\s*\*/\}")
@@ -1570,18 +1571,101 @@ def _group(main: list[Cell], extra: list[Cell]) -> Cell:
     return Cell(max(top_w, bottom_w), top_h + (CELL_GAP + bottom_h if extra else 0.0), draw)
 
 
-def _paper(width: float, height: float) -> int:
-    """Index into PAPERS of the smallest sheet holding a drawing of this size (len(PAPERS): none)."""
-    for i, (w, h) in enumerate(PAPERS):
-        if width + 2 * SHEET_MARGIN <= w - 24.0 and height + 2 * SHEET_MARGIN <= h - 24.0 - 40.0:
-            return i
-    return len(PAPERS)
+Shape = tuple[list[tuple[float, float]], float, float]  # a block's cell spots, frame width, frame height
+Spots = list[tuple[float, float]]
 
 
-def _scale(width: float, height: float) -> float:
-    """How much the drawing could grow on its paper (the PDF prints it that much larger)."""
-    paper = PAPERS[min(_paper(width, height), len(PAPERS) - 1)]
-    return min((paper[0] - 24.0) / max(width, 1.0), (paper[1] - 64.0) / max(height, 1.0))
+def _room(paper: tuple[float, float]) -> tuple[float, float, Box]:
+    """Room for the drawing on a sheet, as ``fixes.fit_schematic_sheet`` places it (border, texts sticking
+    out, its grid shift), and the title block's corner of that room, which no block may cover."""
+    edge = fixes.SHEET_FRAME_MM + 3 * GRID
+    w, h = paper[0] - 2 * edge, paper[1] - 2 * edge
+    tw, th = fixes.TITLE_BLOCK_MM
+    return w, h, (w - tw, h - th, w, h)
+
+
+def _packings(sizes: list[tuple[float, float]], room_w: float, room_h: float) -> list[tuple[Spots, float, float]]:
+    """Skyline packings of blocks of ``sizes``: rows of several widths up to the room's, and columns of
+    several heights up to the room's, each with the blocks in their order, tallest first and widest first
+    (spots are returned in the order of ``sizes``)."""
+    out = []
+    n = len(sizes)
+    orders = {tuple(range(n)), tuple(sorted(range(n), key=lambda i: -sizes[i][1]))}
+    orders.add(tuple(sorted(range(n), key=lambda i: -sizes[i][0])))
+    for order in sorted(orders):
+        for limit, cols in ((room_w, False), (room_h, True)):
+            items = [Cell(*(sizes[i][::-1] if cols else sizes[i]), None) for i in order]
+            least = max(c.width for c in items)
+            top = max(least, min(limit, sum(c.width + CELL_GAP for c in items)))
+            for k in range(PACK_STEPS + 1):
+                packed, w, h = _pack(items, least + (top - least) * k / PACK_STEPS)
+                spots: Spots = [(0.0, 0.0)] * n
+                for i, (x, y) in zip(order, packed, strict=True):
+                    spots[i] = (y, x) if cols else (x, y)
+                out.append((spots, h, w) if cols else (spots, w, h))
+    return out
+
+
+def _shape_choices(options: dict[tuple[float, float], Spots]) -> list[Shape]:
+    """A block's shapes worth trying: those no other shape beats in both width and height, at most
+    SHAPES of them spread over their aspect ratios, the least area first."""
+    front = [(w, h) for w, h in options if not any(a <= w and b <= h and (a, b) != (w, h) for a, b in options)]
+    front.sort(key=lambda s: s[0] / s[1])
+    if len(front) > SHAPES:
+        front = [front[round(k * (len(front) - 1) / (SHAPES - 1))] for k in range(SHAPES)]
+    return [(options[s], *s) for s in sorted(dict.fromkeys(front), key=lambda s: s[0] * s[1])]
+
+
+def _misfit(
+    sizes: list[tuple[float, float]], spots: Spots, w: float, h: float, room: tuple[float, float, Box]
+) -> float:
+    """How far a packing overflows the room or covers the title block (0: it fits)."""
+    room_w, room_h, corner = room
+    over = max(0.0, w - room_w) + max(0.0, h - room_h)
+    for (bw, bh), (x, y) in zip(sizes, spots, strict=True):
+        if _overlap((x, y, x + bw, y + bh), corner):
+            over += min(x + bw - corner[0], y + bh - corner[1])
+    return over
+
+
+def _arrange(shapes: list[list[Shape]]) -> tuple[list[int], Spots]:
+    """Pick a shape per block and the blocks' top-left corners: the smallest paper that holds them all
+    (clear of its title block) and the packing with the least bounding box on it (``fixes.fit_schematic_sheet``
+    centres it on the sheet)."""
+
+    def sizes(choice: list[int]) -> list[tuple[float, float]]:
+        return [opts[i][1:] for opts, i in zip(shapes, choice, strict=True)]
+
+    def best(choice: list[int], room: tuple[float, float, Box]) -> tuple[tuple[float, float], Spots]:
+        dims = sizes(choice)
+        return min(
+            (((_misfit(dims, spots, w, h, room), w * h), spots) for spots, w, h in _packings(dims, room[0], room[1])),
+            key=lambda r: r[0],
+        )
+
+    smallest = [0] * len(shapes)  # each block's least-area shape first
+    need = sum((w + CELL_GAP) * (h + CELL_GAP) for w, h in sizes(smallest))
+    for paper in PAPERS:
+        room = _room(paper)
+        if need > room[0] * room[1]:
+            continue
+        choice = list(smallest)
+        score, spots = best(choice, room)
+        for _ in range(2):  # coordinate descent over the blocks' shapes
+            for b, opts in enumerate(shapes):
+                for i in range(len(opts)):
+                    if i == choice[b]:
+                        continue
+                    trial = [*choice[:b], i, *choice[b + 1 :]]
+                    s, sp = best(trial, room)
+                    if s < score:
+                        choice, score, spots = trial, s, sp
+        if score[0] == 0:
+            return choice, spots
+    # beyond A0: a user sheet of A-series shape around the least bounding box
+    dims = sizes(smallest)
+    spots = min(_packings(dims, math.inf, math.inf), key=lambda p: max(p[1] / math.sqrt(2), p[2]))[0]
+    return smallest, spots
 
 
 def _pack(cells: list[Cell], width: float) -> tuple[list[tuple[float, float]], float, float]:
@@ -1617,13 +1701,6 @@ def _pack(cells: list[Cell], width: float) -> tuple[list[tuple[float, float]], f
         skyline = sorted(new)
         used_w, used_h = max(used_w, x + cell.width), max(used_h, y + cell.height)
     return spots, used_w, used_h
-
-
-def _pack_columns(cells: list[Cell], aspect: float) -> tuple[list[tuple[float, float]], float, float]:
-    """Like :func:`_pack`, but filling columns top to bottom (tall blocks waste less room)."""
-    flipped = [Cell(c.height, c.width, None) for c in cells]
-    spots, w, h = _pack(flipped, _target_width(flipped, 1 / aspect))
-    return [(y, x) for x, y in spots], h, w
 
 
 def _target_width(cells: list[Cell], aspect: float) -> float:
@@ -1847,22 +1924,16 @@ def _render(
     framed = len(blocks) > 1 or bool(titles and titles[0])
     pad = BLOCK_PAD if framed else 0.0
     head = 2 * TITLE if framed else 0.0
-    # the block shapes and arrangement that fit the smallest paper, as large as possible on it
-    best: tuple[tuple[int, float], list[Any], list[tuple[float, float]]] | None = None
-    for inner in (0.7, 1.0, 1.3, 1.6, 2.0, 2.5, 3.2):
-        layouts = []
-        for block in blocks:
-            spots, w, h = _pack(block.cells, _target_width(block.cells, inner))
-            title_w = len(block.title or "other") * TITLE * 0.9 if framed else 0.0  # the frame holds its title
-            layouts.append((block, spots, _snap(max(w, title_w) + 2 * pad), _snap(h + 2 * pad + head)))
-        outer = [Cell(w, h, None) for _, _, w, h in layouts]
-        for aspect in (0.7, 0.85, 1.0, 1.2, math.sqrt(2), 1.55, 1.7, 2.0, 2.5):
-            for origins, w, h in (_pack(outer, _target_width(outer, aspect)), _pack_columns(outer, aspect)):
-                score = (_paper(w, h), -_scale(w, h))
-                if best is None or score < best[0]:
-                    best = (score, layouts, origins)
-    assert best is not None
-    _, layouts, origins = best
+    shapes = []
+    for block in blocks:
+        title_w = len(block.title or "other") * TITLE * 0.9 if framed else 0.0  # the frame holds its title
+        dims = [(c.width, c.height) for c in block.cells]
+        options: dict[tuple[float, float], Spots] = {}
+        for spots, w, h in _packings(dims, math.inf, math.inf):
+            options.setdefault((_snap(max(w, title_w) + 2 * pad), _snap(h + 2 * pad + head)), spots)
+        shapes.append(_shape_choices(options))
+    choice, origins = _arrange(shapes)
+    layouts = [(block, *opts[i]) for block, opts, i in zip(blocks, shapes, choice, strict=True)]
     for (block, spots, w, h), (bx, by) in zip(layouts, origins, strict=True):
         bx, by = bx + SHEET_MARGIN, by + SHEET_MARGIN
         if framed:
@@ -1875,7 +1946,8 @@ def _render(
     xs, ys = [p[0] for p in sheet.points] or [0.0], [p[1] for p in sheet.points] or [0.0]
     width, height = max(xs) + SHEET_MARGIN, max(ys) + SHEET_MARGIN
     # A0 or smaller: fit_schematic_sheet picks the paper; beyond A0 a user sheet that holds it
-    fits = width - 2 * SHEET_MARGIN <= A0_USABLE[0] and height - 2 * SHEET_MARGIN <= A0_USABLE[1]
+    room_w, room_h, _ = _room(PAPERS[-1])
+    fits = width - 2 * SHEET_MARGIN <= room_w and height - 2 * SHEET_MARGIN <= room_h
     paper = '(paper "A0")' if fits else f'(paper "User" {_fmt(_snap(width))} {_fmt(_snap(height))})'
     lib = list(dict.fromkeys([*RAIL_LIBS, *sheet.lib]))
     return (
