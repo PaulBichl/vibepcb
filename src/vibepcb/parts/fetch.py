@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from vibepcb import symlib
+from vibepcb.parts.spec import file_name
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -159,8 +160,6 @@ def _urlopen(request: urllib.request.Request) -> bytes:
 
 
 def cache_dir(mpn: str) -> Path:
-    from vibepcb.parts.spec import file_name
-
     return CACHE / file_name(mpn)
 
 
