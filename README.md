@@ -23,6 +23,10 @@ For every board, without touching an EDA tool:
 - **3D renders** (top/bottom) and layout images to look at
 - **fabrication files**: Gerbers + drill, pick-and-place, and a ready JLCPCB PCBA upload set
 
+And for single parts: `pcb part <MPN>` turns a part number into a symbol, footprint and rough 3D body that
+follow a house component standard (IPC-7351B land patterns, Altium mechanical layers), ready to import into
+KiCad or Altium.
+
 ## Examples
 
 | Board | What it shows |

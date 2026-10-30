@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from vibepcb import easyeda, kicad, proc, symlib
+from vibepcb.parts import fetch, model3d
 from vibepcb.paths import ROOT
 
 if TYPE_CHECKING:
@@ -146,6 +147,43 @@ def check_ngspice() -> Check:
     return Check("ngspice", WARN, "not found (optional)", "only needed for boards/<name>/sim/*.cir decks")
 
 
+def check_parts() -> list[Check]:
+    """`pcb part`: distributor credentials (set or not, never the values), CadQuery for STEP, pdftotext."""
+    have = fetch.credentials()
+    found = [name for name, ok in have.items() if ok]
+    checks = [
+        Check("part lookup keys", OK, ", ".join(found))
+        if found
+        else Check(
+            "part lookup keys",
+            WARN,
+            "no DIGIKEY_CLIENT_ID / DIGIKEY_CLIENT_SECRET, no MOUSER_API_KEY",
+            "only for `pcb part fetch`; without them pass --datasheet <url|file>",
+        )
+    ]
+    checks.append(
+        Check("CadQuery", OK, "STEP models")
+        if model3d.cadquery() is not None
+        else Check("CadQuery", WARN, "not installed (optional)", "`hatch run parts:pcb part ...` for 3D models")
+    )
+    pdftotext = shutil.which("pdftotext")
+    checks.append(
+        Check("pdftotext", OK, pdftotext)
+        if pdftotext
+        else Check("pdftotext", WARN, "not found (optional)", "datasheet.txt next to the PDF (poppler-utils)")
+    )
+    version = kicad.cli_version()
+    if version is not None and version[0] > 9:
+        checks.append(
+            Check(
+                "part file format",
+                OK,
+                f"parts are written as KiCad 9 (Altium 26 reads up to 9); KiCad {version[0]} validates them",
+            )
+        )
+    return checks
+
+
 def check_patches() -> Check:
     node = shutil.which("node")
     if node is None or not PATCH_SCRIPT.exists():
@@ -209,6 +247,7 @@ def collect(network: Callable[[str], str | None] = reachable) -> list[Check]:
         check_symbols(),
         check_png(),
         check_ngspice(),
+        *check_parts(),
         *check_network(network),
     ]
 

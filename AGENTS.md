@@ -211,6 +211,33 @@ test in `tests/test_fixes.py` against the fixtures in `tests/data/`.
   datasheets; `docs/REVIEW.md`). Its issues land in `findings.toml`: fix the board or accept them with a reason.
   Never answer the review yourself: the designer must not grade its own board.
 
+## Components (`pcb part`)
+
+New schematic symbol + footprint + rough 3D body for a part, following the house component standard
+(`rules/parts/altium-students-2022.md`, its rules with section numbers in the `.toml`). Plan: `PART-PLAN.md`.
+**The agent reads the datasheet, the code draws**: never write symbol / footprint geometry by hand.
+
+1. `hatch run pcb part fetch <MPN>` (DigiKey / Mouser keys in the environment; without them add
+   `--datasheet <url|file>`): datasheet in `~/.cache/vibepcb/parts/<MPN>/` (+ `datasheet.txt`), skeleton
+   `parts/<MPN>.toml`.
+2. Fill the spec from the datasheet (format: `src/vibepcb/parts/spec.py`):
+   - every table carries the datasheet `page` its numbers come from; dimensions as the drawing gives them
+     (`[min, max]` or `[min, nom, max]`), for the package code of this MPN only;
+   - `[package]` from the package drawing: the land pattern is **calculated** (IPC-7351B, medium density, §2);
+     `[land]` with explicit pads only for families the standard leaves to the datasheet (`custom`,
+     `connector`, `tht`);
+   - pin names exactly as the pin table, the electrical type from the pin description, the exposed pad as its
+     own pin; `side` only to override the standard's placement.
+   - Stop and ask when the datasheet is ambiguous (two package drawings for one code, pins missing).
+3. `hatch run pcb part all <MPN>` (`hatch run parts:pcb part all <MPN>` for the STEP): `out/parts/<MPN>/`
+   with `check.txt`. Look at `symbol.png` and `footprint.png` against the datasheet yourself; fix the spec, not
+   the output, until the check has no errors.
+4. `hatch run pcb part export <MPN> --altium <dir>`: the import set (KiCad 9 files, `IMPORT-<MPN>.md`, sidecar
+   JSON). Altium import findings (layer map, what the importer keeps): `docs/TOOLING.md` section 14.
+
+The spec's author must not grade it: a human (or a fresh reviewer) checks the spec against the datasheet pages
+it names before the part goes into a library.
+
 ## Setup / environment
 
 - `hatch run setup` installs Node.js *into the hatch env* (nodeenv) and runs
@@ -233,6 +260,7 @@ test in `tests/test_fixes.py` against the fixtures in `tests/data/`.
 | `hatch run pcb rules <name>` | Merged design / manufacturing rule profiles of a board, each value's source |
 | `hatch run pcb hotspots <name>` | The last check's DRC errors grouped into spots: nets, parts nearby, TSX coordinates, inspect area |
 | `hatch run pcb list` | List boards |
+| `hatch run pcb part fetch\|build\|check\|all\|export <MPN>` | Components to the house standard (section Components) |
 | `hatch run pcb doctor` | Check the setup (tools, KiCad version, patches, network); exit 1 on FAIL |
 | `hatch run tsci <args>` | tscircuit CLI |
 | `hatch run test` / `style` / `type` | pytest / ruff / mypy |

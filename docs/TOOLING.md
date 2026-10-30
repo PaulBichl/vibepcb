@@ -121,6 +121,9 @@ docstring of `cli.py` doubles as `--help` text.
 | `check <board> [--strict] [--quiet]` | `kicad-cli sch erc`, `kicad-cli pcb drc` (refills zones, saves the board), post-fill loop, sharp-corner, unlabelled-connector and test-point checks (`testpoints.py`, `[testpoints]` in `vibepcb.toml`), split crossings (warning: a track crossing the edge of a region pour on the layer next to it); prints the summary, writes it to `check.txt`, exports `board.svg`; then circuit verification (section 8.3: sims, required sims, netlist checks, `findings.toml`); `--strict` makes its issues errors | `out/<board>/check.txt`, `board.svg`, `.work/reports/`, modifies the KiCad PCB | 1 if ERC errors, DRC errors or sharp corners (strict: or a verification issue; test points with `severity = "error"`) |
 | `bringup <board>` | `bringup.collect` on the finished KiCad project (+ the circuit JSON for pin names): `fab/<board>-bringup.md` and `fab/<board>-pins.h` (section 9a); `fab` calls it too | `out/<board>/fab/` | 0 |
 | `review <board> [--run \| --merge]` | reviewer-agent package in `out/<board>/.work/review/` (`review.write_package`: parts with pins / nets, BOM fields, netlist, intent, sim decks, `PROMPT.md`, answer template `review.toml`, one item per checklist item of `rules/review-checklists.toml`); `--run` starts `$VIBEPCB_REVIEWER` (default `claude -p --agent pcb-reviewer`, a new session) and merges; `--merge` validates and records answers written another way (section 8.3) | `out/<board>/.work/review/`; on merge `boards/<board>/review.toml`, `findings.toml` | 1 if the reviewer fails or its answers are invalid |
+| `part fetch <MPN> [--manufacturer M] [--datasheet URL\|FILE]` | distributor lookup, datasheet download (+ `datasheet.txt`), spec skeleton (section 14) | `parts/<MPN>.toml`, `~/.cache/vibepcb/parts/` | 1 if not found / ambiguous |
+| `part build\|check\|all <MPN> [--standard NAME]` | spec + standard -> symbol, footprint, STEP (CadQuery), previews; `check` / `all` also write `check.txt` | `out/parts/<MPN>/` | 1 on check errors |
+| `part export <MPN> --altium DIR` | the Altium import set; refuses a part whose check fails | `DIR` | 1 on check errors |
 | `all <board> [--strict] [--fast] [--quiet]` | `build`, then `fix`, then `check`, short-circuiting on a non-zero result | all of the above | first non-zero, else `check`'s result |
 | `fab <board>` | refuses unless the last `check --strict` passed on this board (`check.json` `strict_passed` + board hash); part availability check once (parts engine, placement-only evaluation), then `kicad.export_fab` on `out/<board>/kicad/<board>.kicad_pcb`: one file per purpose (gerbers zip, JLCPCB BOM with MPN, CPL, schematic PDF, top/bottom renders), then `bringup`; intermediates in `.work/fab/` | `out/<board>/fab/` | 0 |
 | `publish <board>` | only if the last `check` passed on the current board (`.work/reports/check.json`, board hash): KiCad project without 3D models, BOM, schematic PDF, renders (`kicad.export_docs`), layout PDF (a page per copper layer) + front/back SVGs (`kicad.export_layout`) | `boards/<board>/hardware/` (committed) | 0 |
@@ -663,6 +666,8 @@ History: used to be circuit-json export (~10 min) + a second `kicad-library` exp
 
 ---
 
+---
+
 ## 13. Porting to another project
 
 Generic, reusable without changes (apart from the names):
@@ -679,3 +684,35 @@ Generic, reusable without changes (apart from the names):
 Project-specific: the tscircuit wrapper (`tscircuit.py`), the board template in `cli.py`,
 the constants in `fixes.py`, and the `AGENTS.md` workflow that tells an LLM agent how to run
 the loop.
+
+---
+
+## 14. Components (`src/vibepcb/parts/`, `pcb part`)
+
+From a part number to a symbol, footprint and rough 3D body that follow a component standard; plan and phases
+in `PART-PLAN.md`, the agent's workflow in `AGENTS.md` (Components).
+
+| Module | Does |
+|--------|------|
+| `standard.py` | `rules/parts/<name>.toml`: every rule `{ value, source = "§..." }`, open choices `{ value, reason }`, `[unexpressed]` items for the manual check; unknown keys fail |
+| `spec.py` | `parts/<MPN>.toml`: part, package drawing (dimensions min / nom / max, datasheet pages), explicit `[land]`, pins; validation; skeleton |
+| `fetch.py` | DigiKey v4 (OAuth2 client credentials, token cached without the secret) then Mouser; exact MPN match; answers + datasheet cached in `~/.cache/vibepcb/parts/<MPN>/` |
+| `ipc7351.py` | IPC-7351B Z / G / X (RMS heel tolerance, F 0.05, P 0.025), fillet tables 3-2, 3-3, 3-5/3-6, 3-15; pads in IPC zero orientation; IPC names (`SOIC127P600X175-8N`); SOT-23-3/5 slots |
+| `footprint.py` | KiCad 9 `(footprint ...)`: roundrect pads, mask / paste 0, Mech 13 body, Mech 15 placement outline / cross / designator / PIN1 / polarity, silk clipped 0.2 mm from pads (and out of connector pin fronts), F.Fab, F.CrtYd, model link |
+| `symbol.py` | KiCad 9 symbol: 2 mm grid and pins, inputs left / outputs right / supply top / ground and EP bottom, numbered repeats, designator top left, empty hidden Value; op-amp triangles, two-terminal drawings |
+| `model3d.py` | optional CadQuery STEP: max body box, leads to the max span, QFN terminals, pin-1 dimple |
+| `check.py` | `check.txt`: errors (KiCad load, pins vs pads, each rule with its §), warnings (lifecycle, calculated land), manual items |
+| `altium.py` | `export --altium`: files, `IMPORT-<MPN>.md`, sidecar JSON (layer map, line widths, field visibility) |
+
+Files are written in **KiCad 9 format** (footprint `20241229`, symbol `20241209`) because Altium 26's KiCad
+importer reads up to KiCad 9; KiCad 10's `kicad-cli` loads them for the previews and the load check.
+
+IPC calculation checked against KiCad's library: SOIC-8 (JEDEC MS-012) gives 1.95 x 0.6 mm pads at x = +-2.475,
+the same as `SOIC-8_3.9x4.9mm_P1.27mm`; a 0603 gives Z = 2.45, X = 0.95 as `R_0603_1608Metric`.
+
+### Altium import findings
+
+To fill in from `scripts/altium/probe/` (import it once, see its README): which Altium layer F.Fab / F.CrtYd /
+User.13 / User.15 land on, whether line widths, roundrect pads, zero mask / paste expansion, the reference text
+and field visibility survive. Until then `[layers]` in the standard's TOML assumes User.13 -> Mechanical 13 and
+User.15 -> Mechanical 15.
