@@ -92,6 +92,8 @@ def build(mpn: str, *, standard_name: str = standard.DEFAULT, path: Path | None 
     footprint_file = pretty / f"{fp.name}.kicad_mod"
     footprint_file.write_text(fp.text(), encoding="utf-8")
     built = Built(s, std, sym, fp, target, symbol_file, footprint_file, None)
+    for old in target.glob("*.step"):  # a renamed footprint leaves its old model behind
+        old.unlink()
     step = target / f"{fp.name}.step"
     if reason := model3d.write_step(s, fp, step):
         built.notes.append(f"no 3D model: {reason}")

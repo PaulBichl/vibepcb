@@ -151,7 +151,7 @@ def _footprint_rules(built: Built, std: Standard, report: Report) -> None:
             f"only {fp.toe} mm copper beyond the termination at max part size, needs {toe_min} "
             f"({std.rule('footprint', 'toe_min').source})"
         )
-    elif fp.toe is None:
+    elif fp.toe is None and any(not p.drill for p in fp.pads):
         report.manual.append(
             f"land pattern from the datasheet: check >= {toe_min} mm copper beyond the terminations "
             f"({std.rule('footprint', 'toe_min').source})"

@@ -154,6 +154,7 @@ class LandPad:
 class Land:
     pads: list[LandPad]
     page: int
+    name: str = ""  # footprint name (the package's, e.g. HC49-US_P4.88); default <family>_<mpn>
 
 
 @dataclass(frozen=True)
@@ -305,7 +306,7 @@ def _package(raw: dict[str, Any]) -> Package:
 
 def _land(raw: dict[str, Any]) -> Land:
     where = "[land]"
-    _known(raw, {"pad", "page"}, where)
+    _known(raw, {"pad", "page", "name"}, where)
     pads = []
     for i, p in enumerate(_req(raw, "pad", where, list)):
         w = f"[[land.pad]] #{i + 1}"
@@ -331,7 +332,11 @@ def _land(raw: dict[str, Any]) -> Land:
     if not pads:
         msg = f"{where}: no pads"
         raise SpecError(msg)
-    return Land(pads, _page(raw, where))
+    name = raw.get("name", "")
+    if not isinstance(name, str) or (name and not re.fullmatch(r"[A-Za-z0-9._+-]+", name)):
+        msg = f"{where}.name: letters, digits and . _ + - only, got {name!r}"
+        raise SpecError(msg)
+    return Land(pads, _page(raw, where), name)
 
 
 def _pins(raw: list[dict[str, Any]]) -> list[Pin]:

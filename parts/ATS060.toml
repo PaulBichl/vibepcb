@@ -1,0 +1,55 @@
+# Part spec for ATS060 (format: vibepcb/parts/spec.py). Pages are PDF pages of CTS DOC# 008-0309-0 Rev. N
+# (crystals-ATS-ATSSM-datasheet.pdf): part number table page 2, ATS package drawing page 6.
+# ATS060: 6.000000 MHz, 20 pF load, fundamental, -20/+70 degC, bulk; HC-49/US through-hole metal can.
+
+[part]
+mpn = "ATS060"
+manufacturer = "CTS"
+description = "Crystal 6.000 MHz 20 pF fundamental, +-30 ppm, HC-49/US through-hole"
+datasheet = "https://www.ctscorp.com/Files/DataSheets/Passives/FCP/Crystals/crystals-ATS-ATSSM-datasheet.pdf"
+source = "manual"
+lifecycle = "unknown"
+kind = "crystal"
+
+[package]
+# page 6: body 10.85 +-0.25 long (along the leads' row, x here) x 4.50 +-0.20 wide (y), 3.68 max high;
+# leads 0.43 +-0.05 diameter at 4.88 +-0.25 pitch, 12.70 min long
+family = "tht"
+pins = 2
+pitch = 4.88
+body = { l = [4.3, 4.7], w = [10.6, 11.1], h = [3.68] }
+page = 6
+
+[land]
+# The datasheet gives no hole / pad size for the through-hole ATS and the standard leaves THT footprints to the
+# designer (§2). IPC-7251 nominal (level B): hole = max lead 0.48 + 0.20 -> 0.7 mm; pad = hole + 2 x 0.35 annular
+# ring -> 1.4 mm. Round pads: the crystal has no polarity.
+name = "HC49-US_P4.88mm"
+page = 6
+[[land.pad]]
+number = "1"
+x = -2.44
+y = 0.0
+l = 1.4
+w = 1.4
+drill = 0.7
+shape = "circle"
+[[land.pad]]
+number = "2"
+x = 2.44
+y = 0.0
+l = 1.4
+w = 1.4
+drill = 0.7
+shape = "circle"
+
+[[pin]]
+number = "1"
+name = "1"
+type = "passive"
+page = 6
+[[pin]]
+number = "2"
+name = "2"
+type = "passive"
+page = 6

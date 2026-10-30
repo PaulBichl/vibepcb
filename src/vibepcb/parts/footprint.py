@@ -302,6 +302,8 @@ def build(spec: Spec, std: Standard, name: str | None = None) -> Footprint:
     body = Box(body.x0 + dx, body.y0 + dy, body.x1 + dx, body.y1 + dy)
     if spec.land is None:
         name = name or ipc7351.name(spec.package, std.text("footprint", "density"), spec.kind)
+    else:
+        name = name or spec.land.name
     name = name or f"{spec.package.family.upper()}_{spec.mpn}"
     mech13 = std.text("layers", "mech13")
     mech15 = std.text("layers", "mech15")
