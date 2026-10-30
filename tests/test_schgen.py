@@ -470,3 +470,29 @@ def test_text_width_matches_kicad_font() -> None:
     # KiCad draws "TYPE-C-31-M-12" 18.4 mm wide at 1.27 mm; lower case is narrower
     assert abs(schgen._text_w("TYPE-C-31-M-12") - 18.4) < 1.5
     assert schgen._text_w("100nF") < schgen._text_w("100NF")
+
+
+def test_part_stands_at_the_pin_of_the_chip_it_sits_next_to(tmp_path: Path) -> None:
+    # R1 joins U1 OUT to FILT (U1 draws FILT first); C1 (FILT to GND) sits next to U2 on the PCB: it stands
+    # at U2's FILT pin, not as a loose piece behind a label
+    parts: dict[str, tuple[str, list[tuple[str, int | None]]]] = {
+        "U1": ("simple_chip", [("VCC", 0), ("OUT", 2), ("GND", 1)]),
+        "R1": ("simple_resistor", [("pin1", 2), ("pin2", 3)]),
+        "U2": ("simple_chip", [("VCC", 0), ("IN", 3), ("GND", 1)]),
+        "C1": ("simple_capacitor", [("pin1", 3), ("pin2", 1)]),
+    }
+    circuit = _circuit(tmp_path, parts, {0: "VCC", 1: "GND", 2: "OUT", 3: "FILT"})
+    elements = json.loads(circuit.read_text())
+    centres = {"U1": (0, 0), "R1": (3, 0), "U2": (20, 0), "C1": (18, 0)}
+    ids = {e["name"]: e["source_component_id"] for e in elements if e["type"] == "source_component"}
+    elements += [
+        {"type": "pcb_component", "source_component_id": ids[n], "center": {"x": x, "y": y}}
+        for n, (x, y) in centres.items()
+    ]
+    circuit.write_text(json.dumps(elements))
+    text = schgen.generate(circuit, "board", None, _no_library(tmp_path))
+    sch = sexpr.loads(text)
+    by_wire = _groups(sch, labels=False)
+    assert by_wire["C1", "1"] == by_wire["U2", "2"]  # wired to U2's IN pin
+    assert by_wire["C1", "1"] != by_wire["R1", "2"]  # R1's end is joined by the label only
+    assert schgen.connectivity_errors(text, schgen._parts(elements)) == []

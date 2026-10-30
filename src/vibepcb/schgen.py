@@ -1047,6 +1047,13 @@ class Block:
             node.entries.append(Branch(part, pin, far, end))
         return node
 
+    def _own_unplaced(self, net: str) -> bool:
+        """Whether the chip being drawn keeps a part on ``net`` that nothing has placed yet."""
+        return any(
+            part.name not in self.placed and self.owner.get(part.name, self.ctx) == self.ctx
+            for part, _ in self.on_net.get(net, [])
+        )
+
     def _attach(self, chip: Part, pin: Pin, decouple: dict[tuple[str, str], list[Part]]) -> End:
         if pin.net is None:
             return None
@@ -1060,8 +1067,10 @@ class Block:
                 near, far = cap.pins if cap.pins[0].net == pin.net else cap.pins[::-1]
                 node.entries.append(Branch(cap, near, far, Rail(far.net) if far.net else None))
             return node
-        if pin.net in self.wired:
+        if pin.net in self.wired and not self._own_unplaced(pin.net):
             return Label(pin.net)
+        # first appearance, or this chip keeps parts on a net another chip already drew (a filter cap at
+        # the op-amp input it sits next to): the parts stand at this pin, joined to the rest by the label
         node = self._build(pin.net)
         return node if node.entries else Label(pin.net)  # in line with the label of its next pin
 
