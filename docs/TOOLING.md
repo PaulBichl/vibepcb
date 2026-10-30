@@ -189,7 +189,7 @@ CI tests the packaged code), `ci` (`skip-install = true`).
 
 ---
 
-## 5. Fixes framework (`src/vibepcb/kicad/fixes.py`)
+## 5. Fixes framework (`src/vibepcb/kicad/fixes/`)
 
 ### 5.1 Contract
 

@@ -15,6 +15,7 @@ from vibepcb.core import sexpr
 from vibepcb.core.sexpr import Sym
 from vibepcb.kicad import fixes
 from vibepcb.kicad import project as kicad
+from vibepcb.kicad.fixes import zones as fixes_zones
 from vibepcb.routing import routes, tracks
 from vibepcb.settings import config
 
@@ -1263,9 +1264,9 @@ def test_plane_pad_vias_reports_a_boxed_in_pad(project: fixes.KicadProject, monk
     stuck = smd[0]
     real = fixes._pad_via
     monkeypatch.setattr(
-        fixes, "_pad_via", lambda pr, c, pad, *a: None if pad.centre == stuck.centre else real(pr, c, pad, *a)
+        fixes_zones, "_pad_via", lambda pr, c, pad, *a: None if pad.centre == stuck.centre else real(pr, c, pad, *a)
     )
-    monkeypatch.setattr(fixes, "_pad_link", lambda *a, **k: None)
+    monkeypatch.setattr(fixes_zones, "_pad_link", lambda *a, **k: None)
     changes = fixes.plane_pad_vias(project)
     assert changes[0] == f"GND: {len(smd) - 1} pad vias to the plane"
     assert "has no room for a via" in changes[1]

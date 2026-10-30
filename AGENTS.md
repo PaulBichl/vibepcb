@@ -111,12 +111,14 @@ pad), keepout areas (`[keepout.<name>]`: no pour / tracks / vias under a part or
 KiCad project; KiCad's DRC enforces them. Format: `src/vibepcb/settings/config.py`. Nets get the name of a
 named `<trace name="SD_DQ0">` (else the chip pin), so name the traces a rule should catch.
 
-## Post-processing fixes (`src/vibepcb/kicad/fixes.py`)
+## Post-processing fixes (`src/vibepcb/kicad/fixes/`)
 
 A fix is `def my_fix(project: KicadProject) -> list[str]`: edit `project.pcb` /
 `project.sch` (parsed S-expression trees) in place, return one line per change,
-`[]` when nothing to do, and be **idempotent**. Register it in `FIXES` and add a
-test in `tests/test_fixes.py` against the fixtures in `tests/data/`.
+`[]` when nothing to do, and be **idempotent**. Put it in the submodule of its area (`board`, `schematic`,
+`references`, `clean`, `vias`, `corners`, `reroute`, `push`, `stitch`, `post_fill`, `zones`, `hooks`, `rules`;
+shared helpers in `base` / `copper`; a module imports only from modules before it), register it in `FIXES`
+(`fixes/__init__.py`) and add a test in `tests/test_fixes.py` against the fixtures in `tests/data/`.
 
 - Edit KiCad files only through `vibepcb.core.sexpr` (lossless). Do **not** use
   kiutils/kicad-skip: they drop KiCad 9 data / crash on tscircuit's output.
@@ -276,7 +278,7 @@ Always run `hatch run style`, `hatch run type` and `hatch run test` after changi
 | `core/` | `paths`, `proc`, `progress`, `sexpr` (KiCad S-expressions), `doctor` |
 | `settings/` | `config` (vibepcb.toml), `rules` (rule profiles), `stackup`, `intent` |
 | `build/` | `tscircuit` (tsci), `padtable` |
-| `kicad/` | `project` (assembly, kicad-cli), `fixes`, `schgen` (schematic), `symlib`, `easyeda`, `testpoints` |
+| `kicad/` | `project` (assembly, kicad-cli), `fixes/` (one module per area, registry in `__init__`), `schgen` (schematic), `symlib`, `easyeda`, `testpoints` |
 | `routing/` | `board` (model), `drc`, `router`, `routes`, `pairs`, `tune`, `tracks`, `fanout`, `ratsnest` |
 | `check/` | `verify`, `netcheck`, `sim`, `findings`, `review`, `history`, `hotspots`, `inspect` |
 | `output/` | `bringup`, `cost` |
