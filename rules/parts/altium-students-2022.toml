@@ -1,0 +1,80 @@
+# Machine rules of rules/parts/altium-students-2022.md (the house component standard, written for Altium).
+# Every rule: { value = ..., source = "§<section> ..." }. Values the standard leaves open are in [choices] with a
+# reason instead of a section. Rules the code can't express are listed in [unexpressed] for the manual check.
+# Loaded by vibepcb.parts.standard (unknown keys fail).
+
+[meta]
+name = "altium-students-2022"
+source = "rules/parts/altium-students-2022.md"
+description = "Symbol and Footprint Generation Standards Rev 2022 (for students)"
+
+[symbol]
+pin_pitch = { value = 2.0, source = "§1.2 distance between pins at least 2 mm for ICs" }
+pin_length = { value = 2.0, source = "§1.4 pins: length 2 mm" }
+pin_font_pt = { value = 6, source = "§1.4 pins: name font / designator font Arial 6" }
+pin_number_offset = { value = 0.5, source = "§1.4 pins: designator pos. 0.5 mm" }
+default_pin_type = { value = "passive", source = "§1.4 pins: electrical type passive" }
+inputs = { value = "left", source = "§1.2 signal flow left to right: inputs left" }
+outputs = { value = "right", source = "§1.2 signal flow left to right: outputs right" }
+supply = { value = "top", source = "§1.2 supply pins on top" }
+ground = { value = "bottom", source = "§1.2 ground pins on bottom" }
+number_repeated_names = { value = true, source = "§1.2 repeated pins named with consecutive numbers (GND1, GND2)" }
+exposed_pad_pin = { value = true, source = "§1.2 exposed pads included as an additional pin" }
+function_drawing = { value = true, source = "§1.2 drawing of the function (op-amp as a triangle), Figure 2" }
+designator_visible = { value = true, source = "§1.3 designator visible" }
+designator_position = { value = "top_left", source = "§1.3 designator on the top-left part of the symbol" }
+designator_font_pt = { value = 8, source = "§1.3 designator font Arial 8" }
+comment_empty_hidden = { value = true, source = "§1.3 comment value left empty and hidden" }
+parameters = { value = [], source = "§1.3 no parameters are added" }
+body_fill = { value = false, source = "§1.4 rectangle/polygon: draw solid no, fill color no" }
+reference_prefix = { value = { ic = "U", resistor = "R", capacitor = "C", inductor = "L", diode = "D", led = "D", connector = "J", transistor = "Q", crystal = "Y" }, source = "§1.3 designator is part dependent (D?, R?, U?)" }
+
+[footprint]
+land_pattern = { value = "ipc7351", source = "§2 IPC Compliant Wizard from the datasheet drawing; calculated values where none are given" }
+density = { value = "N", source = "§2 Medium Density preferred for all footprints" }
+manual_families = { value = ["tht", "connector", "custom"], source = "§2 non-standard footprints (through-hole, connectors) imported or drawn manually" }
+origin = { value = "pads_centre", source = "§2 reference in the middle-point of the pads, Figure 6" }
+toe_min = { value = 0.2, source = "§2 at least 0.2-0.3 mm copper exposed after the termination, Figure 7" }
+pad_shape = { value = "roundrect", source = "§2 pads as rounded rectangle, Figures 8-10" }
+mask_expansion = { value = 0.0, source = "§2.2 solder mask extension 0 mm" }
+paste_expansion = { value = 0.0, source = "§2.2 paste mask extension 0 mm" }
+component_outline = { value = "body", source = "§2.1 Mechanical 13: component body outline without pins" }
+placement_grid = { value = 0.1, source = "§2.1 Mechanical 15: placement outline on a 0.1 mm grid" }
+placement_margin = { value = [0.1, 0.3], source = "§2.1 Mechanical 15: max tolerances of package and pads + 0.1-0.3 mm" }
+centre_cross = { value = true, source = "§2.1 Mechanical 15: reference indicated with a small cross in its centre" }
+assembly_designator = { value = true, source = "§2.1 Mechanical 15: special string .Designator, true type font" }
+assembly_polarity = { value = true, source = "§2.1 Mechanical 15: polarity (pin 1 for ICs, cathode for diodes)" }
+pin1_text = { value = "PIN1", source = "§2.1 note: name it PIN1, not 1, against Altium's duplicated pin designator warning" }
+silk_pad_clearance = { value = 0.2, source = "§2.3 clearance pads to silkscreen at least 0.2 mm" }
+silk_min_width = { value = 0.1, source = "§2.3 Figure 14 Eurocircuits: min line width 0.10 mm" }
+silk_min_text = { value = 1.0, source = "§2.3 Figure 14 Eurocircuits: min text height 1.00 mm" }
+silk_polarity = { value = true, source = "§2.3 polarity: pin 1, cathode, positive terminal of polar caps" }
+silk_connector_front = { value = false, source = "§2.3 no silkscreen in front of connector pins" }
+
+[layers]
+# KiCad layer for each Altium layer of the standard. Checked against Altium 26's KiCad importer with
+# scripts/altium/probe (findings in docs/TOOLING.md); change here, not in code.
+mech13 = { value = "User.13", source = "§2.1 Mechanical 13 Component Info Top" }
+mech15 = { value = "User.15", source = "§2.1 Mechanical 15 Assembly Info Top" }
+
+[choices]
+# Not fixed by the standard; each value carries why it was chosen.
+pad_corner_ratio = { value = 0.25, reason = "IPC-7351C rounded rectangle: 25 % of the smaller side, at most 0.25 mm" }
+pad_corner_max = { value = 0.25, reason = "IPC-7351C rounded rectangle corner limit" }
+silk_width = { value = 0.15, reason = "above the 0.10 mm minimum (§2.3) with margin for fab tolerance" }
+mech_width = { value = 0.1, reason = "assembly drawings: thin lines keep pads readable" }
+courtyard_width = { value = 0.05, reason = "KiCad library convention for F.CrtYd" }
+placement_margin = { value = 0.2, reason = "middle of the 0.1-0.3 mm range of §2.1" }
+assembly_text = { value = 0.8, reason = "assembly designator height: fits small parts, still legible on the assembly print" }
+symbol_body_width = { value = 0.254, reason = "§1.4 says 'normal' / 'Medium' for rectangle borders; 10 mil is Altium's small/normal line" }
+pt_to_mm = { value = 0.2540, reason = "KiCad text size ~ cap height: Arial cap height 0.716 em x 0.3528 mm/pt" }
+
+[unexpressed]
+items = [
+  "§1.1 symbol wizard: Altium tool, not used (symbols are generated)",
+  "§1.4 colours (219/221/229) and Arial fonts are Altium preferences, not part of the KiCad files",
+  "§2 non-standard footprints (THT, connectors): explicit [land] from the datasheet; compare with the drawing",
+  "§2.1 Mechanical 13 outline ideally from the 3D model: here from the datasheet body dimensions",
+  "§2.1 connectors: pin 1 and/or mounting polarity marking chosen per part",
+  "§2.1 note PIN1: read as the pin-1 text on Mechanical 15; pad numbers stay '1' so symbol and footprint match",
+]
