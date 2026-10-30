@@ -4,7 +4,7 @@ import json
 import sys
 from typing import TYPE_CHECKING
 
-from vibepcb import tscircuit
+from vibepcb.build import tscircuit
 
 if TYPE_CHECKING:
     from pathlib import Path

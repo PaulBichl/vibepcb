@@ -6,8 +6,9 @@ from typing import TYPE_CHECKING
 import pytest
 from synth import pad, write
 
-from vibepcb import board as board_mod
-from vibepcb import drc, fixes, pairs, routes, tracks
+from vibepcb.kicad import fixes
+from vibepcb.routing import board as board_mod
+from vibepcb.routing import drc, pairs, routes, tracks
 
 if TYPE_CHECKING:
     from pathlib import Path

@@ -109,11 +109,11 @@ On WSL2 the repo runs essentially as-is. Native Windows needs these fixes:
 
 | Where | Problem |
 |---|---|
-| [tscircuit.py](../src/vibepcb/tscircuit.py) `_tsci` | `subprocess.run(["npx", ...])`: Windows needs `npx.cmd` (`shutil.which`) |
-| [tscircuit.py](../src/vibepcb/tscircuit.py) `prepared_source` | absolute import paths written with backslashes into TS strings (`\b`, `\v` escapes); use `.as_posix()` |
-| [routes.py](../src/vibepcb/routes.py) `_search_round` | `multiprocessing` `fork` context does not exist on Windows |
+| [tscircuit.py](../src/vibepcb/build/tscircuit.py) `_tsci` | `subprocess.run(["npx", ...])`: Windows needs `npx.cmd` (`shutil.which`) |
+| [tscircuit.py](../src/vibepcb/build/tscircuit.py) `prepared_source` | absolute import paths written with backslashes into TS strings (`\b`, `\v` escapes); use `.as_posix()` |
+| [routes.py](../src/vibepcb/routing/routes.py) `_search_round` | `multiprocessing` `fork` context does not exist on Windows |
 | all `subprocess.run(..., text=True)` | decoded with the locale code page; pass `encoding="utf-8", errors="replace"` |
-| [symlib.py](../src/vibepcb/symlib.py) `LIBRARY_DIRS` | no Windows paths; derive from the `kicad-cli` location |
+| [symlib.py](../src/vibepcb/kicad/symlib.py) `LIBRARY_DIRS` | no Windows paths; derive from the `kicad-cli` location |
 | [cli.py](../src/vibepcb/cli.py) `_png` | needs `rsvg-convert`; previews silently missing, `inspect` fails |
 | `pyproject.toml` `update-skill` | `rm -rf` |
 

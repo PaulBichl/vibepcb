@@ -7,7 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from vibepcb import config, fixes, stackup
+from vibepcb.kicad import fixes
+from vibepcb.settings import config, stackup
 
 DATA = Path(__file__).parent / "data"
 JLC4 = {"preset": "jlc04161h-7628"}

@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any
 
-from vibepcb import easyeda, schgen, sexpr, symlib
+from vibepcb.core import sexpr
+from vibepcb.kicad import easyeda, schgen, symlib
 
 if TYPE_CHECKING:
     from pathlib import Path

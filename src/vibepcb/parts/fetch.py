@@ -29,7 +29,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from vibepcb import symlib
+from vibepcb.kicad import symlib
 from vibepcb.parts.spec import file_name
 
 if TYPE_CHECKING:

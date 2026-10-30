@@ -3,7 +3,7 @@
 Plan for `pcb part <MPN>`: from a manufacturer part number to a finished component (schematic symbol, footprint,
 rough 3D model) that follows the house component standard and imports into Altium Designer 26. Written for the
 agent that implements it; phases are in order, each ends with tests that must pass. Follow `AGENTS.md` (Python
-conventions, `vibepcb.sexpr` for all KiCad files, library code raises / only `cli.py` prints) and run
+conventions, `vibepcb.core.sexpr` for all KiCad files, library code raises / only `cli.py` prints) and run
 `hatch run style`, `hatch run type`, `hatch run test` after every phase; one commit per phase.
 
 ## Goal and split of work
@@ -72,7 +72,7 @@ CLI (in `cli.py`, same pattern as the other `cmd_*`):
 
 ## Dependencies
 
-The project is stdlib-only (`dependencies = []`, KiCad files via `vibepcb.sexpr`). Keep it that way for
+The project is stdlib-only (`dependencies = []`, KiCad files via `vibepcb.core.sexpr`). Keep it that way for
 everything except 3D:
 
 - HTTP: `urllib.request` (as `easyeda.py` does). OAuth2 client credentials is one POST; no SDK.

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from vibepcb import paths
+from vibepcb.core import paths
 from vibepcb.parts import altium_script, build
 
 DATA = Path(__file__).parent / "data" / "parts"

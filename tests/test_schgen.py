@@ -3,14 +3,15 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
-from vibepcb import fixes, schgen, sexpr, symlib
+from vibepcb.core import sexpr
+from vibepcb.kicad import fixes, schgen, symlib
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     import pytest
 
-    from vibepcb.sexpr import Node
+    from vibepcb.core.sexpr import Node
 
 KEY = "connectivity_net"
 # part -> ftype, [(pin name, net)]; nets: 0 VCC, 1 OUT, 2 FB, 3 GND, 4 unnamed (U2 SENSE - R3 - D1)

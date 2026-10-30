@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from vibepcb import padtable
+from vibepcb.build import padtable
 
 if TYPE_CHECKING:
     from pathlib import Path

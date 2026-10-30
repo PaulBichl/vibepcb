@@ -7,8 +7,10 @@ from typing import TYPE_CHECKING, Any
 import pytest
 from synth import seg, write
 
-from vibepcb import board as board_mod
-from vibepcb import fixes, router, routes, sexpr
+from vibepcb.core import sexpr
+from vibepcb.kicad import fixes
+from vibepcb.routing import board as board_mod
+from vibepcb.routing import router, routes
 
 if TYPE_CHECKING:
     from pathlib import Path

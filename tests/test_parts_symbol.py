@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from vibepcb import sexpr
+from vibepcb.core import sexpr
 from vibepcb.parts import spec, standard, symbol
 
 DATA = Path(__file__).parent / "data" / "parts"

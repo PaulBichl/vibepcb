@@ -19,14 +19,14 @@ import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from vibepcb import sexpr
+from vibepcb.core import sexpr
+from vibepcb.core.sexpr import Sym
 from vibepcb.parts import ipc7351
-from vibepcb.sexpr import Sym
 
 if TYPE_CHECKING:
+    from vibepcb.core.sexpr import Node
     from vibepcb.parts.spec import Spec
     from vibepcb.parts.standard import Standard
-    from vibepcb.sexpr import Node
 
 VERSION = "20241229"  # KiCad 9 footprint file format (Altium 26 imports KiCad up to 9)
 GENERATOR = "vibepcb"

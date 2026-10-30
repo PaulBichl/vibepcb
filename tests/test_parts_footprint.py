@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from vibepcb import sexpr
+from vibepcb.core import sexpr
 from vibepcb.parts import footprint, spec, standard
 
 DATA = Path(__file__).parent / "data" / "parts"

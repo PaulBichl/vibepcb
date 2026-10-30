@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 import pytest
 from synth import pad, seg, write
 
-from vibepcb import ratsnest
+from vibepcb.routing import ratsnest
 
 if TYPE_CHECKING:
     from pathlib import Path

@@ -64,13 +64,13 @@ hatch run pcb doctor     # checks all of the above, prints OK / WARN / FAIL with
 hatch run pcb docs       # optional: tscircuit LLM docs -> docs/tscircuit-llms.txt
 ```
 
-`pcb doctor` (`src/vibepcb/doctor.py`) checks: node, bun, tsci (`npx --no-install tsci --version`), the tscircuit
+`pcb doctor` (`src/vibepcb/core/doctor.py`) checks: node, bun, tsci (`npx --no-install tsci --version`), the tscircuit
 patches (below), `kicad-cli` path + version, the KiCad symbol library, rsvg-convert / cairosvg, ngspice (optional)
 and, with a 5 s timeout each, the endpoints the tool uses (docs.tscircuit.com, the tscircuit parts engine,
 easyeda.com). Exit 1 if anything is FAIL (node, bun, tsci, kicad-cli missing); WARN is for optional things.
 
 Portability: native Windows is handled (`npx.cmd` via `shutil.which`, POSIX import paths written into the prepared
-TSX, `spawn` instead of `fork` for the routing workers, UTF-8 decoding of every subprocess through `vibepcb.proc`,
+TSX, `spawn` instead of `fork` for the routing workers, UTF-8 decoding of every subprocess through `vibepcb.core.proc`,
 KiCad's symbol library found relative to `kicad-cli`). WSL2 runs as-is.
 
 ### tscircuit patches
@@ -134,7 +134,7 @@ docstring of `cli.py` doubles as `--help` text.
 | `hotspots <board> [--radius MM]` | `hotspots`: the error-severity violations and unconnected items of the last check's `drc.json` plus the sharp bends (`fixes.sharp_corners`), single-linkage clustered (errors closer than 1.5 mm share a spot); per spot, most errors first: box (board mm and TSX coordinates from the board centre), error kinds, nets, parts with pads within 1 mm, an `inspect --area` to paste | none | 1 without a `drc.json` |
 | `ratsnest <board> [--source current\|unrouted]` | `ratsnest.unrouted`: per net (not `[planes]` nets, not nets with a pour), the pads its tracks/vias do not join yet, linked by a minimum spanning tree over pad centres between the joined groups; prints the 40 longest links, totals (links, mm, crossings of straight links of different nets) and the 5 10 mm cells with the most crossings; `unrouted` reads `.work/unrouted.kicad_pcb` (manual mode) | none | 0 |
 | `place-score <board>.. [--source ...]` | `ratsnest.score` per board: one line with link count, total ratsnest length, crossings - the placement metric to compare `clone` variants | none | 0 |
-| `rules <board>` | merges the board's rule profiles (`[rules] profiles` + `[rules.override]` in `vibepcb.toml`, `vibepcb.rules`) and prints one line per value with the profile that set it (and the fab capability where an application layer or override changed it), then the profiles' / board's net classes; a value below the fab's capability is an error | none | 1 on an invalid profile set |
+| `rules <board>` | merges the board's rule profiles (`[rules] profiles` + `[rules.override]` in `vibepcb.toml`, `vibepcb.settings.rules`) and prints one line per value with the profile that set it (and the fab capability where an application layer or override changed it), then the profiles' / board's net classes; a value below the fab's capability is an error | none | 1 on an invalid profile set |
 | `list` | prints board names (folders with `index.circuit.tsx` under `boards/`) | none | 0 |
 | `doctor` | the setup check above | none | 1 on FAIL |
 | `docs` | downloads `https://docs.tscircuit.com/llms.txt` to `docs/tscircuit-llms.txt` (60 s timeout) | `docs/` | 0 |
@@ -189,7 +189,7 @@ CI tests the packaged code), `ci` (`skip-install = true`).
 
 ---
 
-## 5. Fixes framework (`src/vibepcb/fixes.py`)
+## 5. Fixes framework (`src/vibepcb/kicad/fixes.py`)
 
 ### 5.1 Contract
 
@@ -210,7 +210,7 @@ type Fix = Callable[[KicadProject], list[str]]
 
 Run order = `FIXES` order in `fixes.py`. Stage: **build** = `cmd_build`, **fix** = `cmd_fix`
 (`fixes.apply_all`), **check** = `cmd_check` (needs KiCad's zone fill, so not in `FIXES`).
-Track geometry lives in `src/vibepcb/tracks.py`; every track change is kept only if KiCad's
+Track geometry lives in `src/vibepcb/routing/tracks.py`; every track change is kept only if KiCad's
 connection rules still join the net's pads (checked net by net, else polyline by polyline).
 
 | # | Name | What it does | Why (tscircuit / router quirk or rule) |
@@ -220,10 +220,10 @@ connection rules still join the net's pads (checked net by net, else polyline by
 | - | `fanout` (build) | For `[escape.<ref>]` parts in `vibepcb.toml`: plans the BGA escape from the placement-only JSON (ring 0 straight out on top, ring 1 through the channel between ring-0 balls, deeper balls a dogbone via + an escape layer along a ball line; side = nearest, ties towards the net's other pads; balls of `[planes]` nets only a via to their plane), checks its clearances, gives the part a stand-in footprint (a pad per escape end, none for via-only balls) and a keepout over the package for the routed evaluation; plan in `.work/raw/<board>.escapes.json` | tscircuit's router crowds BGA escapes on one side, its dogbone solver crashes with copper pours (tscircuit/core#4660), saved `<fanout pcbTracePaths>` crash its TopologyMergingSolver even for one straight escape (tscircuit/core#4663) |
 | 1 | `rename_auto_nets` | Selector-style net names -> the schematic's names (`schgen.pin_net_names`: `U1_VREG_1V2` after the chip pin, else `Net-(R1-Pad2)`) | tscircuit exports names KiCad does not use; schematic and board must agree (parity, "Update PCB from Schematic") |
 | 2 | `propagate_split_pad_nets` | Gives every pad of a split pad (same number) the net of its siblings; marks the part `duplicate_pad_numbers_are_jumpers` | Export puts the net on one pad only; KiCad reports the rest as unconnected copper |
-| 2a | `apply_rule_profiles` | `[rules]` in `vibepcb.toml`: merges the profiles of `rules/<name>.toml` (`vibepcb.rules`; later profiles and `[rules.override]` win, application layers only tighten a minimum, anything below the fab's capability raises) and writes the minimums into `.kicad_pro` `board.design_settings.rules` (min track / clearance / via drill + diameter + annular ring / hole-to-hole / copper-to-edge / silk stroke), the Default net class (profile values, else its own raised to the minimums) and `.kicad_dru` rules for PTH pad hole-to-hole and annular ring; profile net classes (e.g. `hv-60v`'s HV60) go in with `apply_board_config` | Fab and application rules in one versioned place instead of per-board numbers; runs before the routing fixes so `board.Rules.from_pro` (VibePCB's router, `drc.py`) uses them |
+| 2a | `apply_rule_profiles` | `[rules]` in `vibepcb.toml`: merges the profiles of `rules/<name>.toml` (`vibepcb.settings.rules`; later profiles and `[rules.override]` win, application layers only tighten a minimum, anything below the fab's capability raises) and writes the minimums into `.kicad_pro` `board.design_settings.rules` (min track / clearance / via drill + diameter + annular ring / hole-to-hole / copper-to-edge / silk stroke), the Default net class (profile values, else its own raised to the minimums) and `.kicad_dru` rules for PTH pad hole-to-hole and annular ring; profile net classes (e.g. `hv-60v`'s HV60) go in with `apply_board_config` | Fab and application rules in one versioned place instead of per-board numbers; runs before the routing fixes so `board.Rules.from_pro` (VibePCB's router, `drc.py`) uses them |
 | 2b | `apply_escapes` | Stand-in pads of escaped parts become the real balls again (nets carried over; via-only plane balls get their plane net), the planned escape tracks and vias are added, the courtyard is drawn, the build's keepout and the pour holes tscircuit cut under it go; `plane_pad_vias` leaves the escaped ball field alone | Second half of the `fanout` build step: tscircuit's tracks end exactly at the escape ends |
 | 2c | `apply_keepouts` | `[keepout.<name>]` in `vibepcb.toml` becomes KiCad rule areas (named `vibepcb:keepout:<name>`) over a part's pads + courtyard or a box: no pour, tracks and/or vias on chosen layers (a global GND pour must not run under an antenna, a crystal, a switching node) | tscircuit's `<keepout>` forbids everything and has no per-part, per-layer or pour-only form; KiCad's fill and DRC enforce the area, the router keeps out of its track / via restrictions |
-| 2d | `apply_routes` | `[routing] mode = "manual"`: `routes.toml` becomes tracks and vias (`vibepcb.routes`: board model, `drc`, `router`); the board before the routes is saved to `.work/unrouted.kicad_pcb` for `pcb route`. Auto mode (`reroute_named_nets`): each net a `[[route]] net = "..."` entry names loses tscircuit's tracks/vias and is routed again by `vibepcb.routes` (one net at a time, file order); a net that does not route completely keeps tscircuit's copper | tscircuit's autorouter is the weak spot on boxed-in boards; here the agent steers (order, layers, waypoints, corridors), the router fills in clearance-checked paths |
+| 2d | `apply_routes` | `[routing] mode = "manual"`: `routes.toml` becomes tracks and vias (`vibepcb.routing.routes`: board model, `drc`, `router`); the board before the routes is saved to `.work/unrouted.kicad_pcb` for `pcb route`. Auto mode (`reroute_named_nets`): each net a `[[route]] net = "..."` entry names loses tscircuit's tracks/vias and is routed again by `vibepcb.routing.routes` (one net at a time, file order); a net that does not route completely keeps tscircuit's copper | tscircuit's autorouter is the weak spot on boxed-in boards; here the agent steers (order, layers, waypoints, corridors), the router fills in clearance-checked paths |
 | 2a2 | `complete_netclasses` | Every net class of the .kicad_pro gets KiCad's schematic keys it lacks (`wire_width` 6, `bus_width` 12, `line_style` 0, theme colours, `priority`) | tscircuit's export and the rule fixes wrote PCB keys only: KiCad then plotted every schematic wire with no stroke - the SVG / PDF showed parts and labels but no wires |
 | 2d2 | `mask_covered_pads` | Pads the TSX covers with soldermask (`<smtpad coveredWithSolderMask />`, from the circuit JSON) lose their mask layer | tscircuit's KiCad export opens the mask on every pad: a capacitive touch electrode came out as bare copper |
 | 2e | `apply_pours` | `[pour.<name>]` (net, layers, margin; optional `area` box + `priority`: a split-plane region or a patch on a signal layer, rewritten every run) adds a pour for a net and layer the board has no zone for (a copy of the board's pour settings over the outline inset by margin) | tscircuit emits a pour only together with routing: a placement-only build (`[routing] mode = "manual"`) has no pour on e.g. a 3.3 V plane layer, and `check` fails a layer without a pour |
@@ -253,7 +253,7 @@ connection rules still join the net's pads (checked net by net, else polyline by
 | 11 | `push_tracks_clear` | Slides track pieces sideways (<= 0.3 mm) that are a few hundredths too close to other nets; an end on a pad slides along inside the pad. A piece <= 1 mm wedged between two obstacles (no push clears both) is necked down, widest first, to the board's minimum track width | Router squeezes tracks past vias slightly under clearance, often the piece leaving a pin; or through a gap a few hundredths narrower than track + 2 clearances (bench-psu: V3V3 past C9 at 0.085 mm) |
 | 12 | `reroute_tracks` | Rips up runs that still break a rule and reroutes the bad stretch (<= 25 mm, of a run of any length) with a local 45-deg maze router; keeps pieces a T-branch, via or pad joins mid-run (the stretch stops next to them); counts tracks passing through a via as junction branches; leaves a junction on a slightly tilted track with one off-grid stub; never reroutes its own new routes again | Last resort for cramped spots the geometric fixes cannot solve; old route stays if none found |
 | 13 | `remove_antennas` | Deletes tracks with a loose end and vias joining fewer than 2 layers; a track end that runs past a pad of its net is cut back to the pad centre instead (the track is the pad's only link) | Quality bar: no antennas; a route starting at an escape end whose escape track the clean-up removed crosses its ball and sticks out |
-| 13b | `tune_lengths` | Meanders (`vibepcb.tune`) on the short nets of each `[length_group]`: bumps with 45-degree corners on the longest straight pieces, height solved for the exact length, every piece clearance-checked (other side / lower bumps / next piece when it does not fit); target `tune_to` or, without it, nets breaking `max_skew` to 90 % of it | KiCad's DRC only checks a group's skew; routing (tscircuit's or VibePCB's) makes lengths by chance |
+| 13b | `tune_lengths` | Meanders (`vibepcb.routing.tune`) on the short nets of each `[length_group]`: bumps with 45-degree corners on the longest straight pieces, height solved for the exact length, every piece clearance-checked (other side / lower bumps / next piece when it does not fit); target `tune_to` or, without it, nets breaking `max_skew` to 90 % of it | KiCad's DRC only checks a group's skew; routing (tscircuit's or VibePCB's) makes lengths by chance |
 | 14 | `drop_npth_edge_cuts` | Removes Edge.Cuts copies of footprint NPTH holes | Export writes holes twice; DRC then applies 0.5 mm board-edge clearance to them |
 | 15 | `allow_footprints_in_keepouts` | Footprints may overlap keepouts; copper/pour restrictions stay | Export writes `footprints not_allowed`, so an antenna keepout flags its own module |
 | 16 | `standard_board_thickness` | 1.4 mm -> 1.6 mm (or the rule profiles' `board_thickness`) | Export default; fabs default to 1.6 |
@@ -337,7 +337,7 @@ at least half the pin names agree; LCSC symbols come from the same data as tscir
 numbers are authoritative. `symlib.for_schematic` makes every pin passive (tscircuit has no pin types)
 and shows hidden pins that are not stacked under a visible one. `fixes._pin_positions` is unit-aware.
 
-## 6a. S-expression module (`src/vibepcb/sexpr.py`)
+## 6a. S-expression module (`src/vibepcb/core/sexpr.py`)
 
 A lossless reader and writer for KiCad files. A node is a `list`; its items are:
 
@@ -368,7 +368,7 @@ round trip of the test data (parametrized), rejection of malformed input and the
 
 ---
 
-## 7. Track cleaning (`clean_tracks`, `src/vibepcb/tracks.py`)
+## 7. Track cleaning (`clean_tracks`, `src/vibepcb/routing/tracks.py`)
 
 `tracks.py` is pure geometry on plain data (`Seg`, `Obstacle`, points as `(x, y)` tuples,
 KiCad millimetres with y down). It never touches the S-expression tree. `fixes.py`
@@ -672,8 +672,8 @@ History: used to be circuit-json export (~10 min) + a second `kicad-library` exp
 
 Generic, reusable without changes (apart from the names):
 
-- `src/vibepcb/sexpr.py`: lossless S-expression reader/writer with navigation helpers.
-- `src/vibepcb/tracks.py`: pure polyline and clearance geometry (no KiCad dependency).
+- `src/vibepcb/core/sexpr.py`: lossless S-expression reader/writer with navigation helpers.
+- `src/vibepcb/routing/tracks.py`: pure polyline and clearance geometry (no KiCad dependency).
 - The fixes contract (`(KicadProject) -> list[str]`, `FIXES` registry, `apply_all`, idempotent tests).
 - `kicad.py`: `kicad-cli` wrappers, DRC/ERC merge, JLCPCB file export.
 - `pyproject.toml`: the hatch scripts, ruff, mypy, pytest and coverage blocks, the `ciall` and

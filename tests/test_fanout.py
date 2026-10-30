@@ -5,12 +5,14 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from vibepcb import fanout, fixes, sexpr
+from vibepcb.core import sexpr
+from vibepcb.kicad import fixes
+from vibepcb.routing import fanout
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from vibepcb.sexpr import Node
+    from vibepcb.core.sexpr import Node
 
 PITCH = 0.8
 

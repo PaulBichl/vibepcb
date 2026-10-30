@@ -5,8 +5,8 @@ from typing import TYPE_CHECKING
 
 from synth import write
 
-from vibepcb import board as board_mod
-from vibepcb import inspect
+from vibepcb.check import inspect
+from vibepcb.routing import board as board_mod
 
 if TYPE_CHECKING:
     from pathlib import Path

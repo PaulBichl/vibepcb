@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from vibepcb import hotspots, routes
+from vibepcb.check import hotspots
+from vibepcb.routing import routes
 
 
 def _violation(kind: str, a: tuple[float, float], b: tuple[float, float], nets: tuple[str, str]) -> dict[str, object]:

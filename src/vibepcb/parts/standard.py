@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from vibepcb import paths
+from vibepcb.core import paths
 
 TOOL_DIR = Path(__file__).resolve().parents[3] / "rules" / "parts"
 DEFAULT = "altium-students-2022"

@@ -11,7 +11,7 @@ import math
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from vibepcb import paths, sexpr
+from vibepcb.core import paths, sexpr
 
 if TYPE_CHECKING:
     from vibepcb.parts.build import Built

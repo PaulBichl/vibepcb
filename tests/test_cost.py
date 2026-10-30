@@ -4,7 +4,8 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from vibepcb import config, cost
+from vibepcb.output import cost
+from vibepcb.settings import config
 
 if TYPE_CHECKING:
     from pathlib import Path

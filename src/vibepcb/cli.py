@@ -52,37 +52,19 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from vibepcb import board as board_model
-from vibepcb import (
-    bringup,
-    config,
-    cost,
-    doctor,
-    fanout,
-    fixes,
-    history,
-    hotspots,
-    inspect,
-    intent,
-    kicad,
-    padtable,
-    paths,
-    proc,
-    progress,
-    ratsnest,
-    review,
-    routes,
-    rules,
-    schgen,
-    sexpr,
-    testpoints,
-    tscircuit,
-    verify,
-)
+from vibepcb.build import padtable, tscircuit
+from vibepcb.check import history, hotspots, inspect, review, verify
+from vibepcb.core import doctor, paths, proc, progress, sexpr
+from vibepcb.kicad import fixes, schgen, testpoints
+from vibepcb.kicad import project as kicad
+from vibepcb.output import bringup, cost
 from vibepcb.parts import altium as part_altium
 from vibepcb.parts import build as part_build
 from vibepcb.parts import check as part_check
 from vibepcb.parts import fetch, spec, standard
+from vibepcb.routing import board as board_model
+from vibepcb.routing import fanout, ratsnest, routes
+from vibepcb.settings import config, intent, rules
 
 if TYPE_CHECKING:
     from collections.abc import Iterator

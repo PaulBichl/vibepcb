@@ -91,7 +91,7 @@ Test points by default: every supply rail and GND gets a `<testpoint name="TP1" 
 padShape="circle" padDiameter="1mm" />` (wired with `<trace from=".TP1 > .pin1" to="net.VCC" />`, a
 `<silkscreentext>` with the rail name beside it), plus the key debug signals (reset, clocks, UART/SWD, enables).
 A connector pin on the net also counts. `check` warns about a rail/GND without one; configure in `vibepcb.toml`
-(`[testpoints] required / ignore / severity`, `src/vibepcb/config.py`). Test points are kept out of BOM and CPL by
+(`[testpoints] required / ignore / severity`, `src/vibepcb/settings/config.py`). Test points are kept out of BOM and CPL by
 the `exclude_testpoints_from_bom` fix. Use `padDiameter="1mm"` (other sizes need a 3D model from the network).
 
 Layout quality bar, enforced by `check` (not by eye): a pour on every copper layer
@@ -104,21 +104,21 @@ Extra tscircuit checks: `hatch run tsci check netlist|placement|shorts <file>`
 
 ## Board config (`boards/<name>/vibepcb.toml`)
 
-What the TSX can't say: rule profiles (`[rules] profiles = ["jlcpcb-4l", "ipc-class2"]` from `rules/*.toml`, `[rules.override]`; fab minimums, Default net class, board thickness; `src/vibepcb/rules.py`), KiCad net classes (track width, clearance, diff-pair width/gap by net-name
+What the TSX can't say: rule profiles (`[rules] profiles = ["jlcpcb-4l", "ipc-class2"]` from `rules/*.toml`, `[rules.override]`; fab minimums, Default net class, board thickness; `src/vibepcb/settings/rules.py`), KiCad net classes (track width, clearance, diff-pair width/gap by net-name
 pattern), length groups (max skew, e.g. an SDRAM bus), diff-pair rules, plane nets (`[planes]`: a via per
 pad), keepout areas (`[keepout.<name>]`: no pour / tracks / vias under a part or in a box, per layer) and BGA escapes (`[escape.<ref>]`: VibePCB escapes the ball grid, tscircuit routes from the escape ends;
-`src/vibepcb/fanout.py`). `fix` writes them into the
-KiCad project; KiCad's DRC enforces them. Format: `src/vibepcb/config.py`. Nets get the name of a
+`src/vibepcb/routing/fanout.py`). `fix` writes them into the
+KiCad project; KiCad's DRC enforces them. Format: `src/vibepcb/settings/config.py`. Nets get the name of a
 named `<trace name="SD_DQ0">` (else the chip pin), so name the traces a rule should catch.
 
-## Post-processing fixes (`src/vibepcb/fixes.py`)
+## Post-processing fixes (`src/vibepcb/kicad/fixes.py`)
 
 A fix is `def my_fix(project: KicadProject) -> list[str]`: edit `project.pcb` /
 `project.sch` (parsed S-expression trees) in place, return one line per change,
 `[]` when nothing to do, and be **idempotent**. Register it in `FIXES` and add a
 test in `tests/test_fixes.py` against the fixtures in `tests/data/`.
 
-- Edit KiCad files only through `vibepcb.sexpr` (lossless). Do **not** use
+- Edit KiCad files only through `vibepcb.core.sexpr` (lossless). Do **not** use
   kiutils/kicad-skip: they drop KiCad 9 data / crash on tscircuit's output.
 - In the tree, `Sym` = bare atom (`F.Cu`, `1.6`), plain `str` = quoted string.
   Keep that distinction when writing values (`Sym("1.6")` vs `"VCC"`).
@@ -204,7 +204,7 @@ test in `tests/test_fixes.py` against the fixtures in `tests/data/`.
   `boards/<name>/sim/*.cir`; `check` runs them (`ngspice -b`) and judges the `.measure` results against
   `* range: <measure> <min> <max> source=datasheet:...` lines (a range without a source is "assumed"; the deck's
   R/C/L must equal the board's values; every regulator needs a deck with `* covers: powerup <ref>`). Write
-  what the board must do into `boards/<name>/intent.toml` (rails, voltages, current budget; `src/vibepcb/intent.py`).
+  what the board must do into `boards/<name>/intent.toml` (rails, voltages, current budget; `src/vibepcb/settings/intent.py`).
   `check` also runs deterministic netlist checks into `boards/<name>/findings.toml` (accept a finding with
   `status = "accepted"` + `reason`). Vibe mode: warnings; `check --strict` fails on them and `fab` needs it.
   Before `fab`: `hatch run pcb review <name> --run` (a fresh-context reviewer checks every part against its
@@ -267,6 +267,22 @@ it names before the part goes into a library.
 | `hatch run update-skill` | Re-vendor the tscircuit skill |
 
 Always run `hatch run style`, `hatch run type` and `hatch run test` after changing Python code.
+
+## Code layout (`src/vibepcb/`)
+
+| Package | Modules |
+|---------|---------|
+| `cli.py` | the `vibepcb` / `pcb` command (other projects call `vibepcb.cli:main`) |
+| `core/` | `paths`, `proc`, `progress`, `sexpr` (KiCad S-expressions), `doctor` |
+| `settings/` | `config` (vibepcb.toml), `rules` (rule profiles), `stackup`, `intent` |
+| `build/` | `tscircuit` (tsci), `padtable` |
+| `kicad/` | `project` (assembly, kicad-cli), `fixes`, `schgen` (schematic), `symlib`, `easyeda`, `testpoints` |
+| `routing/` | `board` (model), `drc`, `router`, `routes`, `pairs`, `tune`, `tracks`, `fanout`, `ratsnest` |
+| `check/` | `verify`, `netcheck`, `sim`, `findings`, `review`, `history`, `hotspots`, `inspect` |
+| `output/` | `bringup`, `cost` |
+| `parts/` | `pcb part`: components to the house standard |
+
+Import modules, not names across packages: `from vibepcb.kicad import fixes`, `from vibepcb.kicad import project as kicad`.
 
 ## Python conventions
 

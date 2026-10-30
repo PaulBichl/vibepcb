@@ -3,8 +3,8 @@ from __future__ import annotations
 import itertools
 import math
 
-from vibepcb import tracks
-from vibepcb.tracks import Obstacle, Seg
+from vibepcb.routing import tracks
+from vibepcb.routing.tracks import Obstacle, Seg
 
 LAYERS = frozenset({"F.Cu"})
 

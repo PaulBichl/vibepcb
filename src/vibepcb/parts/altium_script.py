@@ -20,13 +20,13 @@ import itertools
 import math
 from typing import TYPE_CHECKING
 
-from vibepcb import sexpr
+from vibepcb.core import sexpr
 from vibepcb.parts import footprint as fp_mod
 from vibepcb.parts import spec as spec_mod
 
 if TYPE_CHECKING:
+    from vibepcb.core.sexpr import Node
     from vibepcb.parts.build import Built
-    from vibepcb.sexpr import Node
 
 # KiCad pin type -> Altium TPinElectrical
 ELECTRICAL = {

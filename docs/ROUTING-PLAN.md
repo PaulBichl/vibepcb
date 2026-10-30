@@ -35,7 +35,7 @@ placement, but no longer routes (except as an optional fallback, see phase 7).
 
 Why: tscircuit's router is the weak spot on every non-trivial board (BGA tangles, plane layers cut
 by signals, 0.4 mm escape ends knotted, KiCad-invisible gaps that `fix` has to repair). The BGA
-escape (`src/vibepcb/fanout.py`) already proves the pattern: plan in code, check clearances in
+escape (`src/vibepcb/routing/fanout.py`) already proves the pattern: plan in code, check clearances in
 code, draw in KiCad, KiCad DRC decides.
 
 Non-goals: an interactive GUI; replacing KiCad's DRC (it stays the final authority); a global
@@ -51,7 +51,7 @@ boards/<b>/routes.toml         routing intent, per connection/bus   (agent)
         │ build: tscircuit evaluates once with routing disabled -> circuit JSON -> KiCad zip
         ▼
 out/<b>/kicad/<b>.kicad_pcb    placed, unrouted board
-        │ fix: existing fixes that need no tracks, then vibepcb.routes.apply()
+        │ fix: existing fixes that need no tracks, then vibepcb.routing.routes.apply()
         │      (escapes, then routes.toml in file order, then fallback router for the rest)
         ▼
         │ check: KiCad DRC/ERC + house rules (unchanged)
@@ -286,7 +286,7 @@ Accept: la-bga54's hand-made `SDRAM_PINS` pairing reproduced (or beaten on cross
 ## Conventions (same as the rest of the repo)
 
 - Python conventions from `AGENTS.md` (future annotations, `msg` before `raise`, library code
-  raises, only `cli.py` prints). Edit KiCad files only through `vibepcb.sexpr`.
+  raises, only `cli.py` prints). Edit KiCad files only through `vibepcb.core.sexpr`.
 - Deterministic output (content-derived UUIDs; sorted iteration).
 - Every new fix / pipeline step: a row in `docs/TOOLING.md` section 5.2, tests in `tests/`.
 - Regression boards after each phase: la-main, smu-main, smu-front (tscircuit-routed flow must

@@ -7,10 +7,13 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from vibepcb import bringup, config, fixes, progress, sexpr, testpoints
+from vibepcb.core import progress, sexpr
+from vibepcb.kicad import fixes, testpoints
+from vibepcb.output import bringup
+from vibepcb.settings import config
 
 if TYPE_CHECKING:
-    from vibepcb.sexpr import Node
+    from vibepcb.core.sexpr import Node
 
 DATA = Path(__file__).parent / "data"
 

@@ -3,7 +3,7 @@
 - ~~**`doNotPlace` ignored**~~ done: fix `mark_dnp_parts` (symbol `dnp yes`, footprint `attr dnp`; BOM / CPL
   exports already use `--exclude-dnp`).
 - ~~**Design / manufacturing rule profiles**~~ done: `rules/*.toml` (jlcpcb-2l/4l/6l, ipc-class2/3, hv-60v),
-  `[rules]` in `vibepcb.toml`, `src/vibepcb/rules.py`, fix `apply_rule_profiles`, `pcb rules <board>`
+  `[rules]` in `vibepcb.toml`, `src/vibepcb/settings/rules.py`, fix `apply_rule_profiles`, `pcb rules <board>`
   (TOOLING.md sections 3 and 5.2). Still open from the plan: stack-up (dielectric + er) and `rf`
   impedance profiles for `stackup.py`, the build deriving tscircuit's board props from the profile,
   `fab` stamping the profile names into the fab notes, `pcb new` asking for profiles.
@@ -64,7 +64,7 @@ topic). At 0.8 mm pitch a dogbone via of 0.2 mm drill / 0.4 mm pad fits the gap 
 1. **First BGA = the SDRAM** (`la-bga54`, copy of la-main): W9825G6KH (TSOP-54) -> IS42S16160J-7BLI
    (C1348766, 699 in stock; same 256 Mbit x16 SDR, TFBGA-54, 0.8 mm). 6 x 9 balls, middle three
    columns empty. Learn: ball pad / mask, dogbones at 0.8 mm, which balls leave on which layer.
-2. **New tool - VibePCB escape generator** (`vibepcb.fanout`): VibePCB, not the autorouter, routes
+2. **New tool - VibePCB escape generator** (`vibepcb.routing.fanout`): VibePCB, not the autorouter, routes
    every ball out of the package (ring 0 straight out on top, ring 1 between ring 0, deeper rings
    dogbone + inner layer, power/GND balls dogbone to their plane) and hands tscircuit the end
    points (`pcbTracePaths`); tscircuit routes only the open board. New `check` rule: every used

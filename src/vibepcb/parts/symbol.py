@@ -14,16 +14,16 @@ import re
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
-from vibepcb import sexpr
-from vibepcb.schgen import _text_w
-from vibepcb.sexpr import Sym
+from vibepcb.core import sexpr
+from vibepcb.core.sexpr import Sym
+from vibepcb.kicad.schgen import _text_w
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from vibepcb.core.sexpr import Node
     from vibepcb.parts.spec import Pin, Spec
     from vibepcb.parts.standard import Standard
-    from vibepcb.sexpr import Node
 
 VERSION = "20241209"  # KiCad 9 symbol library format (Altium 26 imports KiCad up to 9)
 GENERATOR = "vibepcb"

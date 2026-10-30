@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import pytest
 
-from vibepcb import doctor, kicad, symlib
+from vibepcb.core import doctor
+from vibepcb.kicad import project as kicad
+from vibepcb.kicad import symlib
 
 
 def test_table_and_exit_code() -> None:

@@ -14,7 +14,8 @@ import shutil
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from vibepcb import kicad, paths, proc
+from vibepcb.core import paths, proc
+from vibepcb.kicad import project as kicad
 from vibepcb.parts import altium_script, footprint, model3d, spec, standard, symbol
 
 if TYPE_CHECKING:

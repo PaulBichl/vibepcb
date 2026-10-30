@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from vibepcb import sexpr
-from vibepcb.sexpr import Sym
+from vibepcb.core import sexpr
+from vibepcb.core.sexpr import Sym
 
 DATA = Path(__file__).parent / "data"
 

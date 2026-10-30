@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING, Any
 
 from synth import seg, write
 
-from vibepcb import history
+from vibepcb.check import history
 
 if TYPE_CHECKING:
     from pathlib import Path

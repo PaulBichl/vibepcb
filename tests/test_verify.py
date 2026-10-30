@@ -7,7 +7,10 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from vibepcb import cli, findings, intent, netcheck, paths, sim, verify
+from vibepcb import cli
+from vibepcb.check import findings, netcheck, sim, verify
+from vibepcb.core import paths
+from vibepcb.settings import intent
 
 if TYPE_CHECKING:
     from pathlib import Path

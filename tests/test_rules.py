@@ -4,7 +4,8 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from vibepcb import board, config, rules
+from vibepcb.routing import board
+from vibepcb.settings import config, rules
 
 if TYPE_CHECKING:
     from pathlib import Path

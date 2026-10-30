@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from vibepcb import paths, sexpr
+from vibepcb.core import paths, sexpr
 from vibepcb.parts import altium, build, check, model3d
 
 DATA = Path(__file__).parent / "data" / "parts"

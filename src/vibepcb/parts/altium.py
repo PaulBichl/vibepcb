@@ -12,7 +12,7 @@ import json
 import shutil
 from typing import TYPE_CHECKING, Any
 
-from vibepcb import sexpr
+from vibepcb.core import sexpr
 from vibepcb.parts import spec
 
 if TYPE_CHECKING:

@@ -9,7 +9,10 @@ from typing import TYPE_CHECKING, Any
 import pytest
 from test_verify import c, chip, circuit, r
 
-from vibepcb import cli, findings, netcheck, paths, review, rules, verify
+from vibepcb import cli
+from vibepcb.check import findings, netcheck, review, verify
+from vibepcb.core import paths
+from vibepcb.settings import rules
 
 if TYPE_CHECKING:
     from pathlib import Path

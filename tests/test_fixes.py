@@ -10,11 +10,16 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from vibepcb import config, fixes, kicad, routes, sexpr, tracks, tscircuit
-from vibepcb.sexpr import Sym
+from vibepcb.build import tscircuit
+from vibepcb.core import sexpr
+from vibepcb.core.sexpr import Sym
+from vibepcb.kicad import fixes
+from vibepcb.kicad import project as kicad
+from vibepcb.routing import routes, tracks
+from vibepcb.settings import config
 
 if TYPE_CHECKING:
-    from vibepcb.sexpr import Node
+    from vibepcb.core.sexpr import Node
 
 DATA = Path(__file__).parent / "data"
 
