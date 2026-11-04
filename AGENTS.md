@@ -156,7 +156,8 @@ shared helpers in `base` / `copper`; a module imports only from modules before i
   terminals (`portHints`) instead of guessing diagonals.
 - The schematic is generated (`schgen.py`), not tscircuit's: `schX/schY` are ignored. Its
   blocks are the TSX sections - group the parts under `{/* ===== title ===== */}` headers
-  by function (supply, MCU, ...); a part's passives go in its section.
+  by function (supply, MCU, ...); a part's passives go in its section. A sub-component used in a section
+  (`<Channel n={1} />`) becomes a framed sub-block there, one per instance.
 - If `check` leaves a few sharp bends/junctions in a cramped spot, the routing there
   is the problem: try `autorouterEffortLevel` (10x fixed one cramped board) and 0.2-0.5 mm
   nudges of the parts around it; tscircuit routing is deterministic, so compare

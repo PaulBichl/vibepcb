@@ -21,10 +21,6 @@
   a mounting-hole keepout). Write them as `<keepout>` elements into the prepared TSX copy
   (`tscircuit.prepared_source`), so the router avoids them too.
 - **Schematic improvements** (`schgen.py`; seen on bench-psu rev C, 2026-10-23):
-  - Parts placed by a TSX sub-component (`<Channel>`, `<Controls>`) fall out of their section: the "output
-    channels" block holds only the two op-amps, the ~150 channel / front-panel parts land in one huge untitled
-    block. Group a component's parts under the section of the place it is used, one sub-block per instance
-    (CH1 / CH2).
   - No signal flow: parts are scattered in a grid, almost everything is joined by net labels, hardly any wires.
     Lay out power chains left to right (in -> regulator -> out) and draw short wires to the passives of a pin.
   - Auto-named nets reach the sheet (`Net-(R125-Pad1)`, `Net-(D15-Pad1)`): name them from the pins they join, or

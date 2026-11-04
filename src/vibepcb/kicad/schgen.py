@@ -3,7 +3,8 @@
 tscircuit's schematic layout does not scale (a ~250-part board does not finish in 20 minutes),
 so builds always disable it and the schematic comes from here, in well under a second:
 
-- one framed block per TSX section (``{/* ===== title ===== */}`` headers, parts in source order);
+- one framed block per TSX section (``{/* ===== title ===== */}`` headers, parts in source order), a
+  framed sub-block in it per sub-component instance used there (:func:`blocks_of`);
 - resistors, capacitors, inductors, diodes, crystals and 2-pin buttons get real symbols, every
   other part is a box with its pins (left / right half by pin number);
 - the two-terminal parts hang off the chip pins they serve as wired trees (pin - R - node - C - GND),
@@ -256,21 +257,177 @@ def _parts(circuit: list[dict[str, Any]]) -> list[Part]:
 
 
 def sections(source: Path | None) -> dict[str, str]:
-    """Part name -> TSX section title (the ``{/* ===== title ===== */}`` header above it)."""
+    """Part name -> TSX section title (the ``{/* ===== title ===== */}`` header above it), for the
+    parts the board's tree names literally (``name="U1"``); see :func:`blocks_of` for the others."""
+    return blocks_of(source, None)
+
+
+BLOCK_SEP = "\n"  # block key: "section" or "section\ninstance" (a sub-block per sub-component instance)
+_TAG = re.compile(r"<([A-Za-z_][\w.]*)")
+_LITERAL_NAME = re.compile(r"""\bname\s*=\s*(?:["']([^"']+)["']|\{\s*["']([^"']+)["']\s*\})""")
+_ANY_NAME = re.compile(r"\bname\s*=\s*\{")
+_QUOTED = re.compile(r"""["'`]([A-Za-z_]\w*)["'`]""")
+_TEMPLATE_NAME = re.compile(r"\bname\s*=\s*\{\s*`([^`]*)`\s*\}")
+_FIRST_PROP = re.compile(r"""^\s*[A-Za-z_]\w*\s*=\s*(?:["']([^"']*)["']|\{\s*(-?[\d.]+|["'][^"']*["'])\s*\})""")
+
+
+@dataclass
+class _Site:
+    """A place in the board's tree that makes parts it does not name literally: a sub-component
+    instance (``<Channel n={1} />``, ``instance`` = its title) or an element with a computed name
+    (``name={`TP${i + 1}`}`` in a ``.map``, ``pattern`` = the names it can make, if known)."""
+
+    pos: int
+    tag: str
+    instance: str
+    pattern: re.Pattern[str] | None
+
+
+def _tag_end(text: str, start: int) -> int:
+    """Index just past the ``>`` closing the JSX tag opened at ``start`` (braces and strings skipped)."""
+    depth, i, quote = 0, start, ""
+    while i < len(text):
+        c = text[i]
+        if quote:
+            if c == "\\":
+                i += 1
+            elif c == quote:
+                quote = ""
+        elif c in "\"'`":
+            quote = c
+        elif c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+        elif c == ">" and depth == 0:
+            return i + 1
+        i += 1
+    return len(text)
+
+
+_DEFINITION = re.compile(r"^(?:export\s+)?(?:const|let|function|type|interface)\s+(\w+)", re.MULTILINE)
+
+
+def _makes_parts(head: str, tag: str) -> bool:
+    """Whether the component ``tag`` can make parts: its definition in ``head`` (the file above the
+    board's tree) names one (``<Txt>`` for silkscreen text does not); an imported one may."""
+    starts = [(m.start(), m[1]) for m in _DEFINITION.finditer(head)]
+    for i, (pos, name) in enumerate(starts):
+        if name == tag:
+            end = starts[i + 1][0] if i + 1 < len(starts) else len(head)
+            return bool(re.search(r"\bname\s*=", head[pos:end]))
+    return True
+
+
+def _tree(text: str) -> tuple[list[tuple[int, str]], list[_Site], dict[str, int], dict[str, int]]:
+    """The board's tree (``export default`` to the end, else the whole file): its section headers,
+    its sites (see :class:`_Site`), the position of each literal part name in it and of each quoted
+    word. Elements in the sub-component definitions above it are left out: their parts belong where
+    an instance is used."""
+    main = text.find("export default")
+    main = 0 if main < 0 else main
+    headers = [(m.start(), m[1]) for m in _SECTION.finditer(text)]
+    sites: list[_Site] = []
+    named: dict[str, int] = {}
+    count: dict[str, int] = {}
+    mentions: dict[str, int] = {}  # quoted names (a .map's data: [["U10", "V3V3"], ["U11", "V1V1"]])
+    for m in _QUOTED.finditer(text, main):
+        mentions.setdefault(m[1], m.start())
+    for m in _TAG.finditer(text, main):
+        tag = m[1]
+        attrs = text[m.end() : _tag_end(text, m.end()) - 1]
+        literal = _LITERAL_NAME.search(attrs)
+        if literal is not None:
+            named.setdefault(literal[1] or literal[2], m.start())
+        elif _ANY_NAME.search(attrs):
+            template = _TEMPLATE_NAME.search(attrs)
+            pattern = None
+            if template is not None:
+                pieces = re.split(r"\$\{[^}]*\}", template[1])
+                pattern = re.compile("^" + ".+".join(re.escape(p) for p in pieces) + "$")
+            sites.append(_Site(m.start(), tag, "", pattern))
+        elif tag[0].isupper() and "." not in tag and _makes_parts(text[:main], tag):
+            count[tag] = count.get(tag, 0) + 1
+            first = _FIRST_PROP.match(attrs)
+            value = (first[1] or first[2]).strip("\"'") if first is not None else ""
+            sites.append(_Site(m.start(), tag, f"{tag} {value or count[tag]}", None))
+    return headers, sites, named, mentions
+
+
+def blocks_of(source: Path | None, order: list[str] | None) -> dict[str, str]:
+    """Part name -> block key (``section`` or ``section`` + BLOCK_SEP + ``instance``).
+
+    A part named literally in the board's tree takes the section header above it. tscircuit lists
+    the parts in tree order (``order``, the circuit JSON's), so the parts between two literally named
+    ones come from the sites between those two in the source: a sub-component instance's parts go
+    into a sub-block of the section it is used in, titled after the instance (``Channel 1``); a
+    computed name's (a ``.map`` of test points) into that section itself. Neighbouring instances of
+    one component share their run of parts evenly, as each makes the same parts."""
     if source is None or not source.exists():
         return {}
-    out: dict[str, str] = {}
-    title = ""
     text = source.read_text(encoding="utf-8")
-    events = sorted(
-        [(m.start(), "s", m[1]) for m in _SECTION.finditer(text)]
-        + [(m.start(), "n", m[1]) for m in _NAME.finditer(text)]
-    )
-    for _, kind, value in events:
-        if kind == "s":
-            title = value
+    headers, sites, named, mentions = _tree(text)
+
+    def section(pos: int) -> str:
+        return next((t for p, t in reversed(headers) if p < pos), "")
+
+    def key(site: _Site) -> str:
+        return section(site.pos) + (BLOCK_SEP + site.instance if site.instance else "")
+
+    if order is None:
+        return {name: section(pos) for name, pos in named.items()}
+    named = {**{n: p for n, p in mentions.items() if n in set(order)}, **named}
+    known = [n in named for n in order]
+    out = {n: section(named[n]) for n in order if n in named}
+    i = 0
+    while i < len(order):
+        if known[i]:
+            i += 1
+            continue
+        j = i
+        while j < len(order) and not known[j]:
+            j += 1
+        run = order[i:j]
+        lo = named[order[i - 1]] if i else 0
+        hi = named[order[j]] if j < len(order) else len(text)
+        between = [s for s in sites if lo < s.pos < hi]
+        if not between or len({key(s) for s in between}) == 1:  # one block made them all: no split needed
+            out.update(dict.fromkeys(run, key(between[0]) if between else section(lo if i else hi)))
         else:
-            out.setdefault(value, title)
+            out.update(_split(run, between, key))
+        i = j
+    return out
+
+
+def _split(run: list[str], sites: list[_Site], key: Any) -> dict[str, str]:
+    """Share a run of parts (tree order) among the sites that made them (source order)."""
+    out: dict[str, str] = {}
+    k = 0
+    while k < len(sites) and run:
+        site = sites[k]
+        if site.pattern is not None:
+            n = 0
+            while n < len(run) and site.pattern.match(run[n]):
+                n += 1
+            out.update(dict.fromkeys(run[:n], key(site)))
+            run = run[n:]
+            k += 1
+            continue
+        group = [site]
+        while k + len(group) < len(sites) and sites[k + len(group)].pattern is None:
+            group.append(sites[k + len(group)])
+        k += len(group)
+        nxt = sites[k].pattern if k < len(sites) else None
+        n = next((m for m, name in enumerate(run) if nxt is not None and nxt.match(name)), len(run))
+        mine, run = run[:n], run[n:]
+        if len({s.tag for s in group}) == 1 and len(mine) % len(group) == 0:
+            size = len(mine) // len(group)
+            for g, s in enumerate(group):
+                out.update(dict.fromkeys(mine[g * size : (g + 1) * size], key(s)))
+        else:
+            out.update(dict.fromkeys(mine, key(group[0])))
+    if run:  # more parts than the sites explain: the last site's
+        out.update(dict.fromkeys(run, key(sites[-1])))
     return out
 
 
@@ -1587,6 +1744,33 @@ def _group(main: list[Cell], extra: list[Cell]) -> Cell:
     return Cell(max(top_w, bottom_w), top_h + (CELL_GAP + bottom_h if extra else 0.0), draw)
 
 
+SUB_TITLE = 2.0  # title font of a sub-block (a sub-component instance inside its section's block)
+
+
+def _framed(block: Block) -> Cell:
+    """A sub-block as one cell: its cells packed (the least area among not too stretched shapes),
+    framed, its title on top."""
+    dims = [(c.width, c.height) for c in block.cells]
+    title_w = len(block.title) * SUB_TITLE * 0.9
+    head = _snap(2 * SUB_TITLE)  # the cells stay on the connection grid
+    packings = _packings(dims, math.inf, math.inf) if dims else [([], 0.0, 0.0)]
+
+    def score(p: tuple[Spots, float, float]) -> tuple[bool, float]:
+        w, h = max(p[1], title_w) + 2 * BLOCK_PAD, p[2] + 2 * BLOCK_PAD + head
+        return max(w / h, h / w) > 2.5, w * h
+
+    spots, w, h = min(packings, key=score)
+    width, height = _snap(max(w, title_w) + 2 * BLOCK_PAD), _snap(h + 2 * BLOCK_PAD + head)
+
+    def draw(sheet: Sheet, x: float, y: float) -> None:
+        sheet.frame(x, y, x + width, y + height)
+        sheet.text(block.title, x + BLOCK_PAD, y + BLOCK_PAD + SUB_TITLE, SUB_TITLE)
+        for cell, (cx, cy) in zip(block.cells, spots, strict=True):
+            cell.draw(sheet, x + BLOCK_PAD + cx, y + BLOCK_PAD + head + cy)
+
+    return Cell(width, height, draw)
+
+
 Shape = tuple[list[tuple[float, float]], float, float]  # a block's cell spots, frame width, frame height
 Spots = list[tuple[float, float]]
 
@@ -1940,13 +2124,13 @@ def _render(
     source: Path | None,
 ) -> str:
     rails = _rails(circuit, parts)
-    section_of = sections(source)
+    section_of = blocks_of(source, [p.name for p in parts])
     _adopt_decoupling(parts, section_of, rails)
-    titles: list[str] = []
+    keys: list[str] = []
     for part in parts:
         section_of.setdefault(part.name, "")
-        if section_of[part.name] not in titles:
-            titles.append(section_of[part.name])
+        if section_of[part.name] not in keys:
+            keys.append(section_of[part.name])
     net_blocks: dict[str, set[str]] = {}
     for part in parts:
         for pin in part.pins:
@@ -1955,7 +2139,16 @@ def _render(
     global_nets = {n for n, b in net_blocks.items() if len(b) > 1 and n not in rails}
 
     sheet = Sheet(stem, global_nets, _negative(rails, parts))
-    blocks = [Block(t, [p for p in parts if section_of[p.name] == t], rails, global_nets, symbols) for t in titles]
+    titles = list(dict.fromkeys(k.split(BLOCK_SEP)[0] for k in keys))
+    blocks = []
+    for t in titles:  # a section's own parts, then a framed sub-block per sub-component instance in it
+        block = Block(t, [p for p in parts if section_of[p.name] == t], rails, global_nets, symbols)
+        for k in keys:
+            if k.startswith(t + BLOCK_SEP):
+                sub = Block(k.split(BLOCK_SEP, 1)[1], [p for p in parts if section_of[p.name] == k], rails,
+                            global_nets, symbols)  # fmt: skip
+                block.cells.append(_framed(sub))
+        blocks.append(block)
     framed = len(blocks) > 1 or bool(titles and titles[0])
     pad = BLOCK_PAD if framed else 0.0
     head = 2 * TITLE if framed else 0.0

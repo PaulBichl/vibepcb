@@ -130,6 +130,69 @@ def test_sections(tmp_path: Path) -> None:
     assert schgen.sections(None) == {}
 
 
+BOARD_TSX = """
+const Channel = ({ n }: { n: 1 | 2 }) => (
+  <>
+    {/* ===== not a section of the board ===== */}
+    <chip name={`U${n}1`} /> <R name={id("R", 1)} v="10k" /> <C name="CX" v="1uF" />
+  </>
+)
+const Txt = ({ t }: { t: string }) => <silkscreentext text={t} />
+export default () => (
+  <board>
+    {/* ===== mcu ===== */}
+    <chip name="U5" /> <R name="R9" v="1k" />
+    {/* ===== channels ===== */}
+    <Channel n={1} />
+    <Txt t="CH1" />
+    <Channel n={2} />
+    <chip name="U6" />
+    {/* ===== test points ===== */}
+    {[1, 2].map((i) => <testpoint key={i} name={`TP${i}`} />)}
+  </board>
+)
+"""
+
+
+def test_blocks_of_sub_components(tmp_path: Path) -> None:
+    source = tmp_path / "index.circuit.tsx"
+    source.write_text(BOARD_TSX, encoding="utf-8")
+    order = ["U5", "R9", "U11", "R101", "CX", "U21", "R201", "CX2", "U6", "TP1", "TP2"]  # circuit JSON: tree order
+    blocks = schgen.blocks_of(source, order)
+    ch1, ch2 = f"channels{schgen.BLOCK_SEP}Channel 1", f"channels{schgen.BLOCK_SEP}Channel 2"
+    assert blocks == {
+        "U5": "mcu", "R9": "mcu", "U11": ch1, "R101": ch1, "CX": ch1, "U21": ch2, "R201": ch2, "CX2": ch2,
+        "U6": "channels", "TP1": "test points", "TP2": "test points",
+    }  # fmt: skip
+    # the literal name inside the definition is no part of the board's tree
+    assert schgen.sections(source) == {"U5": "mcu", "R9": "mcu", "U6": "channels"}
+
+
+def test_sub_blocks_are_framed(tmp_path: Path) -> None:
+    source = tmp_path / "index.circuit.tsx"
+    source.write_text(BOARD_TSX.replace('<C name="CX" v="1uF" />', ""), encoding="utf-8")
+    parts: dict[str, tuple[str, list[tuple[str, int | None]]]] = {
+        "U5": ("simple_chip", [("IO1", 1), ("IO2", 2), ("GND", 3)]),
+        "R9": ("simple_resistor", [("pin1", 0), ("pin2", 1)]),
+        "U11": ("simple_chip", [("IN", 1), ("OUT", 4), ("GND", 3)]),
+        "R101": ("simple_resistor", [("pin1", 4), ("pin2", 3)]),
+        "U21": ("simple_chip", [("IN", 2), ("OUT", 5), ("GND", 3)]),
+        "R201": ("simple_resistor", [("pin1", 5), ("pin2", 3)]),
+        "U6": ("simple_chip", [("A", 4), ("B", 5), ("GND", 3)]),
+        "TP1": ("simple_test_point", [("pin1", 0)]),
+        "TP2": ("simple_test_point", [("pin1", 3)]),
+    }
+    named = {0: "VCC", 1: "A1", 2: "A2", 3: "GND", 4: "O1", 5: "O2"}
+    sch = sexpr.loads(schgen.generate(_circuit(tmp_path, parts, named), "board", source, _no_library(tmp_path)))
+    titles = {str(t[1]) for t in sexpr.children(sch, "text")}
+    assert titles == {"mcu", "channels", "Channel 1", "Channel 2", "test points"}  # no "other" block
+    assert len(list(sexpr.children(sch, "rectangle"))) == 5  # 3 sections + 2 sub-blocks inside "channels"
+    for wire in sexpr.children(sch, "wire"):  # the sub-blocks' cells stay on the 1.27 mm connection grid
+        for xy in (n for n in sexpr.walk(wire) if sexpr.head(n) == "xy"):
+            for v in (float(str(xy[1])), float(str(xy[2]))):
+                assert abs(v / schgen.HALF - round(v / schgen.HALF)) < 1e-3
+
+
 def test_generate(tmp_path: Path) -> None:
     sch_path = tmp_path / "board.kicad_sch"
     schgen.write(_circuit(tmp_path), sch_path, "board", _source(tmp_path), _no_library(tmp_path))
