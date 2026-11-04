@@ -64,6 +64,10 @@ these from the board's config file into the KiCad project (:func:`fixes.apply_bo
     ignore = ["VBUS_RAW"]          # nets exempt (patterns)
     severity = "warning"           # or "error": a missing test point then fails `check`
 
+    [placement]                    # placement check limits (vibepcb.check.placement; house values in
+    decoupling_mm = 3.0            #   rules/sim-defaults.toml [placement]): decoupling_mm, bulk_cap_uf,
+    connector_edge_mm = 1.5        #   crystal_mm, load_cap_mm, regulator_mm, connector_edge_mm
+
     [cost]                         # `pcb cost`: hand-assembled batch, parts from LCSC (vibepcb.cost)
     qty = 5                        #   boards (default 5); spare = 0.1 extra parts (fraction, default 0)
     pcb_usd = 31.4                 #   bare-board price of a jlcpcb.com quote (else a labelled estimate)
@@ -107,6 +111,8 @@ RULE_CLASS_KEYS = ("track_width", "clearance", "via_diameter", "via_drill")
 RULE_KEYS = (*RULE_MIN_KEYS, *RULE_CLASS_KEYS, "board_thickness")
 NETCLASS_KEYS = ("track_width", "clearance", "via_diameter", "via_drill", "diff_pair_width", "diff_pair_gap")
 COST_KEYS = ("qty", "spare", "pcb_usd")  # vibepcb.cost
+# placement check limits (vibepcb.check.placement.Limits; house defaults in rules/sim-defaults.toml)
+PLACEMENT_KEYS = ("decoupling_mm", "bulk_cap_uf", "crystal_mm", "load_cap_mm", "regulator_mm", "connector_edge_mm")
 IMPEDANCE_KEYS = ("impedance", "impedance_diff", "layer")  # solved into NETCLASS_KEYS (vibepcb.stackup)
 
 
@@ -143,6 +149,7 @@ def validate(data: dict[str, Any], where: str = CONFIG_NAME) -> None:
         "testpoints",
         "thermal_vias",
         "cost",
+        "placement",
     }
     if unknown := set(data) - known:
         msg = f"{where}: unknown section(s) {sorted(unknown)} (known: {sorted(known)})"
@@ -180,6 +187,7 @@ def validate(data: dict[str, Any], where: str = CONFIG_NAME) -> None:
     except ValueError as e:
         raise ConfigError(str(e)) from e
     _validate_cost(data.get("cost", {}), where)
+    _validate_placement(data.get("placement", {}), where)
     if data.get("routing", {}).get("mode", "auto") not in ("auto", "manual"):
         msg = f'{where}: [routing] mode must be "auto" (tscircuit routes) or "manual" (routes.toml)'
         raise ConfigError(msg)
@@ -236,6 +244,16 @@ def _validate_cost(cost: dict[str, Any], where: str) -> None:
     for key in ("spare", "pcb_usd"):
         if key in cost and (not isinstance(cost[key], int | float) or cost[key] < 0):
             msg = f"{where}: [cost] {key} must be a number >= 0"
+            raise ConfigError(msg)
+
+
+def _validate_placement(table: dict[str, Any], where: str) -> None:
+    if bad := set(table) - set(PLACEMENT_KEYS):
+        msg = f"{where}: [placement]: unknown key(s) {sorted(bad)} (known: {', '.join(PLACEMENT_KEYS)})"
+        raise ConfigError(msg)
+    for key, value in table.items():
+        if isinstance(value, bool) or not isinstance(value, int | float) or value < 0:
+            msg = f"{where}: [placement] {key} must be a number >= 0, got {value!r}"
             raise ConfigError(msg)
 
 

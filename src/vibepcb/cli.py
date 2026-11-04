@@ -8,6 +8,8 @@ vibepcb inspect <board> [--area x0 y0 x1 y1] [--net PAT] [--layer L] [--scale PX
 vibepcb hotspots <board> the DRC errors of the last check grouped into spots: nets, parts nearby, inspect area
 vibepcb ratsnest <board> [--source unrouted]  unrouted links (longest first), crossings, worst 10 mm cells
 vibepcb place-score <board>..  total ratsnest length and crossings per board (compare `clone` variants)
+vibepcb place-check <board>  placement rules on the unrouted circuit JSON: decoupling / crystal / regulator parts
+                        near their pins, side-entry connectors at the edge; each with a free spot to move to
 vibepcb check <board>   KiCad DRC + ERC -> out/<board>/reports (after refill: drop tracks the GND pour provides)
 vibepcb all <board>     [--fast] [--quiet] build + fix + check
 vibepcb fab <board>     part availability check, gerbers/drill zip, BOM, pick-and-place, schematic PDF, 3D renders,
@@ -53,7 +55,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from vibepcb.build import padtable, tscircuit
-from vibepcb.check import history, hotspots, inspect, review, verify
+from vibepcb.check import findings, history, hotspots, inspect, placement, review, verify
 from vibepcb.core import doctor, paths, proc, progress, sexpr
 from vibepcb.kicad import fixes, schgen, testpoints
 from vibepcb.kicad import project as kicad
@@ -479,6 +481,27 @@ def cmd_place_score(boards: list[str], source: str) -> int:
     for board in boards:
         s = ratsnest.score(_load_project(board, source))
         print(f"{board}: {s['links']} link(s), {s['length']:.1f} mm, {s['crossings']} crossing(s)")
+    return 0
+
+
+def cmd_place_check(board: str) -> int:
+    """Placement findings from the circuit JSON of the placement gate (else of the routed build); writes nothing,
+    ``check`` records them in findings.toml. Accepted ones (findings.toml) are listed as such."""
+    raw = paths.raw_dir(board)
+    circuit = next(
+        (p for p in (raw / f"{board}.unrouted.circuit.json", raw / f"{board}.circuit.json") if p.exists()), None
+    )
+    if circuit is None:
+        print(f"no circuit JSON in {raw.relative_to(paths.ROOT)} - run `pcb build {board}` first", file=sys.stderr)
+        return 1
+    analysis, found = placement.run(json.loads(circuit.read_text(encoding="utf-8")), placement.load_limits(board))
+    accepted = {f.id for f in findings.load(board) if not f.blocking}
+    for f in found:
+        print(f"  [{'accepted' if f.id in accepted else 'warning'}] {f.line()}")
+    print(
+        f"{circuit.name}: {len(analysis.links)} part(s) next to a pin, {len(analysis.edges)} side-entry connector(s);"
+        f" {len(found)} placement finding(s), {sum(f.id in accepted for f in found)} accepted"
+    )
     return 0
 
 
@@ -1061,6 +1084,7 @@ def main(argv: list[str] | None = None) -> int:
     ratsnest_parser.add_argument("board")
     score_parser = sub.add_parser("place-score")
     score_parser.add_argument("boards", nargs="+", help="boards to compare (e.g. `clone` variants)")
+    sub.add_parser("place-check").add_argument("board")
     for p in (ratsnest_parser, score_parser):
         p.add_argument("--source", choices=["current", "unrouted"], default="current")
     cost_parser = sub.add_parser("cost")
@@ -1108,6 +1132,8 @@ def main(argv: list[str] | None = None) -> int:
                 return cmd_ratsnest(args.board, args.source)
             case "place-score":
                 return cmd_place_score(args.boards, args.source)
+            case "place-check":
+                return cmd_place_check(args.board)
             case "all":
                 return (
                     cmd_build(args.board, fast=args.fast)

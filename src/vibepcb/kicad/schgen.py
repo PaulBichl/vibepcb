@@ -954,6 +954,71 @@ def _strongest(attachments: list[End]) -> End:
     return max(attachments, key=lambda a: _STRENGTH.get(type(a), 0))
 
 
+def passive_owners(parts: list[Part], rails: set[str]) -> dict[str, str]:
+    """Two-terminal part -> the chip it serves: of the chips it connects to (directly, else through one more
+    passive, else by supply rail), the one it sits next to on the PCB. The schematic draws it at that chip,
+    ``check.placement`` measures its distance to it."""
+    chips = [p for p in parts if not p.two]
+    twos = [p for p in parts if p.two]
+    signal = {c.name: {p.net for p in c.pins if p.net and p.net not in rails} for c in chips}
+    supply = {c.name: {p.net for p in c.pins if p.net in rails and not is_ground(p.net)} for c in chips}
+    nets_of = {p.name: {q.net for q in p.pins if q.net and q.net not in rails} for p in twos}
+    owners = {}
+    for part in twos:
+        nets = nets_of[part.name]
+        cands = [c for c in chips if signal[c.name] & nets]
+        if not cands and nets:
+            hop = set(nets).union(*(nets_of[q.name] for q in twos if nets_of[q.name] & nets))
+            cands = [c for c in chips if signal[c.name] & hop]
+        if not cands:
+            own = {q.net for q in part.pins if q.net in rails and not is_ground(q.net)}
+            cands = [c for c in chips if supply[c.name] & own]
+        if not cands:
+            continue
+        if part.pos is not None and all(c.pos is not None for c in cands):
+            px, py = part.pos
+            owners[part.name] = min(cands, key=lambda c: math.dist((px, py), c.pos or (0, 0))).name
+        else:
+            owners[part.name] = cands[0].name
+    # passives joined by a net no chip pin is on (LED + resistor, RC between rails) are drawn as one
+    # piece: they all take the owner most of them have, else one owner would cut the chain into labels
+    chip_nets = set().union(*signal.values()) if signal else set()
+    group = {p.name: p.name for p in twos}
+
+    def find(a: str) -> str:
+        while group[a] != a:
+            a = group[a]
+        return a
+
+    by_net: dict[str, str] = {}
+    for part in twos:
+        for net in sorted(nets_of[part.name] - chip_nets):
+            if net in by_net:
+                group[find(part.name)] = find(by_net[net])
+            else:
+                by_net[net] = part.name
+    members: dict[str, list[str]] = {}
+    for part in twos:
+        members.setdefault(find(part.name), []).append(part.name)
+    for names in members.values():
+        votes = [owners[n] for n in names if n in owners]
+        if len(names) > 1 and votes:
+            pick = max(dict.fromkeys(votes), key=votes.count)
+            owners.update(dict.fromkeys(names, pick))
+    return owners
+
+
+def rails(circuit: list[dict[str, Any]]) -> set[str]:
+    """The nets the schematic draws as rail symbols (grounds and supplies)."""
+    return _rails(circuit, _parts(circuit))
+
+
+def board_owners(circuit: list[dict[str, Any]]) -> dict[str, str]:
+    """:func:`passive_owners` over the whole board (every chip; the schematic asks per block)."""
+    parts = _parts(circuit)
+    return passive_owners(parts, _rails(circuit, parts))
+
+
 class Block:
     def __init__(
         self,
@@ -976,57 +1041,6 @@ class Block:
                     if pin.net:
                         self.on_net.setdefault(pin.net, []).append((part, pin))
         self.cells = self._cells()
-
-    def _owners(self, chips: list[Part]) -> dict[str, str]:
-        """Two-terminal part -> the chip it serves: of the chips it connects to (directly, else
-        through one more passive, else by supply rail), the one it sits next to on the PCB."""
-        twos = [p for p in self.parts if p.two]
-        signal = {c.name: {p.net for p in c.pins if p.net and p.net not in self.rails} for c in chips}
-        supply = {c.name: {p.net for p in c.pins if p.net in self.rails and not is_ground(p.net)} for c in chips}
-        nets_of = {p.name: {q.net for q in p.pins if q.net and q.net not in self.rails} for p in twos}
-        owners = {}
-        for part in twos:
-            nets = nets_of[part.name]
-            cands = [c for c in chips if signal[c.name] & nets]
-            if not cands and nets:
-                hop = set(nets).union(*(nets_of[q.name] for q in twos if nets_of[q.name] & nets))
-                cands = [c for c in chips if signal[c.name] & hop]
-            if not cands:
-                rails = {q.net for q in part.pins if q.net in self.rails and not is_ground(q.net)}
-                cands = [c for c in chips if supply[c.name] & rails]
-            if not cands:
-                continue
-            if part.pos is not None and all(c.pos is not None for c in cands):
-                px, py = part.pos
-                owners[part.name] = min(cands, key=lambda c: math.dist((px, py), c.pos or (0, 0))).name
-            else:
-                owners[part.name] = cands[0].name
-        # passives joined by a net no chip pin is on (LED + resistor, RC between rails) are drawn as one
-        # piece: they all take the owner most of them have, else one owner would cut the chain into labels
-        chip_nets = set().union(*signal.values()) if signal else set()
-        group = {p.name: p.name for p in twos}
-
-        def find(a: str) -> str:
-            while group[a] != a:
-                a = group[a]
-            return a
-
-        by_net: dict[str, str] = {}
-        for part in twos:
-            for net in sorted(nets_of[part.name] - chip_nets):
-                if net in by_net:
-                    group[find(part.name)] = find(by_net[net])
-                else:
-                    by_net[net] = part.name
-        members: dict[str, list[str]] = {}
-        for part in twos:
-            members.setdefault(find(part.name), []).append(part.name)
-        for names in members.values():
-            votes = [owners[n] for n in names if n in owners]
-            if len(names) > 1 and votes:
-                pick = max(dict.fromkeys(votes), key=votes.count)
-                owners.update(dict.fromkeys(names, pick))
-        return owners
 
     def _build(self, net: str) -> Node:
         node = Node(net)
@@ -1078,7 +1092,7 @@ class Block:
 
     def _cells(self) -> list[Cell]:
         chips = [p for p in self.parts if not p.two]
-        self.owner = self._owners(chips)
+        self.owner = passive_owners(self.parts, self.rails)
         by_name = {c.name: c for c in chips}
         # rail-to-rail parts (decoupling caps) go on a supply pin of the chip they serve
         decouple: dict[tuple[str, str], list[Part]] = {}
