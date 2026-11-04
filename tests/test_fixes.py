@@ -20,6 +20,8 @@ from vibepcb.routing import routes, tracks
 from vibepcb.settings import config
 
 if TYPE_CHECKING:
+    from typing import Any
+
     from vibepcb.core.sexpr import Node
 
 DATA = Path(__file__).parent / "data"
@@ -604,6 +606,48 @@ def test_prepared_source(tmp_path: Path) -> None:
     source.write_text('<board autorouterEffortLevel="10x" schematicDisabled width="1mm">')
     fast = tscircuit.prepared_source(source, tmp_path / "fast", effort="2x").read_text()
     assert fast == '<board autorouterEffortLevel="2x" schematicDisabled width="1mm">'
+
+
+def test_prepared_source_writes_config_keepouts(tmp_path: Path) -> None:
+    source = tmp_path / "index.circuit.tsx"
+    source.write_text('export default () => (\n  <board width="20mm" layers={4} pcbStyle={{ a: 1 }}>\n  </board>\n)\n')
+    entries = {
+        "mh": {"area": [95, 97, 99, 103], "block": ["tracks", "vias"]},  # KiCad mm, y down
+        "top": {"area": [100, 100, 102, 101], "margin": 0.5, "layers": ["F.Cu", "In1.Cu"], "block": ["tracks"]},
+        "antenna": {"ref": "U3", "block": ["pour", "tracks"]},  # needs the placement
+        "pour": {"area": [0, 0, 1, 1]},  # pour only: KiCad's
+        "vias": {"area": [0, 0, 1, 1], "block": ["vias"]},  # tscircuit's keepout would forbid tracks too
+    }
+    keepouts = tscircuit.router_keepouts(entries)
+    assert [k.name for k in keepouts] == ["mh", "top"]
+    assert tscircuit.router_skipped(entries) == [
+        "keepout pour: pour only - KiCad's rule area only (tscircuit's keepout blocks tracks too)",
+        "keepout vias: vias only - KiCad's rule area only (tscircuit's keepout blocks tracks too)",
+    ]
+    text = tscircuit.prepared_source(source, tmp_path / "src", keepouts=keepouts).read_text()
+    mh = (
+        '<keepout shape="rect" pcbX={-3} pcbY={0} width="4mm" height="6mm" '
+        'layers={["top", "inner1", "inner2", "bottom"]} allowPlacements />'
+    )
+    top = '<keepout shape="rect" pcbX={1} pcbY={-0.5} width="3mm" height="2mm" layers={["top", "inner1"]} allowPlacements />'
+    assert text.index(mh) < text.index(top) < text.index("</board>")
+    assert "[keepout.mh]" in text
+    # the part keepout once the placement is there: U3's bounds + courtyard, tscircuit frame -> KiCad's
+    circuit: list[dict[str, Any]] = [
+        {"type": "source_component", "source_component_id": "s1", "name": "U3"},
+        {"type": "pcb_component", "pcb_component_id": "p1", "source_component_id": "s1",
+         "center": {"x": 10, "y": 5}, "width": 2, "height": 1},
+        {"type": "pcb_courtyard_rect", "pcb_component_id": "p1", "center": {"x": 10, "y": 5}, "width": 3, "height": 1},
+    ]  # fmt: skip
+    (part,) = (k for k in tscircuit.router_keepouts(entries, circuit) if k.ref)
+    assert part.box == (108.5, 94.5, 111.5, 95.5)
+    tscircuit.add_keepouts(target := tmp_path / "src" / source.name, [part])
+    assert 'pcbX={10} pcbY={5} width="3mm" height="1mm"' in target.read_text()
+    tscircuit.save_keepouts([*keepouts, part], tmp_path / "k.json")
+    assert tscircuit.load_keepouts(tmp_path / "k.json") == [*keepouts, part]
+    source.write_text("<board />")
+    with pytest.raises(tscircuit.TscircuitError, match="</board>"):
+        tscircuit.prepared_source(source, tmp_path / "src", keepouts=keepouts)
 
 
 def test_drop_tracks_inside_pads_keeps_run_to_pad_edge(project: fixes.KicadProject) -> None:
@@ -1557,6 +1601,28 @@ def test_apply_keepouts_makes_rule_areas_from_the_config(project: fixes.KicadPro
     project.config = {}
     fixes.apply_keepouts(project)
     assert not [z for z in sexpr.children(project.pcb, "zone") if fixes._is_keepout_zone(z)]
+
+
+def test_apply_keepouts_drops_the_router_keepout_zones(project: fixes.KicadProject) -> None:
+    # build gave tscircuit a <keepout> for the config box; the export made a zone forbidding everything of it
+    raw = project.directory.parent / ".work" / "raw"
+    raw.mkdir(parents=True)
+    tscircuit.save_keepouts([tscircuit.Keepout("mh", (90.0, 90.0, 92.0, 94.0))], raw / "board.keepouts.json")
+    exported = (
+        '(zone (net 0) (net_name "") (layers F.Cu B.Cu) (uuid "00000000-0000-0000-0000-00000000000{}") '
+        "(keepout (tracks not_allowed) (vias not_allowed) (pads not_allowed) (copperpour not_allowed) "
+        "(footprints not_allowed)) (polygon (pts (xy {} 94) (xy 92 94) (xy 92 90) (xy 90 90))))"
+    )
+    project.pcb.append(sexpr.loads(exported.format(1, 90)))
+    other = sexpr.loads(exported.format(2, 80))  # a <keepout> of the TSX itself stays
+    project.pcb.append(other)
+    project.config = {"keepout": {"mh": {"area": [90, 90, 92, 94], "block": ["tracks", "vias"]}}}
+    changes = fixes.apply_keepouts(project)
+    assert "mh: tscircuit's keepout zone (router only) dropped" in changes
+    keepouts = [z for z in sexpr.children(project.pcb, "zone") if sexpr.child(z, "keepout") is not None]
+    assert other in keepouts
+    assert len(keepouts) == 2  # the TSX's own + the config's rule area (pour allowed)
+    assert not any(c.endswith("dropped") for c in fixes.apply_keepouts(project))  # idempotent
 
 
 def test_keepout_config_is_validated() -> None:

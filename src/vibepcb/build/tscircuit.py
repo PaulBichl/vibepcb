@@ -9,8 +9,9 @@ import shutil
 import subprocess
 import tempfile
 from collections import Counter
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from vibepcb.core import proc
 from vibepcb.core.paths import ROOT
@@ -125,14 +126,17 @@ _BOARD_TAG = re.compile(r"<board(?=[\s>/])")
 _SCHEMATIC_DISABLED = re.compile(r"\bschematicDisabled\b")
 
 
-def prepared_source(source: Path, target_dir: Path, *, effort: str | None = None) -> Path:
+def prepared_source(
+    source: Path, target_dir: Path, *, effort: str | None = None, keepouts: Sequence[Keepout] = ()
+) -> Path:
     """A copy of ``source`` in ``target_dir`` that tscircuit evaluates instead of the board itself.
 
     ``schematicDisabled`` is always set: tscircuit's schematic layout takes minutes to never on a
     board of a few hundred parts, and ``fix`` generates the schematic from the circuit JSON
     (:mod:`vibepcb.schgen`) anyway. ``effort`` forces ``autorouterEffortLevel`` (``--fast``: quick
     placement experiments only, the router result differs from the full-effort one). Relative
-    imports are made absolute so the copy evaluates from its new place.
+    imports are made absolute so the copy evaluates from its new place. ``keepouts`` (the board
+    config's, :func:`router_keepouts`) become ``<keepout>`` elements, so the router keeps out of them.
     """
     text = source.read_text(encoding="utf-8")
     here = source.resolve().parent
@@ -148,10 +152,155 @@ def prepared_source(source: Path, target_dir: Path, *, effort: str | None = None
             text = _BOARD_TAG.sub(f"<board {prop}", text, count=1)
     if not _SCHEMATIC_DISABLED.search(text):
         text = _BOARD_TAG.sub("<board schematicDisabled", text, count=1)
+    if keepouts:
+        text = _with_keepouts(text, keepouts, where=source)
     target_dir.mkdir(parents=True, exist_ok=True)
     target = target_dir / source.name
     target.write_text(text, encoding="utf-8")
     return target
+
+
+# --- config keepouts for the router ([keepout.<name>] in vibepcb.toml) ------------------------
+
+# circuit-json-to-kicad puts tscircuit's origin at KiCad (100, 100) and flips y (c2kMatPcb)
+KICAD_ORIGIN = (100.0, 100.0)
+_BOARD_LAYERS = re.compile(r"""\blayers\s*=\s*(?:\{\s*(\d+)\s*\}|["'](\d+)["'])""")
+_BOARD_END = "</board>"
+
+
+@dataclass(frozen=True)
+class Keepout:
+    """A config keepout the router must avoid: a box in KiCad board mm (x0, y0, x1, y1, y down)."""
+
+    name: str
+    box: tuple[float, float, float, float]
+    layers: tuple[str, ...] = ()  # KiCad copper layers; empty = every copper layer
+    ref: str | None = None  # the part it covers (its box comes from the placement-only JSON)
+
+
+def router_keepouts(entries: dict[str, Any], circuit: list[dict[str, Any]] | None = None) -> list[Keepout]:
+    """The ``[keepout.<name>]`` entries tscircuit's router can honour, as boxes.
+
+    tscircuit's ``<keepout>`` keeps out tracks *and* vias (and its own pour), so only entries that
+    block ``tracks`` reach it (a ``tracks`` only entry then has no vias either, harmless: a via needs a
+    track). A ``vias`` only or ``pour`` only entry stays KiCad's (:func:`router_skipped`). Area entries
+    need nothing else; ``ref`` entries need the placement (``circuit``: the placement-only circuit JSON)
+    and are left out without it, or when the part is not there.
+    """
+    out = []
+    for name, entry in entries.items():
+        if "tracks" not in entry.get("block", ["pour"]):
+            continue
+        layers = tuple(entry.get("layers", ()))
+        grow = float(entry.get("margin", 0.0))
+        if "area" in entry:
+            x0, y0, x1, y1 = (float(v) for v in entry["area"])
+            out.append(Keepout(name, (x0 - grow, y0 - grow, x1 + grow, y1 + grow), layers))
+        elif circuit is not None and (box := _part_box(circuit, entry["ref"])) is not None:
+            x0, y0, x1, y1 = box
+            out.append(Keepout(name, (x0 - grow, y0 - grow, x1 + grow, y1 + grow), layers, entry["ref"]))
+    return out
+
+
+def router_skipped(entries: dict[str, Any]) -> list[str]:
+    """One line per config keepout tscircuit's router can't be told about (KiCad still enforces it)."""
+    out = []
+    for name, entry in entries.items():
+        block = set(entry.get("block", ["pour"]))
+        if "tracks" not in block:
+            what = " / ".join(sorted(block))
+            out.append(f"keepout {name}: {what} only - KiCad's rule area only (tscircuit's keepout blocks tracks too)")
+    return out
+
+
+def _part_box(circuit: list[dict[str, Any]], ref: str) -> tuple[float, float, float, float] | None:
+    """KiCad-frame box of a placed part: its component bounds (pads) and its courtyard."""
+    names = {c["source_component_id"]: c.get("name") for c in circuit if c["type"] == "source_component"}
+    comp = next(
+        (c for c in circuit if c["type"] == "pcb_component" and names.get(c.get("source_component_id")) == ref), None
+    )
+    if comp is None:
+        return None
+    cx, cy, w, h = comp["center"]["x"], comp["center"]["y"], comp.get("width", 0), comp.get("height", 0)
+    points = [(cx - w / 2, cy - h / 2), (cx + w / 2, cy + h / 2)]
+    for c in circuit:
+        if c.get("pcb_component_id") != comp["pcb_component_id"]:
+            continue
+        if c["type"] == "pcb_courtyard_rect":
+            x, y, cw, ch = c["center"]["x"], c["center"]["y"], c["width"], c["height"]
+            points += [(x - cw / 2, y - ch / 2), (x + cw / 2, y + ch / 2)]
+        elif c["type"] == "pcb_courtyard_outline":
+            points += [(p["x"], p["y"]) for p in c["outline"]]
+    ox, oy = KICAD_ORIGIN
+    xs, ys = [ox + x for x, _ in points], [oy - y for _, y in points]
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def _tsci_layer(layer: str) -> str:
+    """KiCad copper layer -> tscircuit layer name."""
+    if layer == "F.Cu":
+        return "top"
+    if layer == "B.Cu":
+        return "bottom"
+    return f"inner{layer.removeprefix('In').removesuffix('.Cu')}"
+
+
+def _board_layer_count(text: str) -> int:
+    start = _BOARD_TAG.search(text)
+    if start is None:
+        return 2
+    depth, end = 0, start.end()
+    while end < len(text) and not (text[end] == ">" and depth == 0):  # the tag's end, `>` in {...} skipped
+        depth += {"{": 1, "}": -1}.get(text[end], 0)
+        end += 1
+    m = _BOARD_LAYERS.search(text, start.end(), end)
+    return int(m[1] or m[2]) if m else 2
+
+
+def _num(v: float) -> str:
+    return f"{v:.4f}".rstrip("0").rstrip(".")
+
+
+def keepout_tsx(k: Keepout, layer_count: int) -> str:
+    """A ``<keepout>`` for ``k`` (board frame; parts may overlap it, KiCad's rule area allows footprints)."""
+    x0, y0, x1, y1 = k.box
+    ox, oy = KICAD_ORIGIN
+    every = ["F.Cu", *(f"In{i}.Cu" for i in range(1, layer_count - 1)), "B.Cu"]
+    layers = [_tsci_layer(lay) for lay in every if not k.layers or lay in k.layers]
+    return (
+        f'<keepout shape="rect" pcbX={{{_num((x0 + x1) / 2 - ox)}}} pcbY={{{_num(oy - (y0 + y1) / 2)}}} '
+        f'width="{_num(x1 - x0)}mm" height="{_num(y1 - y0)}mm" layers={{{json.dumps(layers)}}} allowPlacements />'
+    )
+
+
+def _with_keepouts(text: str, keepouts: Sequence[Keepout], where: Path) -> str:
+    end = text.rfind(_BOARD_END)
+    if end < 0:
+        msg = f"no {_BOARD_END} in {where}: the config keepouts go right before it"
+        raise TscircuitError(msg)
+    count = _board_layer_count(text)
+    lines = "".join(f"    {{/* vibepcb.toml [keepout.{k.name}] */}}\n    {keepout_tsx(k, count)}\n" for k in keepouts)
+    return f"{text[:end]}{lines}  {text[end:]}"
+
+
+def add_keepouts(source: Path, keepouts: Sequence[Keepout]) -> None:
+    """Add ``keepouts`` to the prepared copy ``source`` (the part keepouts, once the placement is known)."""
+    if keepouts:
+        source.write_text(_with_keepouts(source.read_text(encoding="utf-8"), keepouts, source), encoding="utf-8")
+
+
+def save_keepouts(keepouts: Sequence[Keepout], path: Path) -> None:
+    """The keepouts the build gave tscircuit: ``fix`` drops the KiCad zones the export made of them."""
+    path.write_text(json.dumps([asdict(k) for k in keepouts], indent=1), encoding="utf-8")
+
+
+def load_keepouts(path: Path) -> list[Keepout]:
+    if not path.exists():
+        return []
+    return [
+        Keepout(d["name"], tuple(d["box"]), tuple(d["layers"]), d.get("ref"))
+        for d in json.loads(path.read_text(encoding="utf-8"))
+    ]
 
 
 def evaluate_unrouted(source: Path, output: Path, *, parts_engine: bool = False) -> Path:
