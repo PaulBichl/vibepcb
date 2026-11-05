@@ -811,6 +811,27 @@ def test_snap_bends_to_45(project: fixes.KicadProject) -> None:
     assert fixes.snap_bends_to_45(project) == []
 
 
+def test_snap_bends_to_45_turns_a_pad_entry(project: fixes.KicadProject) -> None:
+    # a GND track 3.2 deg off horizontal turning at 131.8 deg into the F.Cu GND pad (x 101.425-102.225, y from
+    # 101.525): on the grid the corner would move 0.28 mm, so the long piece keeps its line and the pad piece turns
+    long = sexpr.loads('(segment (start 106 101.3) (end 102.4 101.1) (width 0.15) (layer "F.Cu") (net 2))')
+    entry = sexpr.loads('(segment (start 102.4 101.1) (end 101.9 101.6) (width 0.15) (layer "F.Cu") (net 2))')
+    project.pcb += [long, entry]
+    assert [c for c in fixes.sharp_corners(project) if c[0] == "GND"]
+    changes = fixes.snap_bends_to_45(project)
+    assert len(changes) == 1
+    assert not [c for c in fixes.sharp_corners(project) if c[0] == "GND"]
+    corner, end = (sexpr.child(entry, k) for k in ("start", "end"))
+    assert corner is not None
+    assert end is not None
+    v, q = ((float(str(n[1])), float(str(n[2]))) for n in (corner, end))
+    assert abs((v[1] - 101.3) / (v[0] - 106) - 0.2 / 3.6) < 1e-3  # still on the long piece's line
+    assert math.dist(v, (102.4, 101.1)) <= 0.2 + 1e-6
+    assert 101.425 <= q[0] <= 102.225
+    assert 101.525 <= q[1] <= 102.475
+    assert fixes.snap_bends_to_45(project) == []
+
+
 def test_collapse_bend_stubs(project: fixes.KicadProject) -> None:
     # a 45 deg diagonal, a 0.33 mm vertical stub, a horizontal (135 + 90 deg): the diagonal runs on to the horizontal
     pieces = [

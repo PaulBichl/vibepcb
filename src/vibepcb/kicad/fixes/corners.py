@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import itertools
 import math
 from typing import TYPE_CHECKING
@@ -275,7 +276,9 @@ def snap_bends_to_45(project: KicadProject) -> list[str]:
     diagonal meeting a track 1.3 deg off horizontal, 133.7 deg). The corner moves (at most :data:`SNAP_MOVE_MM`)
     to where the two pieces, each turned to the nearest 45 deg direction about its far end, cross. Done only if both
     pieces keep their clearance and the bends at their far ends don't get sharper than 135 deg (or than they were);
-    only bends sharp_corners reports are touched.
+    only bends sharp_corners reports are touched. Where that does not fit and one piece ends alone on a pad of its
+    net, :func:`_turn_pad_entry` keeps the other piece's line and turns the pad piece to 135 deg, its end sliding on
+    the pad.
     """
     clearance, edge_clearance = _design_clearances(project)
     changes: list[str] = []
@@ -299,23 +302,28 @@ def snap_bends_to_45(project: KicadProject) -> list[str]:
             if copper.on_pad_or_via(v, net, layer):
                 continue
             new = _line_cross(a, _snapped((v[0] - a[0], v[1] - a[1])), b, _snapped((v[0] - b[0], v[1] - b[1])))
-            if (
-                new is None
-                or math.dist(new, v) > SNAP_MOVE_MM
-                or tracks.interior_angle(a, new, b) < tracks.MIN_CORNER_DEG - 1e-6
-            ):
-                continue
-            ok = _fits(copper, obstacles, s1, a, new, clearance, edge_clearance) and _fits(
-                copper, obstacles, s2, new, b, clearance, edge_clearance
+            ok = (
+                new is not None
+                and math.dist(new, v) <= SNAP_MOVE_MM
+                and tracks.interior_angle(a, new, b) >= tracks.MIN_CORNER_DEG - 1e-6
+                and _fits(copper, obstacles, s1, a, new, clearance, edge_clearance)
+                and _fits(copper, obstacles, s2, new, b, clearance, edge_clearance)
             )
             for seg, far in ((s1, a), (s2, b)):  # the bends at the far ends
                 nxt = _corner_at(ends, copper, seg, far)
-                if nxt is not None:
+                if ok and nxt is not None:
+                    assert new is not None
                     before, after = tracks.interior_angle(v, far, nxt), tracks.interior_angle(new, far, nxt)
-                    ok = ok and after >= min(tracks.MIN_CORNER_DEG, before) - 1e-6
+                    ok = after >= min(tracks.MIN_CORNER_DEG, before) - 1e-6
             if not ok:
-                skip.add(tracks._key(v))
-                continue
+                turned = _turn_pad_entry(copper, obstacles, ends, net, layer, v, items, clearance, edge_clearance)
+                if turned is None:
+                    skip.add(tracks._key(v))
+                    continue
+                (s1, e1), (s2, e2), new, b = turned
+                a = _far(s1, e1)
+                _set_end(s2, "end" if e2 == "start" else "start", b)
+            assert new is not None
             _set_end(s1, e1, new)
             _set_end(s2, e2, new)
             changes.append(
@@ -326,6 +334,60 @@ def snap_bends_to_45(project: KicadProject) -> list[str]:
         if not done:
             break
     return changes
+
+
+TURN_STEP_MM = 0.01  # the corner slides along the kept piece in these steps
+
+
+def _turn_pad_entry(
+    copper: _Copper,
+    obstacles: list[tracks.Obstacle],
+    ends: dict[tuple[str, str, tuple[int, int]], list[tuple[tracks.Seg, str]]],
+    net: str,
+    layer: str,
+    v: tracks.Point,
+    items: list[tuple[tracks.Seg, str]],
+    clearance: float,
+    edge_clearance: float,
+) -> tuple[tuple[tracks.Seg, str], tuple[tracks.Seg, str], tracks.Point, tracks.Point] | None:
+    """:func:`snap_bends_to_45`'s fallback for a bend into a pad: (kept piece, turned piece, new corner, new pad end).
+
+    Snapping both pieces can fail where the router ran one a hair off the grid to clear a neighbour (seen: a VCC
+    track 0.7 deg off horizontal above a CH340C's USB_P pad, turning at 131.7 deg into the VCC pad beside it; on the
+    grid it hit USB_P either way). The kept piece keeps its line, the corner slides along it (at most
+    :data:`SNAP_MOVE_MM`) and the other piece, whose far end lies alone on a pad of the net (no other track, no via),
+    leaves it at exactly 135 deg and ends where that line passes closest to the pad centre, still on the pad. The
+    kept piece's far bend keeps its angle; the pad end's bend is pad copper.
+    """
+    fits = functools.partial(_fits, copper, obstacles, clearance=clearance, edge_clearance=edge_clearance)
+    for (keep, ek), (turn, et) in (items, items[::-1]):
+        a, f = _far(keep, ek), _far(turn, et)
+        if len(ends.get((net, layer, tracks._key(f)), [])) != 1 or any(
+            math.dist(c, f) <= r for c, r in copper.vias_by_net.get(net, [])
+        ):
+            continue
+        pad = next(
+            (o for o in copper.pads_by_net.get(net, []) if layer in o.layers and o.distance(f, f) <= tracks.EPS), None
+        )
+        length = math.dist(a, v)
+        if pad is None or length <= tracks.EPS:
+            continue
+        u = ((v[0] - a[0]) / length, (v[1] - a[1]) / length)
+        side = math.copysign(1.0, u[0] * (f[1] - v[1]) - u[1] * (f[0] - v[0]))
+        c, s = math.cos(math.pi / 4), side * math.sin(math.pi / 4)
+        d = (u[0] * c - u[1] * s, u[0] * s + u[1] * c)  # the kept piece's direction turned 45 deg towards the pad
+        steps = round(SNAP_MOVE_MM / TURN_STEP_MM)
+        for k in sorted(range(-steps, steps + 1), key=abs):
+            if k * TURN_STEP_MM <= tracks.EPS - length:
+                continue
+            new = (v[0] + k * TURN_STEP_MM * u[0], v[1] + k * TURN_STEP_MM * u[1])
+            t = (pad.centre[0] - new[0]) * d[0] + (pad.centre[1] - new[1]) * d[1]
+            q = (new[0] + t * d[0], new[1] + t * d[1])
+            if t <= tracks.EPS or pad.distance(q, q) > tracks.EPS:
+                continue
+            if fits(keep, a, new) and fits(turn, new, q):
+                return (keep, ek), (turn, et), new, q
+    return None
 
 
 STUB_COLLAPSE_MM = 0.6  # a piece this short between two bends may be dropped
