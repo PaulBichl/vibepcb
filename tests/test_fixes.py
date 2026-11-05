@@ -298,9 +298,9 @@ def test_place_reference_designators_bottom_side(project: fixes.KicadProject) ->
     assert fixes.place_reference_designators(project) == []  # idempotent
 
 
-def test_place_reference_designators_least_covered_spot(project: fixes.KicadProject) -> None:
-    # the bottom cap sits in a dense via field: no candidate is free, so the reference still moves off
-    # tscircuit's offset to the candidate covering the fewest items, and the report says so
+def test_place_reference_designators_fab_fallback(project: fixes.KicadProject) -> None:
+    # the bottom cap sits in a dense via field: no candidate is free even at the smallest size, so the reference
+    # goes onto the fab layer (centred on the part) instead of over a via or pad, and the report says so
     fp = sexpr.loads(BOTTOM_CAP)
     project.pcb.append(fp)
     fx, fy = fixes._num(sexpr.child(fp, "at"), 1), fixes._num(sexpr.child(fp, "at"), 2)
@@ -309,7 +309,84 @@ def test_place_reference_designators_least_covered_spot(project: fixes.KicadProj
         for i in range(-8, 9) for j in range(-8, 9) if abs(i) > 2 or abs(j) > 1
     ]  # fmt: skip
     changes = fixes.place_reference_designators(project)
-    assert any(c.startswith("C9: reference at") and "no free spot: covers" in c for c in changes)
+    assert "C9: no free spot on the silkscreen - reference moved to B.Fab" in changes
+    text = next(t for t in sexpr.children(fp, "fp_text") if str(t[1]) == "reference")
+    assert fixes._layer(text) == "B.Fab"
+    assert fixes.place_reference_designators(project) == []  # idempotent: the fab reference stays
+
+
+def test_place_reference_designators_smaller_text(project: fixes.KicadProject) -> None:
+    # a top cap in a via field with one small hole above it: 1.0 mm text fits nowhere, 0.8 mm text fits the hole
+    project.pcb.append(
+        sexpr.loads("""(footprint "tscircuit:capacitor_cap0603" (layer F.Cu) (at 104 104 0)
+      (fp_text reference "C9" (at 0 -1.375 0) (layer F.SilkS) (effects (font (size 0.4 0.4) (thickness 0.15))))
+      (pad "1" smd rect (at 0.825 0 0) (size 0.8 0.95) (layers F.Cu F.Paste F.Mask))
+      (pad "2" smd rect (at -0.825 0 0) (size 0.8 0.95) (layers F.Cu F.Paste F.Mask)))""")
+    )
+    hole = {(-1, -2), (0, -2), (1, -2)}
+    project.pcb += [
+        sexpr.loads(f"(via (at {104 + i * 0.8:.2f} {104 + j * 0.8:.2f}) (size 0.6) (drill 0.3) (layers F.Cu B.Cu) (net 2))")
+        for i in range(-8, 9) for j in range(-8, 9) if (abs(i) > 2 or abs(j) > 1) and (i, j) not in hole
+    ]  # fmt: skip
+    changes = fixes.place_reference_designators(project)
+    assert "C9: reference at (104, 102.7) 0 deg, 0.8 mm text" in changes
+    assert fixes.place_reference_designators(project) == []  # idempotent
+
+
+SILK_CAP = """(footprint "tscircuit:capacitor_cap0603" (layer F.Cu) (at {x} {y} 0)
+  (property "Reference" "{ref}" (at 0 -1.375 0) (layer F.SilkS) (effects (font (size 0.4 0.4) (thickness 0.15))))
+  (fp_rect (start -1.425 -0.875) (end 1.425 0.875) (stroke (width 0.1) (type solid)) (fill none) (layer F.SilkS)
+    (uuid "00000000-0000-0000-0000-00000000000{n}"))
+  (pad "1" smd rect (at 0.825 0 0) (size 0.8 0.95) (layers F.Cu F.Paste F.Mask))
+  (pad "2" smd rect (at -0.825 0 0) (size 0.8 0.95) (layers F.Cu F.Paste F.Mask)))"""
+
+
+def _seg_box(*points: tuple[float, float], grow: float = 0.05) -> tuple[float, float, float, float]:
+    xs, ys = [p[0] for p in points], [p[1] for p in points]
+    return min(xs) - grow, min(ys) - grow, max(xs) + grow, max(ys) + grow
+
+
+def _silk_lines(fp: list[Node]) -> list[tuple[tuple[float, float], tuple[float, float]]]:
+    to_board = fixes._fp_to_board(fp)
+    return [
+        (to_board(fixes._num(sexpr.child(n, "start"), 1), fixes._num(sexpr.child(n, "start"), 2)),
+         to_board(fixes._num(sexpr.child(n, "end"), 1), fixes._num(sexpr.child(n, "end"), 2)))
+        for n in sexpr.children(fp, "fp_line") if fixes._layer(n) == "F.SilkS"
+    ]  # fmt: skip
+
+
+def test_clip_footprint_silk(project: fixes.KicadProject) -> None:
+    # C10 and C11 side by side share an outline edge, C12's outline runs past the board edge (x = 110), board
+    # text crosses C13's outline: the later part (reference order) gives up the shared edge, C12 is cut back to
+    # the edge clearance, C13 around the text; C10 keeps its outline and the text stays where the board put it
+    caps = [("C10", 100, 104), ("C11", 102.85, 104), ("C12", 109.5, 96), ("C13", 95, 96)]
+    for n, (ref, x, y) in enumerate(caps):
+        project.pcb.append(sexpr.loads(SILK_CAP.format(ref=ref, x=x, y=y, n=n)))
+    text = sexpr.loads('(gr_text "LABEL" (at 95 95.1 0) (layer F.SilkS) (effects (font (size 1 1) (thickness 0.15))))')
+    project.pcb.append(text)
+    changes = fixes.clip_footprint_silk(project)
+    clipped = {c.split(":")[0] for c in changes}
+    assert {"C11", "C12", "C13"} <= clipped
+    assert "C10" not in clipped
+    by_ref = {sexpr.property_value(fp, "Reference"): fp for fp in sexpr.children(project.pcb, "footprint")}
+    assert sexpr.child(by_ref["C10"], "fp_rect") is not None  # untouched
+    shared_x = 100 + 1.425
+    for a, b in _silk_lines(by_ref["C11"]):
+        assert not (abs(a[0] - shared_x) < 0.01 and abs(b[0] - shared_x) < 0.01)  # the shared edge is gone
+        assert min(a[0], b[0]) > shared_x + 0.05 + 0.1 - 1e-6  # and the rest keeps clear of C10's edge
+    edge_limit = 110 - fixes.DEFAULT_EDGE_CLEARANCE_MM
+    assert all(max(a[0], b[0]) <= edge_limit - 0.05 + 1e-6 for a, b in _silk_lines(by_ref["C12"]))
+    assert _silk_lines(by_ref["C12"])  # cut back, not removed
+    text_box = fixes._text_box(95, 95.1, "LABEL", 1.0, 0.0)
+    for a, b in _silk_lines(by_ref["C13"]):
+        assert not fixes._overlaps(_seg_box(a, b), text_box)
+    assert text in project.pcb
+    for fp in by_ref.values():  # nothing lands on a pad
+        for a, b in _silk_lines(fp):
+            for pad in sexpr.children(fp, "pad"):
+                corners = fixes._pad_corners(pad, fixes._fp_to_board(fp))
+                assert not fixes._overlaps(_seg_box(a, b), _seg_box(*corners, grow=0.0))
+    assert fixes.clip_footprint_silk(project) == []  # idempotent
 
 
 ZONE = """(zone (net 2) (net_name "GND") (layer "F.Cu") (hatch edge 0.5)
@@ -1223,6 +1300,28 @@ def test_unconnected_pads_from_report() -> None:
         ],
     )
     assert result.unconnected_pads() == [("GND", (1.5, 2.0))]
+
+
+def test_silk_summary() -> None:
+    def silk(kind: str, *items: str) -> dict[str, object]:
+        return {"type": kind, "severity": "warning", "items": [{"description": d} for d in items]}
+
+    result = kicad.CheckResult(
+        "DRC",
+        Path("drc.json"),
+        [
+            silk("silk_overlap", "Reference field of R1", "Segment of C2 on F.Silkscreen"),
+            silk("silk_over_copper", "PCB text 'GND' on F.Silkscreen", "Pad 1 [GND] of TP1 on F.Cu"),
+            {"type": "clearance", "severity": "error", "items": []},
+        ],
+    )
+    assert result.silk_summary() == (
+        "Silkscreen: 1 silk_overlap, 1 silk_over_copper, 0 silk_edge_clearance"
+        " (warnings; 1 involve board text (place the <silkscreentext> in the TSX))"
+    )
+    assert kicad.CheckResult("DRC", Path("drc.json")).silk_summary() == (
+        "Silkscreen: 0 silk_overlap, 0 silk_over_copper, 0 silk_edge_clearance (warnings)"
+    )
 
 
 def test_plane_pad_vias(project: fixes.KicadProject) -> None:

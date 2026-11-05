@@ -2,7 +2,7 @@
 
 An agent iterating on a board can oscillate between two variants, each fixing what the other broke. The
 table after every ``check`` shows what got worse (DRC errors per type, ERC errors, unrouted connections,
-sharp bends, vias, track length, warnings) next to the previous run. ``reports/history.json`` keeps the
+sharp bends, vias, track length, warnings, silkscreen findings) next to the previous run. ``reports/history.json`` keeps the
 last :data:`KEEP` runs.
 """
 
@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from vibepcb.core import sexpr
+from vibepcb.kicad import project as kicad
 from vibepcb.routing import ratsnest
 
 if TYPE_CHECKING:
@@ -36,6 +37,10 @@ FIXED_METRICS = {
     "vias": "vias",
     "track_mm": "track length (mm)",
     "warnings": "warnings",
+    # KiCad's silkscreen findings (warnings): references / outlines over pads, over each other, at the board edge
+    "silk:silk_overlap": "silk overlaps",
+    "silk:silk_over_copper": "silk over pads",
+    "silk:silk_edge_clearance": "silk at board edge",
 }
 LENGTH_METRICS = frozenset({"ratsnest_mm", "track_mm"})
 DRC_PREFIX = "drc:"
@@ -84,6 +89,8 @@ def snapshot(
         "track_mm": board["track_mm"],
         "warnings": float(warnings + warned),
     }
+    silk = Counter(str(v.get("type")) for v in drc)
+    metrics |= {f"silk:{t}": float(silk[t]) for t in kicad.SILK_TYPES}
     metrics |= {f"{DRC_PREFIX}{t}": float(n) for t, n in drc_errors.items()}
     return {"time": int(time.time()), "passed": passed, "metrics": metrics}
 

@@ -171,6 +171,9 @@ def write_footprint_library(pcb: list[Node], pretty: Path) -> list[Path]:
 
 # --- checks -----------------------------------------------------------------------
 
+# KiCad's silkscreen DRC findings, counted in the check summary and the regression table (KiCad: warnings)
+SILK_TYPES = ("silk_overlap", "silk_over_copper", "silk_edge_clearance")
+
 
 @dataclass
 class CheckResult:
@@ -229,6 +232,19 @@ class CheckResult:
             for item in v.get("items", [])
             if "pos" in item
         ]
+
+    def silk_summary(self) -> str:
+        """One line: KiCad's silkscreen findings (:data:`SILK_TYPES`) by type, and how many involve board text
+        (``<silkscreentext>`` the board source places: fix those in the TSX, ``fix`` does not move them)."""
+        found = [v for v in self.violations if v.get("type") in SILK_TYPES]
+        counts = Counter(str(v.get("type")) for v in found)
+        board_text = sum(
+            any(str(i.get("description", "")).startswith("PCB text") for i in v.get("items", [])) for v in found
+        )
+        parts = ", ".join(f"{counts[t]} {t}" for t in SILK_TYPES)
+        severity = "/".join(sorted({str(v.get("severity")) for v in found})) or "warning"
+        note = f"; {board_text} involve board text (place the <silkscreentext> in the TSX)" if board_text else ""
+        return f"Silkscreen: {parts} ({severity}s{note})"
 
     def __str__(self) -> str:
         counts = Counter(v.get("severity", "?") for v in self.violations)

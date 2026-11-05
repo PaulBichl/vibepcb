@@ -84,3 +84,19 @@ def test_board_metrics_counts_vias_and_track_length(tmp_path: Path) -> None:
     assert m["vias"] == 1
     assert m["track_mm"] == 5.0
     assert m["ratsnest_links"] == 1  # P1 and P3 of net A are not joined by this track
+
+
+def test_silk_findings_are_tracked(tmp_path: Path) -> None:
+    # KiCad reports silkscreen findings as warnings: they get their own rows, so a run that adds some is flagged
+    def warn(kind: str) -> dict[str, str]:
+        return {"severity": "warning", "type": kind}
+
+    m = run(drc=[warn("silk_overlap"), warn("silk_overlap"), warn("silk_edge_clearance")])["metrics"]
+    assert m["silk:silk_overlap"] == 2
+    assert m["silk:silk_edge_clearance"] == 1
+    assert m["silk:silk_over_copper"] == 0
+    assert m["drc_errors"] == 0
+    path = tmp_path / "history.json"
+    history.record(path, run())
+    lines = history.record(path, run(drc=[warn("silk_overlap")]))
+    assert "WORSE: warnings, silk overlaps" in "\n".join(lines)
