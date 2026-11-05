@@ -34,7 +34,8 @@ these from the board's config file into the KiCad project (:func:`fixes.apply_bo
     # area = [x0, y0, x1, y1]        #   optional: only this box (board mm) - a split plane / a patch under a part;
     # priority = 2                   #   it wins over a full pour of the layer (KiCad zone priority)
 
-    [keepout.antenna]              # rule area (KiCad enforces it: pour fill + DRC; the router keeps out of tracks / vias)
+    [keepout.antenna]              # rule area (KiCad enforces it: pour fill + DRC); with "tracks" blocked also a
+                                   #   <keepout> for tscircuit's router (vibepcb.build.tscircuit.router_keepouts)
     ref = "U3"                     #   over this part's pads + courtyard (or: area = [x0, y0, x1, y1] board mm)
     margin = 1.0                   #   mm around it (default 0)
     layers = ["F.Cu", "In1.Cu"]    #   default: every copper layer

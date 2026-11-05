@@ -7,6 +7,7 @@ import math
 import uuid
 from typing import TYPE_CHECKING
 
+from vibepcb.build import tscircuit
 from vibepcb.core import sexpr
 from vibepcb.core.sexpr import Sym
 from vibepcb.kicad.fixes.base import (
@@ -272,11 +273,11 @@ def apply_keepouts(project: KicadProject) -> list[str]:
     cfg = project.config.get("keepout", {})
     for z in [z for z in sexpr.children(project.pcb, "zone") if _is_keepout_zone(z)]:
         project.pcb.remove(z)
+    changes = _drop_router_keepouts(project)
     layer_names = {
         str(n[1]) for n in (sexpr.child(project.pcb, "layers") or [])[1:] if isinstance(n, list) and len(n) > 1
     }
     board_layers = [lay for lay in COPPER_LAYERS if lay in layer_names]
-    changes = []
     for name, entry in cfg.items():
         if "area" in entry:
             x0, y0, x1, y1 = (float(v) for v in entry["area"])
@@ -308,6 +309,31 @@ def apply_keepouts(project: KicadProject) -> list[str]:
         changes.append(
             f"{name}: no {', '.join(sorted(block))} on {', '.join(layers)} in ({_mm(x0)}, {_mm(y0)})-({_mm(x1)}, {_mm(y1)})"
         )
+    return changes
+
+
+def _drop_router_keepouts(project: KicadProject) -> list[str]:
+    """Drop the zones the export made of the ``<keepout>`` elements ``build`` gave tscircuit for the config
+    keepouts (``.work/raw/<board>.keepouts.json``): they forbid everything on their layers (pour included),
+    the config's own rule areas replace them."""
+    name = f"{project.pcb_path.stem}.keepouts.json"
+    path = next(
+        (raw / name for raw in (project.directory.parent / ".work" / "raw", project.directory.parent / "raw")
+         if (raw / name).exists()),
+        None,
+    )  # fmt: skip
+    if path is None:
+        return []
+    changes = []
+    for k in tscircuit.load_keepouts(path):
+        for zone in [z for z in sexpr.children(project.pcb, "zone") if sexpr.child(z, "keepout") is not None]:
+            if _is_keepout_zone(zone):
+                continue
+            pts = [(_num(q, 1), _num(q, 2)) for q in sexpr.walk(zone) if isinstance(q, list) and sexpr.head(q) == "xy"]
+            box = _bbox(pts) if len({(round(x, 3), round(y, 3)) for x, y in pts}) == 4 else None  # a rect only
+            if box is not None and all(abs(a - b) < 0.05 for a, b in zip(box, k.box, strict=True)):
+                project.pcb.remove(zone)
+                changes.append(f"{k.name}: tscircuit's keepout zone (router only) dropped")
     return changes
 
 

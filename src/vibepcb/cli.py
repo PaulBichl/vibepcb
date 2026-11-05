@@ -140,9 +140,14 @@ def cmd_build(board: str, *, fast: bool = False) -> int:
         print(f"--fast: autorouterEffortLevel forced to {tscircuit.FAST_EFFORT} (not for final runs)")
     # evaluated as a copy without tscircuit's schematic (`fix` generates it from the circuit JSON)
     board_tsx = source
+    # [keepout.*] areas reach the router as <keepout> elements (part keepouts once the placement is known)
+    keepout_cfg = config.load(board).get("keepout", {})
+    keepouts = tscircuit.router_keepouts(keepout_cfg)
     source = tscircuit.prepared_source(
-        source, paths.work_dir(board) / "src", effort=tscircuit.FAST_EFFORT if fast else None
+        source, paths.work_dir(board) / "src", effort=tscircuit.FAST_EFFORT if fast else None, keepouts=keepouts
     )
+    for line in tscircuit.router_skipped(keepout_cfg):
+        print(f"  {line}")
     raw = paths.raw_dir(board)
     circuit = raw / f"{board}.circuit.json"
     # placement gate: a placement-only evaluation takes about a minute and fails before the routing pass
@@ -153,6 +158,12 @@ def cmd_build(board: str, *, fast: bool = False) -> int:
         print(report)
         print(f"placement errors - fix {board_tsx.relative_to(paths.ROOT)} first", file=sys.stderr)
         return 1
+    placed = json.loads(unrouted_json.read_text(encoding="utf-8"))
+    parts = [k for k in tscircuit.router_keepouts(keepout_cfg, placed) if k.ref is not None]
+    tscircuit.add_keepouts(source, parts)
+    tscircuit.save_keepouts([*keepouts, *parts], raw / f"{board}.keepouts.json")
+    for k in [*keepouts, *parts]:
+        print(f"  keepout {k.name}: tscircuit routes around ({', '.join(f'{v:g}' for v in k.box)})")
     if escape := config.load(board).get("escape"):  # BGA escapes by VibePCB: tscircuit routes to their ends
         unrouted = raw / f"{board}.unrouted.circuit.json"
         planes = frozenset(config.load(board).get("planes", {}).get("nets", []))
