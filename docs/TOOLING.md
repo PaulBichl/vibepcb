@@ -120,12 +120,13 @@ docstring of `cli.py` doubles as `--help` text.
 | `fix <board>` | removes and re-creates `out/<board>/kicad/` from the raw zip (the footprint library `lib/footprints/tscircuit_builtin.pretty` is written from the footprints embedded in the board, `kicad.write_footprint_library`), renames the files to the board name, replaces the schematic with `schgen.write` (from the circuit JSON + the TSX sections), then runs `fixes.apply_all` and prints one line per change; exports `schematic.svg` (+ `.work/preview/schematic.png`, 4000 px) and refreshes `README.md` | `out/<board>/kicad/` | 0 (exceptions reported as `error:`, exit 1) |
 | `check <board> [--strict] [--quiet]` | `kicad-cli sch erc`, `kicad-cli pcb drc` (refills zones, saves the board), post-fill loop, sharp-corner, unlabelled-connector and test-point checks (`testpoints.py`, `[testpoints]` in `vibepcb.toml`), split crossings (warning: a track crossing the edge of a region pour on the layer next to it); prints the summary, writes it to `check.txt`, exports `board.svg`; then circuit verification (section 8.3: sims, required sims, netlist checks, `findings.toml`); `--strict` makes its issues errors | `out/<board>/check.txt`, `board.svg`, `.work/reports/`, modifies the KiCad PCB | 1 if ERC errors, DRC errors or sharp corners (strict: or a verification issue; test points with `severity = "error"`) |
 | `bringup <board>` | `bringup.collect` on the finished KiCad project (+ the circuit JSON for pin names): `fab/<board>-bringup.md` and `fab/<board>-pins.h` (section 9a); `fab` calls it too | `out/<board>/fab/` | 0 |
+| `assembly <board>` | assembly drawings for hand soldering from the checked board (section 9b): `fab/<board>-assembly.pdf` + `.html`; warns (does not refuse) when the last `check` did not pass on this board; `fab` calls it too | `out/<board>/fab/`, page SVGs in `.work/assembly/` | 1 without a KiCad board |
 | `review <board> [--run \| --merge]` | reviewer-agent package in `out/<board>/.work/review/` (`review.write_package`: parts with pins / nets, BOM fields, netlist, intent, sim decks, `PROMPT.md`, answer template `review.toml`, one item per checklist item of `rules/review-checklists.toml`); `--run` starts `$VIBEPCB_REVIEWER` (default `claude -p --agent pcb-reviewer`, a new session) and merges; `--merge` validates and records answers written another way (section 8.3) | `out/<board>/.work/review/`; on merge `boards/<board>/review.toml`, `findings.toml` | 1 if the reviewer fails or its answers are invalid |
 | `part fetch <MPN> [--manufacturer M] [--datasheet URL\|FILE]` | distributor lookup, datasheet download (+ `datasheet.txt`), spec skeleton (section 14) | `parts/<MPN>.toml`, `~/.cache/vibepcb/parts/` | 1 if not found / ambiguous |
 | `part build\|check\|all <MPN> [--standard NAME]` | spec + standard -> symbol, footprint, STEP (CadQuery), previews; `check` / `all` also write `check.txt` | `out/parts/<MPN>/` | 1 on check errors |
 | `part export <MPN> --altium DIR` | the Altium import set; refuses a part whose check fails | `DIR` | 1 on check errors |
 | `all <board> [--strict] [--fast] [--quiet]` | `build`, then `fix`, then `check`, short-circuiting on a non-zero result | all of the above | first non-zero, else `check`'s result |
-| `fab <board>` | refuses unless the last `check --strict` passed on this board (`check.json` `strict_passed` + board hash); part availability check once (parts engine, placement-only evaluation), then `kicad.export_fab` on `out/<board>/kicad/<board>.kicad_pcb`: one file per purpose (gerbers zip, JLCPCB BOM with MPN, CPL, schematic PDF, top/bottom renders), then `bringup`; intermediates in `.work/fab/` | `out/<board>/fab/` | 0 |
+| `fab <board>` | refuses unless the last `check --strict` passed on this board (`check.json` `strict_passed` + board hash); part availability check once (parts engine, placement-only evaluation), then `kicad.export_fab` on `out/<board>/kicad/<board>.kicad_pcb`: one file per purpose (gerbers zip, JLCPCB BOM with MPN, CPL, schematic PDF, top/bottom renders), then `bringup` and `assembly`; intermediates in `.work/fab/` | `out/<board>/fab/` | 0 |
 | `publish <board>` | only if the last `check` passed on the current board (`.work/reports/check.json`, board hash): KiCad project without 3D models, BOM, schematic PDF, renders (`kicad.export_docs`), layout PDF (a page per copper layer) + front/back SVGs (`kicad.export_layout`) | `boards/<board>/hardware/` (committed) | 0 |
 | `route <board> [--only NET] [--dry-run] [--drc]` | manual routing quick loop: `routes.toml` onto `.work/unrouted.kicad_pcb` (written by `fix`), no clean-up; `--drc` runs KiCad's DRC on the result | `out/<board>/kicad/<board>.kicad_pcb` | 1 if a connection failed |
 | `inspect <board> [--area x0 y0 x1 y1] [--net PAT] [--layer L] [--scale PX/MM] [--source unrouted]` | PNG of the board with a mm grid (KiCad coordinates), pad labels, one net pattern highlighted; text list of the pads in the area | `.work/preview/inspect.png` | 0 |
@@ -554,6 +555,50 @@ Gerber and drill export clear the `gerbers/` folder first. Run `check` first; th
 not enforce it, but the project rule is "never hand over fab files of a board whose check
 fails" (AGENTS.md).
 
+### 9b. Assembly drawings (`output/assembly.py`, `output/assembly_draw.py`)
+
+`fab` (or `pcb assembly <board>` alone) writes Draftsman-style documents for soldering the board by hand, from
+the checked `out/<board>/kicad/<board>.kicad_pcb`:
+
+| File | Content |
+|------|---------|
+| `<board>-assembly.pdf` | A4 landscape. Title page(s): board, revision (silkscreen `rev X`, else the title block), design date, size, copper layers, thickness, part counts, the side order, test points / DNP parts (not steps), `CHECK:` lines for parts whose polarity is unknown, the mark legend and the assembly order table (step, side, value, package, qty, references, note). One overall drawing per side (scaled to fill the page, board dimensions, mounting holes, every part labelled and marked). Then two assembly steps per page: the step's parts highlighted on their side (small parts of a step with up to 6 parts ringed), earlier steps of that side filled grey, the step data (value, package, LCSC, MPN, category, polarity / handling notes) and a checkbox per reference |
+| `<board>-assembly.html` | one self-contained file (inline SVG, CSS, JS; no network): steps grouped by side in assembly order with a checkbox per reference (kept in `localStorage`, key `vibepcb-assembly:<board>:<rev>`, every access in try/catch), top / bottom view; click a step -> its parts highlight and its side shows, hover a part -> tooltip and its step, click a part -> its step; light / dark via `prefers-color-scheme` |
+
+- **Data** (`assembly.collect`): footprints, pads (rotated rectangles in board mm) and courtyards (the part
+  outline; the pad extent + 0.25 mm without one) parsed with `core.sexpr`. Value / footprint / LCSC / MPN from
+  the fab BOM (`<board>-bom.csv`, its rows are the BOM lines = what was ordered) when present, else from the
+  footprint properties (`Value`, `Supplier Part Number`, `MPN`). Test points (`TP*`), DNP parts and parts left
+  out of the BOM are listed apart, never steps.
+- **Polarity** (`assembly._mark`): diodes / LEDs (`D`, `LED`, ... with 2 pads) get a cathode mark from the
+  schematic pin names (`K`, `C`, `cathode`, `-`; or the pad opposite `A` / `anode`), else from the circuit JSON
+  port hints (`simple_diode` / `simple_led`: `cathode`), else from a tscircuit diode / LED footprint (pad 1 =
+  anode, AGENTS.md); none found = a pin-1 dot plus a `CHECK:` warning. Polarised capacitors: `+` from the pin
+  names, or the circuit JSON for capacitors with `are_pins_interchangeable: false`. Every other part with 3+ pads
+  and exactly one pad `1` / `A1` gets a pin-1 dot (not switches). Drawn: the marked pad filled red plus a dot
+  (outside pin 1, away from the part centre), a bar (outside the cathode pad, across the pad axis) or a `+`.
+- **Order** (`assembly.assembly_order`): SMD before through-hole; the side with the fine-pitch / leadless ICs first
+  (else the side with more SMD parts); within a side by rank: fine-pitch (pitch <= 0.65 mm) or leadless (a pad
+  inside the pad field: exposed pad, QFN, LGA) ICs, other ICs (5+ pads), small parts (courtyard <= 15 mm2:
+  0402..1206, SOT-23, SOD-123), large parts (incl. modules > 150 mm2), SMD connectors / switches (by reference
+  prefix); then by size, prefix and value. A BOM line with parts on both sides becomes one step per side. Notes:
+  fine pitch (drag-solder, check bridges), pads under the body (hot air / hotplate), through-hole (insert from
+  the part side, solder on the other).
+- **Drawing** (`assembly_draw`): the base is `kicad-cli pcb export svg --black-and-white` of the side's mask
+  layer (pads) and Edge.Cuts (outline, drills), its colours replaced by `currentColor` and embedded under a
+  board -> page matrix; the bottom view mirrors x (`View`: the board turned over around its vertical axis, as the
+  person holding it sees it; checked against the bottom 3D render). Through-hole parts of the other side are
+  dashed outlines (their pins come through). Everything else is drawn in page coordinates, so text is never
+  mirrored. Without kicad-cli (tests) the pads are drawn from the footprint data.
+- **Labels** (`assembly_draw.place_labels`): inside the part when the reference fits (horizontal, then
+  vertical, preferably off the pads; 1.5 mm text at the smallest), else right next to it when no other labelled
+  part is within 1 mm (an adjacent label must not read as its neighbour's), else on a leader line (rings of
+  candidate spots; cost = length + 8 per crossed leader + 5 per crossed part + 4 next to another part), as a
+  last resort anywhere in the drawing. Labels never overlap each other, other parts, marks, holes or the
+  through-hole pads of the other side; text boxes use DejaVu Sans widths (an upper bound for Arial too), bold
+  +10 %.
+- **PDF**: one SVG per page (`.work/assembly/page-NNN.svg`), joined by `rsvg-convert -f pdf` (multi-page).
+
 ---
 
 ## 10. Testing, style and types
@@ -593,6 +638,7 @@ fails" (AGENTS.md).
 | bun | tsci's shebang is `env bun` | npm devDependency | comes from `node_modules/.bin` |
 | `kicad-cli` (KiCad 9 / 10) | `kicad.py`, `symlib.py` (library dir) | `$KICAD_CLI`, else PATH | ERC, DRC, refill, fab exports, renders |
 | `rsvg-convert` / `cairosvg` | `cli._png` (build, fix, check, inspect) | PATH / pip, optional | makes the PNG previews in `.work/preview/`; if neither exists one warning is printed per run, the SVGs are still written |
+| `rsvg-convert` | `assembly_draw.write_pdf` (`fab`, `assembly`) | PATH, required there | joins the page SVGs into the assembly PDF; missing = `AssemblyError` |
 | ngspice | `sim.py` (`check`) | PATH | `ngspice -b <deck>` per deck; missing = warning (error in strict mode), never a crash |
 | git | `update-skill` (`scripts/update_skill.py`, no `rm`), `clean` | PATH | `git clean -ffX` deletes ignored files in `.tmp` and `out` |
 | network | `docs` (llms.txt), `update-skill` (GitHub clone), `fix` (LCSC symbols, first time per part) | - | `fix` works offline: uncached parts get boxes |

@@ -1,0 +1,22 @@
+(kicad_sch
+  (version 20250114)
+  (generator "vibepcb")
+  (title_block
+    (title "assembly-mini")
+    (date "2026-11-01")
+  )
+  (lib_symbols
+    (symbol "vibepcb:C1"
+      (symbol "C1_1_1"
+        (pin passive line (at 0 2.54 270) (length 1.27) (name "+") (number "1"))
+        (pin passive line (at 0 -2.54 90) (length 1.27) (name "-") (number "2"))
+      )
+    )
+  )
+  (symbol
+    (lib_id "vibepcb:C1")
+    (at 50 50 0)
+    (property "Reference" "C1" (at 52 48 0))
+    (property "Value" "100uF" (at 52 52 0))
+  )
+)
