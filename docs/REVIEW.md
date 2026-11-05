@@ -23,6 +23,8 @@ designer: pcb all <board>           build, fix, check (vibe mode: review_missing
    | `netlist.txt` | tscircuit's readable netlist |
    | `intent.toml`, `sim/*.cir` | the assumption list and the sim decks, if any |
    | `checks.md` | what the deterministic checks already cover |
+   | `layout.md` | the placement (`check/layoutdoc.py`): board size and layers; **bottom side first**: every bottom-side chip (3+ pins), mirrored in x, its pin rows as they land on the board (which pins face +x / -x / +y / -y) and per pin the parts serving it with distance, side and verdict (`WRONG SIDE` / `far` listed as mismatches first); the same for the top-side chips; per regulator the loops (input cap to VIN / PGND, inductor SW pad to SW, BOOT cap, FB divider to FB and to the switch node, SW track length from the KiCad board); every part's layer, centre, rotation |
+   | `board.png` | the board image (`.work/preview/board.png` after `check`): top copper, top silkscreen, outline; bottom-side parts are not in it |
    | `review.toml` | the answer template: one `[[item]]` per checklist item, question as a comment |
 
    The board source, `findings.toml` and the design conversation are not in it: the designer's reasoning must
@@ -43,6 +45,13 @@ designer: pcb all <board>           build, fix, check (vibe mode: review_missing
    re-reviews as long as the reviewer reports the same item; a fixed one disappears.
 5. A change to the netlist (parts, values, part numbers, connections; not the layout) makes the review stale:
    `check` reports `review_stale`, and a strict check (so `fab`) needs a new review.
+6. A change to the placement only (a part's layer, centre or rotation; routing does not count) makes the
+   **layout items** stale: `check` reports `review_layout_stale` (same severity as `review_stale`). Layout items
+   are the items keyed `layout` and the `[bottom]` items. The record keeps two hashes: `hash` (netlist, all
+   items) and `layout_hash` (`layoutdoc.layout_hash`: every part's layer, centre to 0.01 mm, rotation). The next
+   `pcb review` pre-fills the non-layout answers from the record and leaves the layout items empty, so the
+   reviewer only redoes those (`PROMPT.md` says so). A record without `layout_hash` (from before `layout.md`)
+   counts as layout-stale: its reviewer never saw the layout.
 
 ## Answer format
 
@@ -66,3 +75,10 @@ LED, crystal), then the reference letters (imported parts are all chips: J/P/CN 
 Q -> transistor, Y -> crystal, R/C/L/F/SW/TP -> board items), then chips: regulator (VIN + VOUT/FB/SW pins or a
 known family), MCU (4+ GPIO-like pin names), other IC. Resistors, capacitors, inductors, fuses, switches and test
 points are covered by the `[board]` items (ratings, power, current path, intent, sims).
+
+Every part with 3+ pins on the **bottom** side also gets the `[bottom]` items (`<ref>:bottom-mirroring`, listed
+first): bottom-side parts are mirrored in x, and a designer who places the passives from the datasheet's top view
+puts them on the far side of the chip (bench-psu: all three LMR33630 bucks had the inductor on the VIN side,
+SW pin to inductor pad 12-20 mm, DRC clean). `layout.md`'s bottom section already flags such parts (`WRONG
+SIDE`); the reviewer confirms each against the datasheet's layout example. Without a `[bottom]` table in the
+checklist file the built-in question (`review.BOTTOM_ITEMS`) is used.

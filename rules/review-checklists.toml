@@ -5,6 +5,11 @@
 # ok / issue / unknown and cites the datasheet page it took the limit from.
 # Part types: regulator, mcu, ic (any other chip), connector, diode (incl. LEDs, TVS), transistor, crystal;
 # resistors, capacitors, inductors, fuses, switches and test points are covered by [board].
+# [bottom] is asked in addition for every part with 3+ pins on the bottom side (mirrored in x), whatever its type.
+# Items keyed `layout` and the [bottom] items are layout items: a placement change makes only them stale.
+
+[bottom]
+bottom-mirroring = "Bottom side, mirrored in x: every part serving a pin sits on that pin's side of the chip, next to it (layout.md board positions, not the datasheet top view)."
 
 [regulator]
 input-range = "Input range covers the supply (intent [supply]) at its worst case (USB 5.25 V, full battery, transients)."
@@ -16,6 +21,7 @@ control-pins = "EN / PG / SS / MODE pins as the datasheet requires (EN not float
 inductor = "Switchers: inductor value from the datasheet formula, saturation current above the peak switch current (write ok with 'n/a' for an LDO)."
 thermal = "Dissipation ((Vin - Vout) * I for an LDO, efficiency for a switcher) against the package's thermal resistance; exposed pad connected."
 current-budget = "The rail's current budget (intent) is below the part's rated output current with margin."
+layout = "Layout against the datasheet's layout guidelines / example figure (layout.md distances, board image; bottom-side parts mirrored in x): switcher input cap at VIN / PGND, inductor at SW, SW node short, BOOT cap at BOOT / SW, FB divider at FB away from SW; LDO caps at VIN / VOUT. Name each part's distance to its pin."
 
 [mcu]
 supply-pins = "Every VDD / VDDA / VCAP / VBAT / VREF pin connected and decoupled as the hardware design guide says; VDDA filtering."
@@ -26,6 +32,7 @@ debug = "Programming / debug interface (SWD, JTAG, UART bootloader, USB DFU) on 
 pin-functions = "Every used pin's function (alternate function, ADC channel, timer, 5 V tolerance) exists on that pin of this package."
 io-limits = "No pin driven above VDD + the allowed margin; total I/O current within the package limit."
 ground = "All ground pins and the exposed pad connected to GND."
+layout = "Each decoupling cap at the supply pin it serves (layout.md distance, same side or a via next to the pin), crystal and load caps at the oscillator pins, as the hardware design guide shows."
 
 [ic]
 supply = "Supply pin(s) on a rail inside the recommended operating range; decoupling as the datasheet asks."
@@ -54,10 +61,12 @@ thermal = "Dissipation against the package's thermal resistance and the copper a
 [crystal]
 load-caps = "Load capacitors match CL = C1*C2/(C1+C2) + stray (about 2-5 pF) for this crystal's CL."
 drive = "Drive level and ESR within the oscillator's limits (MCU datasheet: maximum ESR / gm margin)."
+layout = "Crystal next to the oscillator pins, load caps at the crystal pads with a short ground return (layout.md distances)."
 
 [board]
 cap-ratings = "Capacitor voltage ratings vs. their nets after derating, and MLCC DC-bias capacitance loss, for the parts the script could not rate (no rating in the part text)."
 resistor-power = "Resistor power: dividers, current-sense and LED resistors dissipate within their package rating with margin."
 current-path = "Supply path (connector, fuse / PTC, traces, regulators) carries the intent's current budget; fuse hold / trip currents fit."
+layout = "Board-level placement: every chip's decoupling at its pins, high-current / switching loops compact, sensitive analog and feedback nets away from switch nodes, connectors at the edge (layout.md, board image)."
 intent = "The circuit does what intent.toml says (rails, voltages, current budget, supply); flag any assumption the design contradicts."
 sims = "Each sim deck's .measure lines prove what the deck claims; behavioural models cite datasheet values; ranges are sourced."
