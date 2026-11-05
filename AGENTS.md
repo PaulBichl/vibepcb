@@ -282,7 +282,7 @@ Always run `hatch run style`, `hatch run type` and `hatch run test` after changi
 | `build/` | `tscircuit` (tsci), `padtable` |
 | `kicad/` | `project` (assembly, kicad-cli), `fixes/` (one module per area, registry in `__init__`), `schgen` (schematic), `symlib`, `easyeda`, `testpoints` |
 | `routing/` | `board` (model), `drc`, `router`, `routes`, `pairs`, `tune`, `tracks`, `fanout`, `ratsnest` |
-| `check/` | `verify`, `netcheck`, `placement`, `suggest`, `sim`, `findings`, `review`, `history`, `hotspots`, `inspect` |
+| `check/` | `verify`, `netcheck`, `placement`, `suggest`, `sim`, `findings`, `review`, `layoutdoc`, `history`, `hotspots`, `inspect` |
 | `output/` | `bringup`, `cost` |
 | `parts/` | `pcb part`: components to the house standard |
 

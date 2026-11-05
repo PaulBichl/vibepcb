@@ -12,7 +12,7 @@ import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from vibepcb.check import findings, netcheck, placement, review, sim
+from vibepcb.check import findings, layoutdoc, netcheck, placement, review, sim
 from vibepcb.core import paths
 from vibepcb.settings import intent
 
@@ -120,7 +120,7 @@ def run(board: str, *, strict: bool = False) -> Report:
         for f in open_
     ]
     report.issues += len(open_)
-    line, problem = review.status(board, design)
+    line, problem = review.status(board, design, layoutdoc.layout_hash(circuit))
     report.lines.append(line)
     if problem:
         report.lines.append(f"  [{level}] {problem}")

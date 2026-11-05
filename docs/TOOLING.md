@@ -120,7 +120,7 @@ docstring of `cli.py` doubles as `--help` text.
 | `fix <board>` | removes and re-creates `out/<board>/kicad/` from the raw zip (the footprint library `lib/footprints/tscircuit_builtin.pretty` is written from the footprints embedded in the board, `kicad.write_footprint_library`), renames the files to the board name, replaces the schematic with `schgen.write` (from the circuit JSON + the TSX sections), then runs `fixes.apply_all` and prints one line per change; exports `schematic.svg` (+ `.work/preview/schematic.png`, 4000 px) and refreshes `README.md` | `out/<board>/kicad/` | 0 (exceptions reported as `error:`, exit 1) |
 | `check <board> [--strict] [--quiet]` | `kicad-cli sch erc`, `kicad-cli pcb drc` (refills zones, saves the board), post-fill loop, sharp-corner, unlabelled-connector and test-point checks (`testpoints.py`, `[testpoints]` in `vibepcb.toml`), split crossings (warning: a track crossing the edge of a region pour on the layer next to it); prints the summary, writes it to `check.txt`, exports `board.svg`; then circuit verification (section 8.3: sims, required sims, netlist and placement checks, `findings.toml`); `--strict` makes its issues errors | `out/<board>/check.txt`, `board.svg`, `.work/reports/`, modifies the KiCad PCB | 1 if ERC errors, DRC errors or sharp corners (strict: or a verification issue; test points with `severity = "error"`) |
 | `bringup <board>` | `bringup.collect` on the finished KiCad project (+ the circuit JSON for pin names): `fab/<board>-bringup.md` and `fab/<board>-pins.h` (section 9a); `fab` calls it too | `out/<board>/fab/` | 0 |
-| `review <board> [--run \| --merge]` | reviewer-agent package in `out/<board>/.work/review/` (`review.write_package`: parts with pins / nets, BOM fields, netlist, intent, sim decks, `PROMPT.md`, answer template `review.toml`, one item per checklist item of `rules/review-checklists.toml`); `--run` starts `$VIBEPCB_REVIEWER` (default `claude -p --agent pcb-reviewer`, a new session) and merges; `--merge` validates and records answers written another way (section 8.3) | `out/<board>/.work/review/`; on merge `boards/<board>/review.toml`, `findings.toml` | 1 if the reviewer fails or its answers are invalid |
+| `review <board> [--run \| --merge]` | reviewer-agent package in `out/<board>/.work/review/` (`review.write_package`: parts with pins / nets, BOM fields, netlist, intent, sim decks, `layout.md` (`layoutdoc`: bottom-side chips first, pin sides, serving parts, regulator loops), `board.png`, `PROMPT.md`, answer template `review.toml`, one item per checklist item of `rules/review-checklists.toml`, `[bottom]` items per bottom-side chip); `--run` starts `$VIBEPCB_REVIEWER` (default `claude -p --agent pcb-reviewer`, a new session) and merges; `--merge` validates and records answers written another way (section 8.3) | `out/<board>/.work/review/`; on merge `boards/<board>/review.toml`, `findings.toml` | 1 if the reviewer fails or its answers are invalid |
 | `part fetch <MPN> [--manufacturer M] [--datasheet URL\|FILE]` | distributor lookup, datasheet download (+ `datasheet.txt`), spec skeleton (section 14) | `parts/<MPN>.toml`, `~/.cache/vibepcb/parts/` | 1 if not found / ambiguous |
 | `part build\|check\|all <MPN> [--standard NAME]` | spec + standard -> symbol, footprint, STEP (CadQuery), previews; `check` / `all` also write `check.txt` | `out/parts/<MPN>/` | 1 on check errors |
 | `part export <MPN> --altium DIR` | the Altium import set; refuses a part whose check fails | `DIR` | 1 on check errors |
@@ -501,8 +501,9 @@ Answers "does the circuit do what it should", not "is the layout clean". Policy 
 | `netcheck.py` | deterministic checks on the circuit JSON: cap rating vs net voltage, one I2C pull-up, power-pin decoupling, feedback divider vs vref, floating EN/RESET/BOOT; regulator detection |
 | `placement.py` | deterministic placement checks on the circuit JSON (positions, no routing): see below; `pcb place-check` runs it alone |
 | `suggest.py` | `pcb place-suggest`: positions + turns for the passives that serve one chip pin, as TSX edits with the ratsnest change (see below) |
+| `layoutdoc.py` | the package's `layout.md` from `placement.analyse`: bottom-side chips first (pin rows after mirroring, parts serving each pin with distance / side, `WRONG SIDE` / `far` mismatches), top-side chips, regulator loops (SW track length from the KiCad board), part positions; `layout_hash` (part layers, centres, rotations) |
 | `findings.py` | `boards/<board>/findings.toml` read / merge / write (per `source`: `netcheck`, `placement`, `review`) |
-| `review.py` | reviewer agent: package, part classification (element type, reference letters, regulator / MCU detection), answer validation, findings, record `boards/<board>/review.toml` with the netlist hash, `check`'s missing / stale status. Checklists: `rules/review-checklists.toml`; agent: `.claude/agents/pcb-reviewer.md`; workflow: `docs/REVIEW.md` |
+| `review.py` | reviewer agent: package, part classification (element type, reference letters, regulator / MCU detection), answer validation, findings, record `boards/<board>/review.toml` with the netlist and layout hashes, `check`'s missing / stale / layout-stale status. Checklists: `rules/review-checklists.toml`; agent: `.claude/agents/pcb-reviewer.md`; workflow: `docs/REVIEW.md` |
 | `verify.py` | glue: runs the above, builds the summary lines, counts issues |
 
 A deck that sweeps corners in `.control` echoes its result as `name = value`; the `* range:` line of that name
@@ -564,9 +565,16 @@ transistor, crystal; passives are covered by the `[board]` items), ids `<ref>:<k
 reviewer answers each `ok` / `issue` / `unknown` with a datasheet `cite` (`ok` / `issue`) and a `text`
 (`issue` / `unknown`); merging refuses unanswered, unknown, duplicate items and pins the part does not
 have. `issue` / `unknown` become open `review:<item>` findings (status / reason kept per id). The record
-`boards/<board>/review.toml` holds all answers and a hash of the netlist (parts, values, part text, every pin's
-net; not the layout): `check` reports `review_missing` / `review_stale` as a verification issue, so a strict
-check and `fab` need a review of the current netlist. Re-packaging the same netlist keeps answers in progress.
+`boards/<board>/review.toml` holds all answers, a hash of the netlist (parts, values, part text, every pin's
+net) and a layout hash (`layoutdoc.layout_hash`: every part's layer, centre, rotation; not the routing): `check`
+reports `review_missing` / `review_stale` (netlist changed: every item) / `review_layout_stale` (only the
+placement changed, or a record from before the layout hash: the layout items, keys `layout` and the `[bottom]`
+items) as a verification issue, so a strict check and `fab` need a review of the current netlist and placement.
+After a placement-only change, `pcb review` pre-fills the other answers from the record and leaves the layout
+items empty. Re-packaging the same netlist and placement keeps answers in progress. The package's `layout.md`
+(`layoutdoc`) lists the bottom-side chips first with their pin rows after mirroring and flags every serving part
+on another side of the chip than its pin (`WRONG SIDE`, beyond the placement limit) or beyond the limit (`far`);
+every bottom-side chip gets the `[bottom]` checklist item `<ref>:bottom-mirroring`.
 
 ---
 

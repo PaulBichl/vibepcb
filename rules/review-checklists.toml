@@ -5,6 +5,11 @@
 # ok / issue / unknown and cites the datasheet page it took the limit from.
 # Part types: regulator, mcu, ic (any other chip), connector, diode (incl. LEDs, TVS), transistor, crystal;
 # resistors, capacitors, inductors, fuses, switches and test points are covered by [board].
+# [bottom] is asked in addition for every part with 3+ pins on the bottom side (mirrored in x), whatever its type.
+# Items keyed `layout` and the [bottom] items are layout items: a placement change makes only them stale.
+
+[bottom]
+bottom-mirroring = "Bottom side, mirrored in x: every part serving a pin sits on that pin's side of the chip, next to it (layout.md board positions, not the datasheet top view)."
 
 [regulator]
 input-range = "Input range covers the supply (intent [supply]) at its worst case (USB 5.25 V, full battery, transients)."

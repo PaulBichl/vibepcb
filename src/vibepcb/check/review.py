@@ -1,9 +1,11 @@
 """Reviewer agent: a fresh-context review of a board against its datasheets (docs/REVIEW.md).
 
 ``pcb review <board>`` writes the review package to ``out/<board>/.work/review/``: only the design's outputs
-(parts with pins and nets, BOM fields, netlist, ``intent.toml``, sim decks), never the board source or the
-design conversation, plus ``PROMPT.md`` and an answer template ``review.toml`` with one ``[[item]]`` per
-checklist item (``rules/review-checklists.toml``: per part type, ids ``<ref>:<key>``, and ``board:<key>``)::
+(parts with pins and nets, BOM fields, netlist, ``intent.toml``, sim decks, ``layout.md`` from
+``layoutdoc`` and the board image), never the board source or the design conversation, plus ``PROMPT.md`` and an
+answer template ``review.toml`` with one ``[[item]]`` per checklist item (``rules/review-checklists.toml``: per
+part type, ids ``<ref>:<key>``; ``[bottom]`` for every bottom-side chip, ``<ref>:bottom-mirroring``; and
+``board:<key>``)::
 
     [[item]]
     id = "U1:dropout"
@@ -17,8 +19,10 @@ and merges its answers; ``--merge`` merges answers written another way. Merging 
 answered once, ``ok`` / ``issue`` cite a source, ``issue`` / ``unknown`` say why, refs and pins exist), turns
 each ``issue`` / ``unknown`` into an open ``source = "review"`` finding in ``boards/<board>/findings.toml``
 (status and reason kept for ids already there; review findings no longer reported are dropped), and writes
-the record ``boards/<board>/review.toml`` (all answers + the netlist hash). ``check`` reports the review as
-missing or stale (netlist changed since) - an error in strict mode, so ``fab`` needs a current review.
+the record ``boards/<board>/review.toml`` (all answers + the netlist hash + the layout hash). ``check`` reports
+the review as missing, stale (netlist changed since: every item) or layout-stale (only the placement changed: the
+layout items, keys ``layout`` and the ``[bottom]`` items; ``pcb review`` then carries the other answers over) - an
+error in strict mode, so ``fab`` needs a current review.
 """
 
 from __future__ import annotations
@@ -33,7 +37,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from vibepcb.check import findings, netcheck, sim
+from vibepcb.check import findings, layoutdoc, netcheck, placement, sim
 from vibepcb.core import paths
 from vibepcb.output import bringup
 from vibepcb.settings import intent, rules
@@ -69,6 +73,15 @@ PREFIX_KINDS = {
     **dict.fromkeys(("Y", "XTAL", "OSC"), "crystal"),
     **dict.fromkeys(("R", "C", "L", "FB", "F", "TP", "SW", "S", "BTN", "K", "H", "MH", "FID", "BZ"), "passive"),
 }
+BOTTOM = "bottom"  # checklist table asked once per bottom-side chip
+BOTTOM_ITEMS = {  # used when a project's checklist file has no [bottom] table
+    "bottom-mirroring": "Bottom side, mirrored in x: every part serving a pin sits on that pin's side of the chip, "
+    "next to it (layout.md board positions, not the datasheet top view).",
+}
+LAYOUT_KEYS = {"layout", *BOTTOM_ITEMS}  # item keys answered from layout.md: stale on a placement change
+LAYOUT_NAME = "layout.md"
+IMAGE_NAME = "board.png"
+IMAGE_LAYERS = "top copper (F.Cu), top silkscreen and the outline, seen from the top; bottom-side parts are not in it"
 REVIEWER_AGENT = "pcb-reviewer"
 REVIEWER_TOOLS = ["Read", "Grep", "Glob", "WebSearch", "WebFetch", "Write", "Edit"]
 TOOL_AGENT_FILE = Path(__file__).resolve().parents[3] / ".claude" / "agents" / f"{REVIEWER_AGENT}.md"
@@ -167,14 +180,26 @@ def classify(design: Design, circuit: list[dict[str, Any]]) -> dict[str, str]:
     return out
 
 
-def items(kinds: dict[str, str], checklists: dict[str, dict[str, str]]) -> list[Item]:
+def items(kinds: dict[str, str], checklists: dict[str, dict[str, str]], bottom: list[str] | None = None) -> list[Item]:
+    """The checklist items: the ``[bottom]`` items for every part in ``bottom`` first (bottom-side chips, mirrored),
+    then each part's type checklist, then the ``[board]`` items."""
     out = [
+        Item(f"{ref}:{key}", ref, BOTTOM, question)
+        for ref in sorted(bottom or [])
+        for key, question in checklists.get(BOTTOM, BOTTOM_ITEMS).items()
+    ]
+    out += [
         Item(f"{ref}:{key}", ref, kind, question)
         for ref, kind in sorted(kinds.items(), key=lambda rk: (rk[1], rk[0]))
         for key, question in checklists.get(kind, {}).items()
     ]
     out += [Item(f"board:{key}", "", "board", q) for key, q in checklists.get("board", {}).items()]
     return out
+
+
+def is_layout_item(item_id: str) -> bool:
+    """An item about the placement: a placement change makes its answer stale (``review_layout_stale``)."""
+    return item_id.split(":", 1)[-1] in LAYOUT_KEYS
 
 
 def netlist_hash(design: Design) -> str:
@@ -216,7 +241,8 @@ def parts_markdown(board: str, design: Design, circuit: list[dict[str, Any]], ki
     return "\n".join(lines) + "\n"
 
 
-def answers_template(work_items: list[Item]) -> str:
+def answers_template(work_items: list[Item], given: dict[str, Answer] | None = None) -> str:
+    """One ``[[item]]`` per checklist item; ``given``: answers carried over from the last review (filled in)."""
     out = [
         "# Answer every item: verdict = ok | issue | unknown; cite = datasheet + page (needed for ok / issue);",
         "# text = what you found (needed for issue / unknown); pin = optional, a pin of the part.",
@@ -224,21 +250,29 @@ def answers_template(work_items: list[Item]) -> str:
     ]
     for item in work_items:
         where = item.ref or "the board"
+        answer = (given or {}).get(item.id, Answer(item.id, ""))
         out += [
             "[[item]]",
             f"# {where} ({item.kind}): {item.question}",
             f"id = {json.dumps(item.id)}",
-            'verdict = ""',
-            'pin = ""',
-            'cite = ""',
-            'text = ""',
+            *(f"{k} = {json.dumps(getattr(answer, k))}" for k in ITEM_KEYS[1:]),
             "",
         ]
     return "\n".join(out)
 
 
-def prompt(board: str, review_dir: Path, n_items: int) -> str:
+def prompt(board: str, review_dir: Path, n_items: int, *, image: bool = False, carried: int = 0) -> str:
+    """The reviewer's task. ``image``: ``board.png`` is in the package; ``carried``: items pre-filled from the last
+    review of the same netlist (only the layout changed since)."""
     rel = display_path(review_dir)
+    picture = f"- `{IMAGE_NAME}`: the routed board, {IMAGE_LAYERS} (use `{LAYOUT_NAME}` for those)\n" if image else ""
+    again = (
+        f"\n{carried} item(s) are already filled in from the last review of this netlist (the netlist is unchanged; "
+        "the placement changed or was not reviewed then). Answer the empty (layout) items; change a filled one only "
+        "if `layout.md` shows it is wrong.\n"
+        if carried
+        else ""
+    )
     return f"""# Review of board `{board}`
 
 You are the reviewer, not the designer: check this board against the part datasheets and say where it is
@@ -253,7 +287,13 @@ Inputs:
 - `intent.toml`: the designer's assumption list (supply, rails, current budget), if any
 - `sim/*.cir`: simulation decks, if any (check what their `.measure` lines prove)
 - `checks.md`: what the deterministic checks already cover (don't repeat them)
-
+- `{LAYOUT_NAME}`: the placement: bottom-side chips first (mirrored in x: pin rows as they land on the board),
+  every chip's pins with board x / y, net and the parts serving each pin (distance, side, verdict), the
+  regulator loops, every part's layer / centre / rotation
+{picture}
+Answer the layout items (`layout`, `bottom-mirroring`) from `{LAYOUT_NAME}` and the datasheet's layout
+guidelines / example layout, pin by pin with distances in mm; a part on the wrong side of the chip is an issue.
+{again}
 Output: fill in `{rel}/{ANSWERS_NAME}` in place, all {n_items} items, keep the ids. Per item:
 
 - `verdict = "ok"`: the board meets it; `cite` the datasheet value you checked against.
@@ -285,18 +325,32 @@ def _circuit(board: str) -> list[dict[str, Any]]:
     return data
 
 
+def board_items(design: Design, circuit: list[dict[str, Any]]) -> tuple[dict[str, str], list[Item]]:
+    """The board's part types and checklist items (bottom-side chips get the ``[bottom]`` items too)."""
+    kinds = classify(design, circuit)
+    return kinds, items(kinds, load_checklists(), layoutdoc.bottom_chips(circuit, design))
+
+
+def carried_answers(board: str, design: Design, layout: str) -> dict[str, Answer]:
+    """Answers of the last review that still hold: all but the layout items when the netlist is the same and only
+    the placement changed (nothing when nothing changed: a new review was asked for, or the netlist changed)."""
+    record = load_record(board)
+    if record is None or record.hash != netlist_hash(design) or record.layout_hash == layout:
+        return {}
+    return {a.id: a for a in record.answers if not is_layout_item(a.id)}
+
+
 def write_package(board: str) -> tuple[Path, list[Item]]:
     """The review package in ``out/<board>/.work/review/`` (replaced, except answers already given for the
-    same netlist). Returns the directory and the items to answer."""
+    same netlist and placement). Returns the directory and the items to answer."""
     circuit = _circuit(board)
     design = netcheck.load_design(circuit)
-    kinds = classify(design, circuit)
-    work_items = items(kinds, load_checklists())
+    kinds, work_items = board_items(design, circuit)
     out = review_dir(board)
     answers = out / ANSWERS_NAME
     keep = answers.read_text(encoding="utf-8") if answers.exists() else None
-    stamp = out / "netlist.hash"
-    same = stamp.exists() and stamp.read_text(encoding="utf-8").strip() == netlist_hash(design)
+    stamps = {out / "netlist.hash": netlist_hash(design), out / "layout.hash": layoutdoc.layout_hash(circuit)}
+    same = all(f.exists() and f.read_text(encoding="utf-8").strip() == h for f, h in stamps.items())
     if out.exists():
         shutil.rmtree(out)
     (out / "sim").mkdir(parents=True)
@@ -305,13 +359,24 @@ def write_package(board: str) -> tuple[Path, list[Item]]:
     netlist = paths.raw_dir(board) / f"{board}.netlist.txt"
     if netlist.exists():
         shutil.copy2(netlist, out / "netlist.txt")
+    image = paths.preview_dir(board) / IMAGE_NAME
+    if image.exists():
+        shutil.copy2(image, out / IMAGE_NAME)
+    pcb = paths.kicad_dir(board) / f"{board}.kicad_pcb"
+    note = f"Board image `{IMAGE_NAME}`: {IMAGE_LAYERS}." if image.exists() else "No board image (run `check`)."
+    layout_md = layoutdoc.markdown(board, circuit, kinds, placement.load_limits(board), pcb, note)
+    (out / LAYOUT_NAME).write_text(layout_md, encoding="utf-8")
     if (spec := intent.intent_path(board)).exists():
         shutil.copy2(spec, out / "intent.toml")
     for deck in sim.deck_paths(board):
         shutil.copy2(deck, out / "sim" / deck.name)
-    answers.write_text(keep if keep is not None and same else answers_template(work_items), encoding="utf-8")
-    stamp.write_text(netlist_hash(design) + "\n", encoding="utf-8")
-    (out / "PROMPT.md").write_text(prompt(board, out, len(work_items)), encoding="utf-8")
+    given = carried_answers(board, design, stamps[out / "layout.hash"])
+    carried = sum(i.id in given for i in work_items)
+    answers.write_text(keep if keep is not None and same else answers_template(work_items, given), encoding="utf-8")
+    for f, h in stamps.items():
+        f.write_text(h + "\n", encoding="utf-8")
+    text = prompt(board, out, len(work_items), image=image.exists(), carried=carried)
+    (out / "PROMPT.md").write_text(text, encoding="utf-8")
     return out, work_items
 
 
@@ -407,9 +472,10 @@ def to_findings(answers: list[Answer], work_items: list[Item]) -> list[findings.
 
 @dataclass(frozen=True)
 class Record:
-    hash: str
+    hash: str  # netlist_hash: every item
     date: str
     answers: list[Answer]
+    layout_hash: str = ""  # layoutdoc.layout_hash: the layout items ("" = a record from before layout.md)
 
 
 def record_path(board: str) -> Path:
@@ -420,6 +486,7 @@ def dumps_record(record: Record) -> str:
     out = [
         "# Last reviewer-agent review (pcb review --merge); its issue / unknown answers are in findings.toml.",
         f"hash = {json.dumps(record.hash)}  # netlist the review saw (review.netlist_hash)",
+        f"layout_hash = {json.dumps(record.layout_hash)}  # placement its layout items saw (layoutdoc.layout_hash)",
         f"date = {json.dumps(record.date)}",
         "",
     ]
@@ -434,14 +501,15 @@ def load_record(board: str) -> Record | None:
         return None
     text = path.read_text(encoding="utf-8")
     data = tomllib.loads(text)
-    return Record(str(data.get("hash", "")), str(data.get("date", "")), parse_answers(text, path.name))
+    answers = parse_answers(text, path.name)
+    return Record(str(data.get("hash", "")), str(data.get("date", "")), answers, str(data.get("layout_hash", "")))
 
 
 def merge(board: str, *, now: datetime | None = None) -> tuple[list[str], int]:
     """Validate the reviewer's answers and record them. Returns summary lines and the number of review findings."""
     circuit = _circuit(board)
     design = netcheck.load_design(circuit)
-    work_items = items(classify(design, circuit), load_checklists())
+    _, work_items = board_items(design, circuit)
     answers_file = review_dir(board) / ANSWERS_NAME
     if not answers_file.exists():
         msg = f"no answers: run `pcb review {board}` and let the reviewer fill {display_path(answers_file)}"
@@ -455,7 +523,9 @@ def merge(board: str, *, now: datetime | None = None) -> tuple[list[str], int]:
     found = to_findings(answers, work_items)
     findings.save(board, findings.merge(findings.load(board), found, source=SOURCE))
     stamp = (now or datetime.now(UTC)).strftime("%Y-%m-%d %H:%M UTC")
-    record_path(board).write_text(dumps_record(Record(netlist_hash(design), stamp, answers)), encoding="utf-8")
+    record_path(board).write_text(
+        dumps_record(Record(netlist_hash(design), stamp, answers, layoutdoc.layout_hash(circuit))), encoding="utf-8"
+    )
     counts = {v: sum(a.verdict == v for a in answers) for v in VERDICTS}
     lines = [
         f"review: {len(answers)} item(s): {counts['ok']} ok, {counts['issue']} issue(s), {counts['unknown']} unknown",
@@ -465,8 +535,11 @@ def merge(board: str, *, now: datetime | None = None) -> tuple[list[str], int]:
     return lines, len(found)
 
 
-def status(board: str, design: Design) -> tuple[str, str | None]:
-    """``check``'s summary line about the review, and the problem if it is missing or stale."""
+def status(board: str, design: Design, layout: str | None = None) -> tuple[str, str | None]:
+    """``check``'s summary line about the review, and the problem if it is missing or stale. ``layout``: the
+    board's :func:`layoutdoc.layout_hash` (``None``: don't judge the placement). A netlist change makes the whole
+    review stale (``review_stale``); a placement change only its layout items (``review_layout_stale``:
+    ``pcb review`` then carries the other answers over)."""
     record = load_record(board)
     if record is None:
         return (
@@ -476,6 +549,12 @@ def status(board: str, design: Design) -> tuple[str, str | None]:
     if record.hash != netlist_hash(design):
         return f"Review: {record.date}, stale", (
             f"review_stale: the netlist changed since the review of {record.date} (`pcb review {board} --run`)"
+        )
+    if layout is not None and record.layout_hash != layout:
+        why = "the placement changed since" if record.layout_hash else "no layout was reviewed in"
+        return f"Review: {record.date}, layout items stale", (
+            f"review_layout_stale: {why} the review of {record.date}; the layout items need a new look "
+            f"(`pcb review {board} --run` keeps the other answers)"
         )
     issues = sum(a.verdict != "ok" for a in record.answers)
     return f"Review: {record.date}, {len(record.answers)} item(s), {issues} not ok (open ones are findings)", None
