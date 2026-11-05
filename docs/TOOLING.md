@@ -135,6 +135,7 @@ docstring of `cli.py` doubles as `--help` text.
 | `ratsnest <board> [--source current\|unrouted]` | `ratsnest.unrouted`: per net (not `[planes]` nets, not nets with a pour), the pads its tracks/vias do not join yet, linked by a minimum spanning tree over pad centres between the joined groups; prints the 40 longest links, totals (links, mm, crossings of straight links of different nets) and the 5 10 mm cells with the most crossings; `unrouted` reads `.work/unrouted.kicad_pcb` (manual mode) | none | 0 |
 | `place-score <board>.. [--source ...]` | `ratsnest.score` per board: one line with link count, total ratsnest length, crossings - the placement metric to compare `clone` variants | none | 0 |
 | `place-check <board>` | `placement.run` on `.work/raw/<board>.unrouted.circuit.json` (the placement gate's; else the routed `circuit.json`): decoupling caps, crystals / load caps, regulator input / output caps and inductor farther than their limit from the pin they serve, side-entry connectors whose mating side is not at the board edge; one line per finding with distance, limit and a free spot (or edge position / turn) to move the part to (section 8.3); findings accepted in `findings.toml` are marked | none (`check` records them) | 0 (1 without a circuit JSON) |
+| `place-suggest <board> [--all]` | `suggest.suggest` on the same circuit JSON: for each passive serving one chip pin beyond its limit (`--all`: any that can get 0.5 mm closer) a courtyard-clear spot and turn next to the pin, printed as the TSX `pcbX` / `pcbY` / `pcbRotation` edit of its element (file:line, now / edit, the move as a delta), the pad distance before / after and the ratsnest change; the parts without a useful spot and why; board ratsnest length and crossings before / after (section 8.3) | none (no TSX rewrite) | 0 (1 without a circuit JSON) |
 | `rules <board>` | merges the board's rule profiles (`[rules] profiles` + `[rules.override]` in `vibepcb.toml`, `vibepcb.settings.rules`) and prints one line per value with the profile that set it (and the fab capability where an application layer or override changed it), then the profiles' / board's net classes; a value below the fab's capability is an error | none | 1 on an invalid profile set |
 | `list` | prints board names (folders with `index.circuit.tsx` under `boards/`) | none | 0 |
 | `doctor` | the setup check above | none | 1 on FAIL |
@@ -499,6 +500,7 @@ Answers "does the circuit do what it should", not "is the layout clean". Policy 
 | `sim.py` | decks `boards/<board>/sim/*.cir`: `* range: <measure> <min> <max> source=<text>` and `* covers: <kind> <refs>` comment lines, `.measure` lines; value parsing (SPICE suffixes), deck-vs-board value comparison, `ngspice -b` run, range resolution |
 | `netcheck.py` | deterministic checks on the circuit JSON: cap rating vs net voltage, one I2C pull-up, power-pin decoupling, feedback divider vs vref, floating EN/RESET/BOOT; regulator detection |
 | `placement.py` | deterministic placement checks on the circuit JSON (positions, no routing): see below; `pcb place-check` runs it alone |
+| `suggest.py` | `pcb place-suggest`: positions + turns for the passives that serve one chip pin, as TSX edits with the ratsnest change (see below) |
 | `findings.py` | `boards/<board>/findings.toml` read / merge / write (per `source`: `netcheck`, `placement`, `review`) |
 | `review.py` | reviewer agent: package, part classification (element type, reference letters, regulator / MCU detection), answer validation, findings, record `boards/<board>/review.toml` with the netlist hash, `check`'s missing / stale status. Checklists: `rules/review-checklists.toml`; agent: `.claude/agents/pcb-reviewer.md`; workflow: `docs/REVIEW.md` |
 | `verify.py` | glue: runs the above, builds the summary lines, counts issues |
@@ -528,14 +530,34 @@ centre to pad centre (pcb_port positions), positions in the board frame (= TSX `
 | `regulator` | for each `netcheck.find_regulators` part: the inductor on SW / LX to that pin; a cap whose nearest pin is the regulator's VIN / VOUT (any value) or its inductor's output side | `regulator_mm` 5 |
 | `connector` | J / CN / USB designators or side-entry part text (USB, TYPE-C, RJ45, HR911, SJ- jacks, DG30x terminal blocks): the mating side is the footprint's `insertionDirection` (`from_above` / `from_below`: skipped), else the side where courtyard + silkscreen reach > 1 mm farther past the pads than the opposite side (pads sit at the back of a side-entry part); symmetric parts (headers) are skipped, and an inferred side is not judged when another side is already at an edge (the guess was wrong, e.g. an SMD audio jack) | `connector_edge_mm` 1.5 |
 
-Every finding names a position: the nearest spot (0.25 mm grid, 8 mm around the pin) where the part's box, as it
-is turned now, clears the other parts on its layer (THT parts on any) by 0.25 mm, the board edge by 0.5 mm and the
-spots already handed to earlier findings; for a connector the centre that puts its mating side on the edge, plus a
+Every finding names a position (`placement.free_spot`, 0.25 mm grid, 8 mm + the part's size around the pin): the
+part turned in 90 deg steps, the least cost wins = its pad on the net to the pin, +1 mm behind the pin (not on the
+side of the chip the pin faces), +0.25 mm when it does not point away from the pin with that pad first; its box +
+courtyard clears the other parts on its layer (THT parts on any) by 0.25 mm, keepouts / cutouts / mounting holes /
+source vias, the board edge by 0.5 mm and the spots already handed to earlier findings. Turned where it is, a part
+may keep overlapping what it overlaps now (a designer's tight fit: a buck inductor with the wrong pad at SW gets
+`pcbRotation=180` in place). For a connector: the centre that puts its mating side on the edge, plus a
 `pcbRotation` turn when another side already is at an edge (explicit `insertionDirection` only). Limits: house
 `[placement]` in `rules/sim-defaults.toml`, per board `[placement]` in `vibepcb.toml` (keys as in the table).
-For a placement suggester: `placement.analyse` returns every judged relation (`Link`: part, pin, target pin,
-distance, limit, also those within it), the connector `Edge`s, the `Layout` (bodies, pads, outline) and the
-owners; `placement.free_spot` finds a spot near a point.
+`placement.analyse` returns every judged relation (`Link`: part, pin, target pin, distance, limit, also those
+within it), the connector `Edge`s, the `Layout` (bodies, pads, outline, blocked areas) and the owners.
+
+Placement suggestions (`suggest.py`, `pcb place-suggest <board> [--all]`; prints, writes nothing). The parts:
+every `analyse` link beyond its limit, then every other R / C / L whose schematic owner (a U / IC chip or a
+connector) has a pin on one of its signal nets farther than 5 mm (`signal`; thermistors RT / TH / NTC stay where
+they measure); `--all`: also those within their limit. In that order (crystal, regulator, decoupling, load cap,
+signal; farthest first) each goes to `free_spot` next to its pin on the layout the earlier moves left; its other
+pads pull towards their nets (0.3 x the distance to the nearest pad of the net). Not suggested: a spot less than
+0.5 mm closer than now, or one that makes the ratsnest of the part's nets more than 1 mm longer. The ratsnest is
+`place-score`'s metric on the circuit JSON (`ratsnest.pad_links`: a spanning tree per net, without `[planes]` nets
+and poured nets), board total before / after with every suggestion applied. The edit is written against the TSX
+element (`name="C5"` in `boards/<board>/*.tsx`): its `pcbX` / `pcbY` expressions shifted (`{YL + 4}` ->
+`{YL + 1.5}`, `{...bot(13, 3)}` helpers too), `pcbRotation` absolute (the circuit JSON's rotation is the TSX
+one, bottom side too); a part in a `<group>`, written inside a sub-component (above `export default`) or generated
+(`name={`C${n}02`}`) gets a note, its board place and the move as a delta instead. First runs (unrouted JSON,
+no build): open-theremin 30 suggestions for 36 parts (ratsnest 2029 -> 1919 mm, crossings 310 -> 288), smu-main
+81 / 131 (5174 -> 4878 mm, crossings 811 -> 723), bench-psu 35 / 74 (3139 -> 2997 mm; its bottom side is full, 16 still beyond the
+limit); all courtyard-clear except turns in place.
 
 Reviewer agent (`pcb review`): each part gets the checklist of its type (regulator, mcu, ic, connector, diode,
 transistor, crystal; passives are covered by the `[board]` items), ids `<ref>:<key>` / `board:<key>`. The

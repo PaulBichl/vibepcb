@@ -21,6 +21,8 @@ from vibepcb.kicad import fixes
 from vibepcb.routing import routes, tracks
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from vibepcb.kicad.fixes import KicadProject
 
 CELL_MM = 10.0  # crossings are also counted per cell of this size (where the placement is tangled)
@@ -45,17 +47,26 @@ def unrouted(project: KicadProject) -> list[Link]:
     """The links still missing per net (a minimum spanning tree between the groups its copper joins)."""
     copper = fixes._copper(project.pcb)
     skip = set(project.config.get("planes", {}).get("nets", [])) | {net for net, _ in copper.zones}
-    by_net: dict[str, list[routes.Pad]] = {}
-    for p in routes.board_pads(project):
+    by_net = _by_net(routes.board_pads(project), skip)
+    return [
+        k for net in sorted(by_net) for k in _spanning_links(net, by_net[net], _groups(copper, net, len(by_net[net])))
+    ]
+
+
+def pad_links(pads: Iterable[routes.Pad], skip: set[str]) -> list[Link]:
+    """:func:`unrouted` for pads without copper between them (a placement: every pad its own group); nets in
+    ``skip`` (planes, pours) are left out. ``check.suggest`` scores moves with it on the circuit JSON."""
+    by_net = _by_net(pads, skip)
+    return [k for net in sorted(by_net) for k in _spanning_links(net, by_net[net], list(range(len(by_net[net]))))]
+
+
+def _by_net(pads: Iterable[routes.Pad], skip: set[str]) -> dict[str, list[routes.Pad]]:
+    """Pads per net (nets with two or more pads, not in ``skip``)."""
+    out: dict[str, list[routes.Pad]] = {}
+    for p in pads:
         if p.net and p.net not in skip:
-            by_net.setdefault(p.net, []).append(p)
-    out: list[Link] = []
-    for net in sorted(by_net):
-        members = by_net[net]
-        if len(members) < 2:
-            continue
-        out += _spanning_links(net, members, _groups(copper, net, len(members)))
-    return out
+            out.setdefault(p.net, []).append(p)
+    return {net: members for net, members in out.items() if len(members) >= 2}
 
 
 def _groups(copper: fixes._Copper, net: str, count: int) -> list[int]:

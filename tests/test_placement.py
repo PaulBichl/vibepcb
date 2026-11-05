@@ -164,7 +164,9 @@ def test_free_spot_avoids_parts_and_other_suggestions() -> None:
     assert spots[1] is not None
     assert spots[0] != spots[1]
     u1 = analysis.layout.bodies["U1"].box
-    for x, y in spots:  # type: ignore[misc]
+    for spot in spots:
+        assert spot is not None
+        x, y = spot.centre
         assert not (u1[0] - 0.8 < x < u1[2] + 0.8 and u1[1] - 0.4 < y < u1[3] + 0.4)  # clear of the chip
     assert placement.free_spot(analysis.layout, "C1", (2, 0), radius=0.5) is None  # only the chip within reach
 

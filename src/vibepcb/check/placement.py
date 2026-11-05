@@ -24,16 +24,18 @@ unless it sits in a moved ``<group>``). Rules, finding ids ``place_<rule>:<ref>`
                   (pin / box headers) are skipped, and so is an inferred side when another side already is at an
                   edge (the designer put it there; the guess is wrong for some jacks)
 
-Every finding says where to put the part: the nearest spot next to the pin where its box (current orientation)
-overlaps no other part on its layer and stays on the board (0.25 mm grid), or for a connector the position that
-puts its mating side at the edge (and the rotation, when another side already is at an edge).
+Every finding says where to put the part: :func:`free_spot` next to the pin (the part turned in 90 deg steps, its
+pad on the net nearest the pin, on the side of the chip the pin faces; box + courtyard clear of every other part on
+its layer, of keepouts, cutouts and mounting holes, on the board; 0.25 mm grid), or for a connector the position
+that puts its mating side at the edge (and the rotation, when another side already is at an edge).
 
 Limits: ``[placement]`` in ``rules/sim-defaults.toml`` (house), overridden per board by ``[placement]`` in
 ``boards/<board>/vibepcb.toml``; keys = the fields of :class:`Limits`.
 
 For the placement suggester (issue #8): :func:`analyse` returns every judged relation (:class:`Link`: part, the
 pin it serves, distance, limit - also the ones within their limit), the connector edges and the :class:`Layout`;
-:func:`free_spot` finds a free position for a part near a point.
+:func:`free_spot` finds a free position (and turn) for a part near a point; ``check.suggest`` (``pcb
+place-suggest``) builds on both.
 """
 
 from __future__ import annotations
@@ -49,6 +51,8 @@ from vibepcb.kicad import schgen
 from vibepcb.settings import config
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from vibepcb.check.netcheck import Design, Pin
 
     Point = tuple[float, float]
@@ -57,8 +61,12 @@ if TYPE_CHECKING:
 SOURCE = "placement"
 GRID = 0.25  # free-spot search grid, mm
 SPOT_RADIUS = 8.0  # how far from the pin a free spot is looked for
-CLEARANCE = 0.25  # part box to part box in a free spot
+CLEARANCE = 0.25  # part box (box + courtyard) to part box in a free spot
 EDGE_MARGIN = 0.5  # part box to board edge in a free spot
+TURNS = (0, 90, 180, 270)  # turns (deg ccw) a free spot next to a pin tries
+BEHIND = 1.0  # cost (mm) of a spot behind the pin (not on the side of the chip the pin faces)
+ACROSS = 0.25  # cost (mm) of a part not pointing away from the pin, serving pad first
+HOLE_MARGIN = 0.5  # kept around a mounting hole without a part
 ASYMMETRY = 1.0  # courtyard reaching this much farther past the pads on one side: mated from that side
 CRYSTAL_TYPES = {"simple_crystal", "simple_resonator"}
 CRYSTAL_REF = re.compile(r"^(X|Y|XTAL|Q|OSC)\d+$", re.IGNORECASE)
@@ -121,6 +129,13 @@ class Body:
     tht: bool
     insertion: str | None
     pads: tuple[Point, ...]
+    rotation: float = 0.0  # deg ccw (circuit JSON: the TSX pcbRotation modulo 360)
+
+    @property
+    def extent(self) -> Box:
+        """What the part takes: box and courtyard together."""
+        b, c = self.box, self.courtyard
+        return min(b[0], c[0]), min(b[1], c[1]), max(b[2], c[2]), max(b[3], c[3])
 
 
 @dataclass
@@ -128,6 +143,8 @@ class Layout:
     bodies: dict[str, Body] = field(default_factory=dict)
     pads: dict[tuple[str, str], Point] = field(default_factory=dict)  # (ref, pin number) -> pad centre
     outline: list[Point] = field(default_factory=list)
+    # areas no part may take: (box, layers; empty = every layer) of keepouts, board cutouts, mounting holes
+    blocked: list[tuple[Box, frozenset[str]]] = field(default_factory=list)
 
     def pad(self, pin: Pin) -> Point | None:
         return self.pads.get((pin.ref, pin.number))
@@ -182,6 +199,17 @@ def load_layout(circuit: list[dict[str, Any]]) -> Layout:
             courtyards.setdefault(e.get("pcb_component_id", ""), []).extend(route)
         elif kind == "pcb_plated_hole":
             tht.add(e.get("pcb_component_id", ""))
+        elif kind == "pcb_hole" and not e.get("pcb_component_id"):
+            size = e.get("hole_diameter") or max(e.get("hole_width", 0), e.get("hole_height", 0))
+            r, x, y = float(size) / 2 + HOLE_MARGIN, float(e["x"]), float(e["y"])
+            layout.blocked.append(((x - r, y - r, x + r, y + r), frozenset()))
+        elif kind == "pcb_via":  # placed in the source (a GND via next to a pin): no part on it
+            r, x, y = float(e.get("outer_diameter") or 0.6) / 2, float(e["x"]), float(e["y"])
+            layout.blocked.append(((x - r, y - r, x + r, y + r), frozenset()))
+        elif kind == "pcb_cutout" or (kind == "pcb_keepout" and not e.get("allow_placements")):
+            if points := _courtyard_points(e):
+                layers = frozenset() if kind == "pcb_cutout" else frozenset(e.get("layers") or ())
+                layout.blocked.append((_box_of(points), layers))
         elif kind == "pcb_board":
             if e.get("outline"):
                 layout.outline = [(float(p["x"]), float(p["y"])) for p in e["outline"]]
@@ -207,6 +235,7 @@ def load_layout(circuit: list[dict[str, Any]]) -> Layout:
             pid in tht,
             e.get("insertion_direction"),
             tuple(pads_of.get(pid, [])),
+            float(e.get("rotation") or 0) % 360,
         )
     return layout
 
@@ -257,46 +286,141 @@ def _overlap(a: Box, b: Box) -> bool:
     return a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]
 
 
+def _overlap_area(a: Box, b: Box) -> float:
+    return max(0.0, min(a[2], b[2]) - max(a[0], b[0])) * max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+
+
+@dataclass(frozen=True)
+class Spot:
+    """Where :func:`free_spot` puts part ``ref``: its centre, the turn (deg ccw) on top of its current rotation,
+    the box it then takes and its pads (pin number -> centre)."""
+
+    ref: str
+    centre: Point
+    turn: int
+    box: Box
+    pads: dict[str, Point]
+
+
+def turned(dx: float, dy: float, turn: int) -> Point:
+    a = math.radians(turn)
+    ca, sa = round(math.cos(a)), round(math.sin(a))  # multiples of 90 deg: exact
+    return dx * ca - dy * sa, dx * sa + dy * ca
+
+
+def turned_box(box: Box, centre: Point, turn: int) -> Box:
+    """``box`` (board frame) turned by ``turn`` about ``centre``, as offsets from it."""
+    points = [turned(x - centre[0], y - centre[1], turn) for x in (box[0], box[2]) for y in (box[1], box[3])]
+    return _box_of(points)
+
+
+def outward(layout: Layout, chip: str, pin: Point) -> Point | None:
+    """The direction a pin faces: from the chip's centre to it, along the axis it is farther off on."""
+    body = layout.bodies.get(chip)
+    if body is None:
+        return None
+    dx, dy = pin[0] - body.centre[0], pin[1] - body.centre[1]
+    if math.hypot(dx, dy) < 1e-6:
+        return None
+    return (math.copysign(1.0, dx), 0.0) if abs(dx) >= abs(dy) else (0.0, math.copysign(1.0, dy))
+
+
+def _spot_cost(spot: Spot, anchor: Point, pin: str, facing: Point | None) -> float:
+    pad = spot.pads[pin]
+    cost = math.dist(pad, anchor)
+    if facing is not None:
+        cx, cy = spot.centre
+        if (cx - anchor[0]) * facing[0] + (cy - anchor[1]) * facing[1] < 0:
+            cost += BEHIND
+        ax, ay = cx - pad[0], cy - pad[1]
+        if ax * facing[0] + ay * facing[1] < 0.7 * math.hypot(ax, ay):
+            cost += ACROSS
+    return cost
+
+
 def free_spot(
-    layout: Layout, ref: str, anchor: Point, radius: float = SPOT_RADIUS, taken: list[Box] | None = None
-) -> Point | None:
-    """The centre nearest ``anchor`` (``GRID`` steps, within ``radius``) where part ``ref``'s box, as it is
-    turned now, keeps ``CLEARANCE`` to every other part on its layer (through-hole parts: on any layer), to the
-    boxes in ``taken`` (spots already handed out; the chosen box is appended) and ``EDGE_MARGIN`` to the board
-    edge. ``None``: no such spot."""
+    layout: Layout,
+    ref: str,
+    anchor: Point,
+    radius: float = SPOT_RADIUS,
+    taken: list[Box] | None = None,
+    *,
+    pin: str | None = None,
+    facing: Point | None = None,
+    extra: Callable[[Spot], float] | None = None,
+) -> Spot | None:
+    """A spot for part ``ref`` near ``anchor`` (``GRID`` steps, centre within ``radius``) where its box (box +
+    courtyard) keeps ``CLEARANCE`` to every other part on its layer (through-hole parts: on any layer), to the
+    boxes in ``taken`` (spots already handed out; the chosen box is appended) and to the blocked areas, and
+    ``EDGE_MARGIN`` to the board edge. ``None``: no such spot.
+
+    Without ``pin``: the centre nearest ``anchor``, turned as now. With ``pin`` (the part's pad that serves the
+    point): every turn in ``TURNS``; the least cost wins: that pad's distance to ``anchor``, plus ``BEHIND`` when
+    the centre is not on the ``facing`` side of it (the side of the chip the pin faces), ``ACROSS`` when the part
+    does not point away from it with that pad first, plus ``extra(spot)`` (>= 0: e.g. its other nets); ties: the
+    one nearest the current place."""
     body = layout.bodies[ref]
-    hw, hh = (body.box[2] - body.box[0]) / 2 + CLEARANCE, (body.box[3] - body.box[1]) / 2 + CLEARANCE
-    reach = radius + max(hw, hh) + CLEARANCE
+    extent = body.extent
+    pad_of = {num: p for (r, num), p in layout.pads.items() if r == ref}
+    turns = TURNS if pin is not None and pin in pad_of else (0,)
+    reach = max((math.dist(p, body.centre) for p in pad_of.values()), default=0.0)
+    span = radius + max(extent[2] - extent[0], extent[3] - extent[1]) + CLEARANCE
     obstacles = [
-        b.box
+        b.extent
         for b in layout.bodies.values()
         if b.ref != ref
         and (b.layer == body.layer or b.tht or body.tht)
-        and b.box[0] - reach < anchor[0] < b.box[2] + reach
-        and b.box[1] - reach < anchor[1] < b.box[3] + reach
+        and b.extent[0] - span < anchor[0] < b.extent[2] + span
+        and b.extent[1] - span < anchor[1] < b.extent[3] + span
     ]
+    obstacles += [box for box, layers in layout.blocked if not layers or body.layer in layers or body.tht]
     obstacles += taken or []
+    # turned where it is, the part may overlap what it overlaps now (a designer's tight fit) as much, not more
+    here = (extent[0] - CLEARANCE, extent[1] - CLEARANCE, extent[2] + CLEARANCE, extent[3] + CLEARANCE)
+    tight = [_overlap_area(here, o) + 1e-9 for o in obstacles]
+    none = [0.0] * len(obstacles)
+    shapes = [(t, turned_box(extent, body.centre, t)) for t in turns]
     steps = int(radius / GRID)
+    centres = [
+        (round((anchor[0] + i * GRID) / GRID) * GRID, round((anchor[1] + j * GRID) / GRID) * GRID)
+        for i in range(-steps, steps + 1)
+        for j in range(-steps, steps + 1)
+    ]
+    if pin is not None:
+        centres.append(body.centre)  # turned where it is (off the grid too)
     candidates = sorted(
-        ((i * GRID, j * GRID) for i in range(-steps, steps + 1) for j in range(-steps, steps + 1)),
-        key=lambda o: (math.hypot(*o), o),
+        ((math.dist(c, anchor), c) for c in centres), key=lambda o: (round(o[0], 9), o[1][0] - anchor[0], o[1][1])
     )
-    for dx, dy in candidates:
-        if math.hypot(dx, dy) > radius:
-            break
-        cx, cy = round((anchor[0] + dx) / GRID) * GRID, round((anchor[1] + dy) / GRID) * GRID
-        box = (cx - hw, cy - hh, cx + hw, cy + hh)
-        if any(_overlap(box, o) for o in obstacles):
-            continue
-        corners = [(box[0], box[1]), (box[2], box[1]), (box[2], box[3]), (box[0], box[3])]
-        if layout.outline and not all(
-            _inside(layout.outline, c) and _edge_distance(layout.outline, c) >= EDGE_MARGIN - CLEARANCE for c in corners
-        ):
-            continue
-        if taken is not None:
-            taken.append((box[0] + CLEARANCE, box[1] + CLEARANCE, box[2] - CLEARANCE, box[3] - CLEARANCE))
-        return cx, cy
-    return None
+    best: tuple[float, float, int] | None = None
+    chosen: Spot | None = None
+    for off, (cx, cy) in candidates:
+        if off > radius + GRID or (best is not None and (len(turns) == 1 or off - reach > best[0] + 1e-9)):
+            break  # the pad can't get closer than the centre's distance minus its reach
+        for turn, (x0, y0, x1, y1) in shapes:
+            box = (cx + x0, cy + y0, cx + x1, cy + y1)
+            grown = (box[0] - CLEARANCE, box[1] - CLEARANCE, box[2] + CLEARANCE, box[3] + CLEARANCE)
+            allowed = tight if (cx, cy) == body.centre else none
+            if any(_overlap(grown, o) and _overlap_area(grown, o) > a for o, a in zip(obstacles, allowed, strict=True)):
+                continue
+            corners = [(box[0], box[1]), (box[2], box[1]), (box[2], box[3]), (box[0], box[3])]
+            if layout.outline and not all(
+                _inside(layout.outline, c) and _edge_distance(layout.outline, c) >= EDGE_MARGIN for c in corners
+            ):
+                continue
+            pads = {}
+            for num, p in pad_of.items():
+                qx, qy = turned(p[0] - body.centre[0], p[1] - body.centre[1], turn)
+                pads[num] = (cx + qx, cy + qy)
+            spot = Spot(ref, (cx, cy), turn, box, pads)
+            cost = off
+            if pin is not None and pin in pads:
+                cost = _spot_cost(spot, anchor, pin, facing) + (extra(spot) if extra is not None else 0.0)
+            key = (round(cost, 6), round(math.dist((cx, cy), body.centre), 6), turn)
+            if best is None or key < best:
+                best, chosen = key, spot
+    if chosen is not None and taken is not None:
+        taken.append(chosen.box)
+    return chosen
 
 
 # --- relations ------------------------------------------------------------------------------------------------
@@ -569,6 +693,22 @@ def _where(p: Point) -> str:
     return f"pcbX={p[0]:g} pcbY={p[1]:g}"
 
 
+def tsx_rotation(degrees: float) -> float:
+    """A rotation the way a TSX writes it: -90 .. 180."""
+    d = round(degrees % 360, 6)
+    return d - 360 if d > 180 else d
+
+
+def spot_radius(layout: Layout, ref: str) -> float:
+    """How far from its pin a spot for ``ref`` is looked for: ``SPOT_RADIUS`` plus the part's size (an inductor
+    is bigger than the gaps next to a chip)."""
+    body = layout.bodies.get(ref)
+    if body is None:
+        return SPOT_RADIUS
+    e = body.extent
+    return SPOT_RADIUS + round(max(e[2] - e[0], e[3] - e[1]))
+
+
 def _rotation(side: Point, to: Point) -> int:
     """Degrees counter-clockwise (TSX ``pcbRotation`` delta) that turn ``side`` into ``to``."""
     return round(math.degrees(math.atan2(to[1], to[0]) - math.atan2(side[1], side[0]))) % 360
@@ -580,14 +720,26 @@ def link_finding(analysis: Analysis, link: Link, taken: list[Box] | None = None)
     body = analysis.layout.bodies.get(link.target)
     what = "the regulator's inductor output" if body and body.ftype == "simple_inductor" else _WHAT[link.rule]
     text = f"{link.distance:.1f} mm from {what} {target} on {link.net} (limit {link.limit:g} mm); "
+    layout = analysis.layout
     spot = (
-        free_spot(analysis.layout, link.ref, link.anchor, taken=taken) if link.ref in analysis.layout.bodies else None
+        free_spot(
+            layout,
+            link.ref,
+            link.anchor,
+            spot_radius(layout, link.ref),
+            taken,
+            pin=link.pin,
+            facing=outward(layout, link.target, link.anchor),
+        )
+        if link.ref in layout.bodies
+        else None
     )
-    text += (
-        f"free spot next to it: {_where(spot)}"
-        if spot
-        else f"no free spot within {SPOT_RADIUS:g} mm: make room next to the pin"
-    )
+    if spot is None:
+        text += f"no free spot within {spot_radius(layout, link.ref):g} mm: make room next to the pin"
+    else:
+        text += f"free spot next to it: {_where(spot.centre)}"
+        if spot.turn:
+            text += f" pcbRotation={tsx_rotation(layout.bodies[link.ref].rotation + spot.turn):g}"
     return Finding(f"place_{link.rule}:{link.ref}", link.ref, link.pin, text, source=SOURCE)
 
 
