@@ -1,4 +1,4 @@
-# House defaults for `check`'s simulation and netlist verification (src/vibepcb/sim.py, netcheck.py).
+# House defaults for `check`'s simulation, netlist and placement verification (check/sim.py, netcheck.py, placement.py).
 # Looked up in <project>/rules/ first (own policy), then in the tool's rules/. Not a rule profile.
 
 # Pass ranges for measures of that name (or ending in "_<name>") when a deck gives none with a datasheet
@@ -21,3 +21,13 @@ decks = ["powerup"]
 cap_derating = 0.8            # a capacitor sees at most this fraction of its voltage rating
 vref_min = 0.4                # a feedback divider implies a reference voltage inside this range (V) ...
 vref_max = 1.3                # ... unless intent.toml gives the regulator's vref
+
+# Placement check (src/vibepcb/check/placement.py; `pcb place-check`, and `check` into findings.toml).
+# A board overrides any of them with [placement] in its vibepcb.toml. Distances pad centre to pad centre, mm.
+[placement]
+decoupling_mm = 3.0           # decoupling cap to the power pin it serves
+bulk_cap_uf = 1.0             # caps above this (uF) are bulk, not judged as decoupling
+crystal_mm = 5.0              # crystal / oscillator pad to the chip clock pin
+load_cap_mm = 3.0             # crystal load cap to the crystal pad
+regulator_mm = 5.0            # regulator input / output cap and inductor to the regulator pin (compact loop)
+connector_edge_mm = 1.5       # mating side of a side-entry connector (courtyard) to the board edge

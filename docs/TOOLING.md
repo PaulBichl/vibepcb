@@ -118,7 +118,7 @@ docstring of `cli.py` doubles as `--help` text.
 | `new <board>` | writes a starter board (26x18 mm: header, R1, LED, GND pours, test points TP1 VCC / TP2 GND with silkscreen labels, title) to `boards/<board>/index.circuit.tsx` plus an empty `intent.toml`; refuses if the file exists | `boards/<board>/` | 1 if it exists |
 | `build <board> [--fast] [--quiet]` | placement gate: `tsci build --routing-disabled`, stops on placement/outside-board/overlap/clearance errors (about 1 min on a 238-part board); then ONE routed `tsci export -f circuit-json` (stops on `*_error` elements), and `kicad_zip`, netlist, PCB SVG are converted from that JSON; PNG via `rsvg-convert`. tscircuit always evaluates a copy in `out/<board>/.work/src/` with `schematicDisabled` (`tscircuit.prepared_source`: its schematic layout does not scale, `fix` generates the schematic); `--fast` also sets `autorouterEffortLevel="2x"` in that copy | `out/<board>/.work/raw/` | 1 on errors or unknown board |
 | `fix <board>` | removes and re-creates `out/<board>/kicad/` from the raw zip (the footprint library `lib/footprints/tscircuit_builtin.pretty` is written from the footprints embedded in the board, `kicad.write_footprint_library`), renames the files to the board name, replaces the schematic with `schgen.write` (from the circuit JSON + the TSX sections), then runs `fixes.apply_all` and prints one line per change; exports `schematic.svg` (+ `.work/preview/schematic.png`, 4000 px) and refreshes `README.md` | `out/<board>/kicad/` | 0 (exceptions reported as `error:`, exit 1) |
-| `check <board> [--strict] [--quiet]` | `kicad-cli sch erc`, `kicad-cli pcb drc` (refills zones, saves the board), post-fill loop, sharp-corner, unlabelled-connector and test-point checks (`testpoints.py`, `[testpoints]` in `vibepcb.toml`), split crossings (warning: a track crossing the edge of a region pour on the layer next to it); prints the summary, writes it to `check.txt`, exports `board.svg`; then circuit verification (section 8.3: sims, required sims, netlist checks, `findings.toml`); `--strict` makes its issues errors | `out/<board>/check.txt`, `board.svg`, `.work/reports/`, modifies the KiCad PCB | 1 if ERC errors, DRC errors or sharp corners (strict: or a verification issue; test points with `severity = "error"`) |
+| `check <board> [--strict] [--quiet]` | `kicad-cli sch erc`, `kicad-cli pcb drc` (refills zones, saves the board), post-fill loop, sharp-corner, unlabelled-connector and test-point checks (`testpoints.py`, `[testpoints]` in `vibepcb.toml`), split crossings (warning: a track crossing the edge of a region pour on the layer next to it); prints the summary, writes it to `check.txt`, exports `board.svg`; then circuit verification (section 8.3: sims, required sims, netlist and placement checks, `findings.toml`); `--strict` makes its issues errors | `out/<board>/check.txt`, `board.svg`, `.work/reports/`, modifies the KiCad PCB | 1 if ERC errors, DRC errors or sharp corners (strict: or a verification issue; test points with `severity = "error"`) |
 | `bringup <board>` | `bringup.collect` on the finished KiCad project (+ the circuit JSON for pin names): `fab/<board>-bringup.md` and `fab/<board>-pins.h` (section 9a); `fab` calls it too | `out/<board>/fab/` | 0 |
 | `review <board> [--run \| --merge]` | reviewer-agent package in `out/<board>/.work/review/` (`review.write_package`: parts with pins / nets, BOM fields, netlist, intent, sim decks, `PROMPT.md`, answer template `review.toml`, one item per checklist item of `rules/review-checklists.toml`); `--run` starts `$VIBEPCB_REVIEWER` (default `claude -p --agent pcb-reviewer`, a new session) and merges; `--merge` validates and records answers written another way (section 8.3) | `out/<board>/.work/review/`; on merge `boards/<board>/review.toml`, `findings.toml` | 1 if the reviewer fails or its answers are invalid |
 | `part fetch <MPN> [--manufacturer M] [--datasheet URL\|FILE]` | distributor lookup, datasheet download (+ `datasheet.txt`), spec skeleton (section 14) | `parts/<MPN>.toml`, `~/.cache/vibepcb/parts/` | 1 if not found / ambiguous |
@@ -134,6 +134,8 @@ docstring of `cli.py` doubles as `--help` text.
 | `hotspots <board> [--radius MM]` | `hotspots`: the error-severity violations and unconnected items of the last check's `drc.json` plus the sharp bends (`fixes.sharp_corners`), single-linkage clustered (errors closer than 1.5 mm share a spot); per spot, most errors first: box (board mm and TSX coordinates from the board centre), error kinds, nets, parts with pads within 1 mm, an `inspect --area` to paste | none | 1 without a `drc.json` |
 | `ratsnest <board> [--source current\|unrouted]` | `ratsnest.unrouted`: per net (not `[planes]` nets, not nets with a pour), the pads its tracks/vias do not join yet, linked by a minimum spanning tree over pad centres between the joined groups; prints the 40 longest links, totals (links, mm, crossings of straight links of different nets) and the 5 10 mm cells with the most crossings; `unrouted` reads `.work/unrouted.kicad_pcb` (manual mode) | none | 0 |
 | `place-score <board>.. [--source ...]` | `ratsnest.score` per board: one line with link count, total ratsnest length, crossings - the placement metric to compare `clone` variants | none | 0 |
+| `place-check <board>` | `placement.run` on `.work/raw/<board>.unrouted.circuit.json` (the placement gate's; else the routed `circuit.json`): decoupling caps, crystals / load caps, regulator input / output caps and inductor farther than their limit from the pin they serve, side-entry connectors whose mating side is not at the board edge; one line per finding with distance, limit and a free spot (or edge position / turn) to move the part to (section 8.3); findings accepted in `findings.toml` are marked | none (`check` records them) | 0 (1 without a circuit JSON) |
+| `place-suggest <board> [--all]` | `suggest.suggest` on the same circuit JSON: for each passive serving one chip pin beyond its limit (`--all`: any that can get 0.5 mm closer) a courtyard-clear spot and turn next to the pin, printed as the TSX `pcbX` / `pcbY` / `pcbRotation` edit of its element (file:line, now / edit, the move as a delta), the pad distance before / after and the ratsnest change; the parts without a useful spot and why; board ratsnest length and crossings before / after (section 8.3) | none (no TSX rewrite) | 0 (1 without a circuit JSON) |
 | `rules <board>` | merges the board's rule profiles (`[rules] profiles` + `[rules.override]` in `vibepcb.toml`, `vibepcb.settings.rules`) and prints one line per value with the profile that set it (and the fab capability where an application layer or override changed it), then the profiles' / board's net classes; a value below the fab's capability is an error | none | 1 on an invalid profile set |
 | `list` | prints board names (folders with `index.circuit.tsx` under `boards/`) | none | 0 |
 | `doctor` | the setup check above | none | 1 on FAIL |
@@ -497,7 +499,9 @@ Answers "does the circuit do what it should", not "is the layout clean". Policy 
 | `intent.py` | `boards/<board>/intent.toml`: the agent's assumption list (supply, rails with voltage / tolerance / current / regulator / vref). Format in the module docstring. Source of net voltages and sim ranges |
 | `sim.py` | decks `boards/<board>/sim/*.cir`: `* range: <measure> <min> <max> source=<text>` and `* covers: <kind> <refs>` comment lines, `.measure` lines; value parsing (SPICE suffixes), deck-vs-board value comparison, `ngspice -b` run, range resolution |
 | `netcheck.py` | deterministic checks on the circuit JSON: cap rating vs net voltage, one I2C pull-up, power-pin decoupling, feedback divider vs vref, floating EN/RESET/BOOT; regulator detection |
-| `findings.py` | `boards/<board>/findings.toml` read / merge / write (per `source`: `netcheck`, `review`) |
+| `placement.py` | deterministic placement checks on the circuit JSON (positions, no routing): see below; `pcb place-check` runs it alone |
+| `suggest.py` | `pcb place-suggest`: positions + turns for the passives that serve one chip pin, as TSX edits with the ratsnest change (see below) |
+| `findings.py` | `boards/<board>/findings.toml` read / merge / write (per `source`: `netcheck`, `placement`, `review`) |
 | `review.py` | reviewer agent: package, part classification (element type, reference letters, regulator / MCU detection), answer validation, findings, record `boards/<board>/review.toml` with the netlist hash, `check`'s missing / stale status. Checklists: `rules/review-checklists.toml`; agent: `.claude/agents/pcb-reviewer.md`; workflow: `docs/REVIEW.md` |
 | `verify.py` | glue: runs the above, builds the summary lines, counts issues |
 
@@ -514,6 +518,46 @@ Modes: **vibe** (default) prints every issue as `[warning]` (failed / stale / er
 fails. `fab` needs the last check to have been strict-clean. Findings: ids `<rule>:<what>`; `check` keeps the
 status / reason of ids it still finds and drops the others; entries with another `source` (the reviewer
 agent's, `docs/REVIEW.md`) are never touched; `accepted` needs a reason.
+
+Placement check (`placement.py`, findings `source = "placement"`, ids `place_<rule>:<ref>`). Distances are pad
+centre to pad centre (pcb_port positions), positions in the board frame (= TSX `pcbX` / `pcbY` outside a moved
+`<group>`):
+
+| Rule | Judged | Limit (`[placement]`) |
+|------|--------|-----------------------|
+| `decoupling` | a cap (at most `bulk_cap_uf`) between a supply net (schematic rail, a voltage in the name, or a chip power pin on it) and ground, to the supply pin it serves: of the chip pins on its net the nearest one (the schematic owner's, `schgen.passive_owners`, when that is within the limit); a chip's caps on one net share out its pins, closest pairs first, one cap per pin. BGA balls (no pin names) count as supply pins | `decoupling_mm` 3 |
+| `crystal` / `load_cap` | a crystal / resonator (ftype, or an X / Y / Q / OSC part on a chip clock pin: OSC*, XI/XO, CLK, RS/RTC) or an oscillator's OUT pin to the chip pin on its net (worst net); a cap from a crystal net to ground to the crystal pad | `crystal_mm` 5, `load_cap_mm` 3 |
+| `regulator` | for each `netcheck.find_regulators` part: the inductor on SW / LX to that pin; a cap whose nearest pin is the regulator's VIN / VOUT (any value) or its inductor's output side | `regulator_mm` 5 |
+| `connector` | J / CN / USB designators or side-entry part text (USB, TYPE-C, RJ45, HR911, SJ- jacks, DG30x terminal blocks): the mating side is the footprint's `insertionDirection` (`from_above` / `from_below`: skipped), else the side where courtyard + silkscreen reach > 1 mm farther past the pads than the opposite side (pads sit at the back of a side-entry part); symmetric parts (headers) are skipped, and an inferred side is not judged when another side is already at an edge (the guess was wrong, e.g. an SMD audio jack) | `connector_edge_mm` 1.5 |
+
+Every finding names a position (`placement.free_spot`, 0.25 mm grid, 8 mm + the part's size around the pin): the
+part turned in 90 deg steps, the least cost wins = its pad on the net to the pin, +1 mm behind the pin (not on the
+side of the chip the pin faces), +0.25 mm when it does not point away from the pin with that pad first; its box +
+courtyard clears the other parts on its layer (THT parts on any) by 0.25 mm, keepouts / cutouts / mounting holes /
+source vias, the board edge by 0.5 mm and the spots already handed to earlier findings. Turned where it is, a part
+may keep overlapping what it overlaps now (a designer's tight fit: a buck inductor with the wrong pad at SW gets
+`pcbRotation=180` in place). For a connector: the centre that puts its mating side on the edge, plus a
+`pcbRotation` turn when another side already is at an edge (explicit `insertionDirection` only). Limits: house
+`[placement]` in `rules/sim-defaults.toml`, per board `[placement]` in `vibepcb.toml` (keys as in the table).
+`placement.analyse` returns every judged relation (`Link`: part, pin, target pin, distance, limit, also those
+within it), the connector `Edge`s, the `Layout` (bodies, pads, outline, blocked areas) and the owners.
+
+Placement suggestions (`suggest.py`, `pcb place-suggest <board> [--all]`; prints, writes nothing). The parts:
+every `analyse` link beyond its limit, then every other R / C / L whose schematic owner (a U / IC chip or a
+connector) has a pin on one of its signal nets farther than 5 mm (`signal`; thermistors RT / TH / NTC stay where
+they measure); `--all`: also those within their limit. In that order (crystal, regulator, decoupling, load cap,
+signal; farthest first) each goes to `free_spot` next to its pin on the layout the earlier moves left; its other
+pads pull towards their nets (0.3 x the distance to the nearest pad of the net). Not suggested: a spot less than
+0.5 mm closer than now, or one that makes the ratsnest of the part's nets more than 1 mm longer. The ratsnest is
+`place-score`'s metric on the circuit JSON (`ratsnest.pad_links`: a spanning tree per net, without `[planes]` nets
+and poured nets), board total before / after with every suggestion applied. The edit is written against the TSX
+element (`name="C5"` in `boards/<board>/*.tsx`): its `pcbX` / `pcbY` expressions shifted (`{YL + 4}` ->
+`{YL + 1.5}`, `{...bot(13, 3)}` helpers too), `pcbRotation` absolute (the circuit JSON's rotation is the TSX
+one, bottom side too); a part in a `<group>`, written inside a sub-component (above `export default`) or generated
+(`name={`C${n}02`}`) gets a note, its board place and the move as a delta instead. First runs (unrouted JSON,
+no build): open-theremin 30 suggestions for 36 parts (ratsnest 2029 -> 1919 mm, crossings 310 -> 288), smu-main
+81 / 131 (5174 -> 4878 mm, crossings 811 -> 723), bench-psu 35 / 74 (3139 -> 2997 mm; its bottom side is full, 16 still beyond the
+limit); all courtyard-clear except turns in place.
 
 Reviewer agent (`pcb review`): each part gets the checklist of its type (regulator, mcu, ic, connector, diode,
 transistor, crystal; passives are covered by the `[board]` items), ids `<ref>:<key>` / `board:<key>`. The

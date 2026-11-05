@@ -1,4 +1,4 @@
-"""Circuit verification in ``check``: simulations, required sims, netlist checks and the findings file.
+"""Circuit verification in ``check``: simulations, required sims, netlist and placement checks, the findings file.
 
 Two modes decide what an issue is: in *vibe* mode (default) failed / stale / skipped sims, missing required
 sims, ranges that are only assumed, open findings and a missing / stale reviewer review are warnings and the loop goes on; in *strict* mode
@@ -12,7 +12,7 @@ import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from vibepcb.check import findings, netcheck, review, sim
+from vibepcb.check import findings, netcheck, placement, review, sim
 from vibepcb.core import paths
 from vibepcb.settings import intent
 
@@ -90,7 +90,8 @@ def run(board: str, *, strict: bool = False) -> Report:
     if not circuit_json.exists():
         report.lines.append(f"Verification: skipped, {circuit_json.name} not found (run `pcb build {board}`)")
         return report
-    design = netcheck.load_design(json.loads(circuit_json.read_text(encoding="utf-8")))
+    circuit = json.loads(circuit_json.read_text(encoding="utf-8"))
+    design = netcheck.load_design(circuit)
     spec, defaults = intent.load(board), sim.load_defaults()
 
     decks = [sim.parse_deck(p) for p in sim.deck_paths(board)]
@@ -104,7 +105,13 @@ def run(board: str, *, strict: bool = False) -> Report:
     report.lines += sim_lines
     report.issues += sim_issues
 
+    analysis, placed = placement.run(circuit, placement.load_limits(board))
+    report.lines.append(
+        f"Placement: {len(analysis.links)} part(s) next to a pin and {len(analysis.edges)} side-entry connector(s)"
+        f" judged, {len(placed)} beyond the limit (`pcb place-check {board}`)"
+    )
     merged = findings.merge(findings.load(board), netcheck.run(design, spec, defaults))
+    merged = findings.merge(merged, placed, source=placement.SOURCE)
     findings.save(board, merged)
     open_ = [f for f in merged if f.blocking]
     report.lines.append(f"Findings: {len(open_)} open, {len(merged) - len(open_)} accepted ({findings.FINDINGS_NAME})")

@@ -261,6 +261,8 @@ it names before the part goes into a library.
 | `hatch run pcb cost <name> [--qty N]` | Batch cost, hand-assembled: BOM priced at LCSC (min order, multiples, stock) + bare boards (`[cost] pcb_usd` from a jlcpcb.com quote, else a labelled estimate; JLCPCB's quote API is not public) |
 | `hatch run pcb rules <name>` | Merged design / manufacturing rule profiles of a board, each value's source |
 | `hatch run pcb hotspots <name>` | The last check's DRC errors grouped into spots: nets, parts nearby, TSX coordinates, inspect area |
+| `hatch run pcb place-check <name>` | Placement rules on the unrouted circuit JSON (right after the placement gate): decoupling caps / crystals / regulator loop parts near their pins, side-entry connectors at the edge; each finding with a free spot to move to (`check` puts them in `findings.toml`) |
+| `hatch run pcb place-suggest <name> [--all]` | Positions + turns for the passives that serve one chip pin, printed as TSX `pcbX`/`pcbY`/`pcbRotation` edits (courtyard-clear, with the ratsnest change); edit the TSX yourself, then rebuild |
 | `hatch run pcb list` | List boards |
 | `hatch run pcb part fetch\|build\|check\|all\|export <MPN>` | Components to the house standard (section Components) |
 | `hatch run pcb doctor` | Check the setup (tools, KiCad version, patches, network); exit 1 on FAIL |
@@ -280,7 +282,7 @@ Always run `hatch run style`, `hatch run type` and `hatch run test` after changi
 | `build/` | `tscircuit` (tsci), `padtable` |
 | `kicad/` | `project` (assembly, kicad-cli), `fixes/` (one module per area, registry in `__init__`), `schgen` (schematic), `symlib`, `easyeda`, `testpoints` |
 | `routing/` | `board` (model), `drc`, `router`, `routes`, `pairs`, `tune`, `tracks`, `fanout`, `ratsnest` |
-| `check/` | `verify`, `netcheck`, `sim`, `findings`, `review`, `history`, `hotspots`, `inspect` |
+| `check/` | `verify`, `netcheck`, `placement`, `suggest`, `sim`, `findings`, `review`, `history`, `hotspots`, `inspect` |
 | `output/` | `bringup`, `cost` |
 | `parts/` | `pcb part`: components to the house standard |
 

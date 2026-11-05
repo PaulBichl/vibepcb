@@ -9,9 +9,11 @@
     text = "I2C_SDA has no pull-up resistor to a supply net"
     status = "open"                # open | accepted
     reason = ""                    # accepted needs a reason ("pull-ups are on the sensor board")
-    source = "netcheck"            # netcheck (written by `check`) | review (`pcb review --merge`) | anything else (by hand)
+    source = "netcheck"            # netcheck / placement (written by `check`) | review (`pcb review --merge`) |
+                                   #   anything else (by hand)
 
-``check`` merges the deterministic findings (:mod:`vibepcb.netcheck`) into the file: a finding it still finds
+``check`` merges the deterministic findings (:mod:`vibepcb.check.netcheck`, and
+:mod:`vibepcb.check.placement` with ``source = "placement"``, each merged on its own) into the file: a finding it still finds
 keeps its status and reason (unless it changed: an acceptance answers what the finding said, so it is reopened
 with the old reason kept after :data:`REOPENED`; a deterministic finding changes with its text, a review finding
 with its verdict - issue vs. undecided - since the reviewer words every run anew), a new one is added as ``open``,

@@ -118,6 +118,7 @@ class Defaults:
     required: dict[str, tuple[str, ...]]  # circuit type -> deck kinds every part of it needs
     netlist: dict[str, float]
     source: str = DEFAULTS_NAME
+    placement: dict[str, float] = field(default_factory=dict)  # [placement]: vibepcb.check.placement.Limits
 
 
 @dataclass
@@ -283,7 +284,8 @@ def parse_defaults(data: dict[str, Any], source: str = DEFAULTS_NAME) -> Default
         limits[key.lower()] = tuple(None if b == "-" else float(b) for b in bounds)
     required = {kind: tuple(str(d) for d in table.get("decks", [])) for kind, table in data.get("required", {}).items()}
     netlist = {k: float(v) for k, v in data.get("netlist", {}).items()}
-    return Defaults(limits, required, netlist, source)  # type: ignore[arg-type]
+    placement = dict(data.get("placement", {}))
+    return Defaults(limits, required, netlist, source, placement)  # type: ignore[arg-type]
 
 
 def load_defaults() -> Defaults:
