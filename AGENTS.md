@@ -33,7 +33,7 @@ out/<name>/                           <- what a person looks at (README.md there
    schematic.svg    schematic preview
    check.txt        the check summary
    fab/             after `fab`: <name>-gerbers.zip, -bom.csv, -cpl.csv (JLCPCB format), -schematic.pdf,
-                    -top/-bottom.png (3D renders)
+                    -top/-bottom.png (3D renders), -assembly.pdf/.html (hand-assembly drawings)
    .work/           internals: raw/ (tscircuit output, never edit), src/ (prepared copy), reports/ (ERC/DRC
                     JSON, check.json), preview/*.png (for the agent: routed.png, board.png, schematic.png)
 ```
@@ -78,9 +78,12 @@ add `--quiet` for the short output.
 5. Repeat until `check` exits 0 (errors = 0). Then `hatch run pcb fab <name>`:
    gerbers/drill zip, BOM and CPL in JLCPCB's format (BOM with LCSC + MPN), schematic PDF,
    top/bottom 3D renders, a bring-up sheet (`<name>-bringup.md`: rails, expected voltages, test points,
-   power-on checklist) and, for a board with an MCU, the firmware pin header `<name>-pins.h`, all in
+   power-on checklist), assembly drawings for hand soldering (`<name>-assembly.pdf` + a self-contained
+   `<name>-assembly.html`: assembly order, per-side drawings with the bottom mirrored as seen when the board is
+   turned over, pin 1 / cathode / + marks, one panel per BOM line with checkboxes) and, for a board with an MCU,
+   the firmware pin header `<name>-pins.h`, all in
    `out/<name>/fab/` (after check, look at `.work/preview/board.png`; `hatch run pcb bringup <name>` makes
-   just the last two).
+   just the bring-up sheet and pin header, `hatch run pcb assembly <name>` just the assembly drawings).
    Never hand over fab files of a board whose `check` fails.
 
 Silkscreen: every connector's pins labelled (`showSilkscreenPinLabels` or a `<silkscreentext>` per pin; `check` warns
@@ -258,6 +261,7 @@ it names before the part goes into a library.
 |---------|---------|
 | `hatch run pcb new <name>` | Scaffold `boards/<name>/index.circuit.tsx` |
 | `hatch run pcb all <name>` | build + fix + check |
+| `hatch run pcb assembly <name>` | Assembly drawings for hand soldering into `out/<name>/fab/` (PDF + interactive HTML; `fab` makes them too) |
 | `hatch run pcb publish <name>` | review set for GitHub in `boards/<name>/hardware/` (needs a passing `check`; no fab files) |
 | `hatch run pcb cost <name> [--qty N]` | Batch cost, hand-assembled: BOM priced at LCSC (min order, multiples, stock) + bare boards (`[cost] pcb_usd` from a jlcpcb.com quote, else a labelled estimate; JLCPCB's quote API is not public) |
 | `hatch run pcb rules <name>` | Merged design / manufacturing rule profiles of a board, each value's source |
@@ -284,7 +288,7 @@ Always run `hatch run style`, `hatch run type` and `hatch run test` after changi
 | `kicad/` | `project` (assembly, kicad-cli), `fixes/` (one module per area, registry in `__init__`), `schgen` (schematic), `symlib`, `easyeda`, `testpoints` |
 | `routing/` | `board` (model), `drc`, `router`, `routes`, `pairs`, `tune`, `tracks`, `fanout`, `ratsnest` |
 | `check/` | `verify`, `netcheck`, `placement`, `suggest`, `sim`, `findings`, `review`, `layoutdoc`, `history`, `hotspots`, `inspect` |
-| `output/` | `bringup`, `cost` |
+| `output/` | `bringup`, `cost`, `assembly` (data, polarity, order), `assembly_draw` (PDF / HTML drawings) |
 | `parts/` | `pcb part`: components to the house standard |
 
 Import modules, not names across packages: `from vibepcb.kicad import fixes`, `from vibepcb.kicad import project as kicad`.

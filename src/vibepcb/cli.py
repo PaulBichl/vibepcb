@@ -15,8 +15,10 @@ vibepcb place-suggest <board> [--all]  TSX pcbX / pcbY / pcbRotation edits for t
 vibepcb check <board>   KiCad DRC + ERC -> out/<board>/reports (after refill: drop tracks the GND pour provides)
 vibepcb all <board>     [--fast] [--quiet] build + fix + check
 vibepcb fab <board>     part availability check, gerbers/drill zip, BOM, pick-and-place, schematic PDF, 3D renders,
-                        bring-up sheet + firmware pin header
+                        bring-up sheet + firmware pin header, assembly drawings (PDF + HTML)
 vibepcb bringup <board> out/<board>/fab/<board>-bringup.md (rails, test points, power-on checklist) + <board>-pins.h
+vibepcb assembly <board> out/<board>/fab/<board>-assembly.pdf + .html: assembly drawings for hand soldering (order,
+                        per-side drawings, bottom mirrored, pin 1 / cathode / + marks, one panel per BOM line)
 vibepcb review <board>  [--run | --merge] reviewer-agent package in out/<board>/.work/review/; --run starts a fresh
                         reviewer ($VIBEPCB_REVIEWER, default `claude -p --agent pcb-reviewer`) and merges its answers
 vibepcb cost <board>    [--qty N] batch cost, hand-assembled: parts priced at LCSC + bare boards -> out/<board>/cost.txt
@@ -61,7 +63,7 @@ from vibepcb.check import findings, history, hotspots, inspect, placement, revie
 from vibepcb.core import doctor, paths, proc, progress, sexpr
 from vibepcb.kicad import fixes, schgen, testpoints
 from vibepcb.kicad import project as kicad
-from vibepcb.output import bringup, cost
+from vibepcb.output import assembly_draw, bringup, cost
 from vibepcb.parts import altium as part_altium
 from vibepcb.parts import build as part_build
 from vibepcb.parts import check as part_check
@@ -869,6 +871,39 @@ def cmd_fab(board: str) -> int:
     for f in _write_bringup(board):
         print(f"  {f.relative_to(paths.ROOT)}")
         _written(f)
+    with _phase("assembly drawings (PDF + HTML)"):
+        written = _write_assembly(board)
+    for f in written:
+        print(f"  {f.relative_to(paths.ROOT)}")
+        _written(f)
+    _write_index(board)
+    return 0
+
+
+def _write_assembly(board: str) -> list[Path]:
+    """``<board>-assembly.pdf`` / ``.html`` into ``out/<board>/fab/`` from the checked board (+ fab BOM)."""
+    pcb = paths.kicad_dir(board) / f"{board}.kicad_pcb"
+    fab = paths.board_out(board) / "fab"
+    circuit = paths.raw_dir(board) / f"{board}.circuit.json"
+    bom = fab / f"{board}-bom.csv"
+    return assembly_draw.write(pcb, fab, paths.work_dir(board) / "assembly", circuit_json=circuit if circuit.exists()
+                               else None, bom_csv=bom if bom.exists() else None)  # fmt: skip
+
+
+def cmd_assembly(board: str) -> int:
+    pcb = paths.kicad_dir(board) / f"{board}.kicad_pcb"
+    if not pcb.exists():
+        print(f"error: {pcb.relative_to(paths.ROOT)} not found - run `pcb fix {board}` and `pcb check {board}`",
+              file=sys.stderr)  # fmt: skip
+        return 1
+    if not _check_passed(board, pcb):
+        print(f"warning: `pcb check {board}` has not passed on this board - the drawings show it as it is",
+              file=sys.stderr)  # fmt: skip
+    with _phase("assembly drawings (PDF + HTML)"):
+        written = _write_assembly(board)
+    for f in written:
+        print(f"  {f.relative_to(paths.ROOT)}")
+        _written(f)
     _write_index(board)
     return 0
 
@@ -1090,13 +1125,15 @@ def cmd_cost(board: str, qty: int | None = None) -> int:
     return 0
 
 
-KICAD_COMMANDS = ("fix", "check", "all", "fab", "publish", "cost")  # the ones that run kicad-cli
+KICAD_COMMANDS = ("fix", "check", "all", "fab", "assembly", "publish", "cost")  # the ones that run kicad-cli
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="vibepcb", description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("new", "build", "fix", "route", "inspect", "check", "all", "fab", "bringup", "review", "publish"):
+    for name in (
+        "new", "build", "fix", "route", "inspect", "check", "all", "fab", "bringup", "assembly", "review", "publish"
+    ):  # fmt: skip
         command_parser = sub.add_parser(name)
         command_parser.add_argument("board")
         if name in ("check", "all"):
@@ -1217,12 +1254,14 @@ def main(argv: list[str] | None = None) -> int:
                     "fix": cmd_fix,
                     "fab": cmd_fab,
                     "bringup": cmd_bringup,
+                    "assembly": cmd_assembly,
                     "publish": cmd_publish,
                 }
                 return handler[command](args.board)
     except (
         tscircuit.TscircuitError,
         kicad.KicadCliError,
+        assembly_draw.AssemblyError,
         config.ConfigError,
         routes.RoutesError,
         FileNotFoundError,
