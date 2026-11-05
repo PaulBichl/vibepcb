@@ -3,17 +3,20 @@
 tscircuit's schematic layout does not scale (a ~250-part board does not finish in 20 minutes),
 so builds always disable it and the schematic comes from here, in well under a second:
 
-- one framed block per TSX section (``{/* ===== title ===== */}`` headers, parts in source order);
+- one framed block per TSX section (``{/* ===== title ===== */}`` headers, parts in source order), a
+  framed sub-block in it per sub-component instance used there (:func:`blocks_of`);
 - resistors, capacitors, inductors, diodes, crystals and 2-pin buttons get real symbols, every
   other part is a box with its pins (left / right half by pin number);
 - the two-terminal parts hang off the chip pins they serve as wired trees (pin - R - node - C - GND),
   the chip's pin pitch stretched to make room; parts no chip reaches start from a labelled net;
 - GND / supply rails end in rail symbols (``fixes.schematic_power_symbols`` makes them power
   symbols); a net is wired once per block and labelled there, every further appearance is a label
-  (double arrow when the net leaves the block); labels always, so KiCad keeps the PCB's net names;
+  (double arrow when the net leaves the block); labels always, so KiCad keeps the PCB's net names,
+  but on an unnamed net of two passives joined by wire (the PCB takes KiCad's name for it then);
 - capacitors between two rails (decoupling) stand at the supply pin of the chip they serve
   (a wire out of the pin, the caps standing on it with GND below); ones no chip takes stand in a
   row at the block end; two parts in series between two rails (LED + resistor) stand as one column;
+- one-pin parts (test points) stand in a row along the bottom edge of their block, pins level;
 - rail symbols point GND down / supplies up wherever that room is free (``Sheet.finish``).
 """
 
@@ -31,6 +34,7 @@ from vibepcb.core import sexpr
 from vibepcb.kicad import easyeda, fixes, symlib
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
 GRID = 2.54  # everything sits on the 1.27 mm connection grid
@@ -70,6 +74,7 @@ _POWER_PIN = re.compile(
 )
 _NEGATIVE_PIN = re.compile(r"NEG|^VEE|^VS?-$", re.IGNORECASE)  # a rail on such a pin is a negative supply
 _GENERIC_PIN = re.compile(r"^(pin)?\d+$", re.IGNORECASE)
+_CONNECTOR = re.compile(r"^(J|P|CN|X)\d+$")
 _ANODE = {"a", "anode", "pos"}
 _CATHODE = {"c", "k", "cathode", "neg"}
 TWO_KINDS = {
@@ -140,7 +145,8 @@ def _nets(circuit: list[dict[str, Any]]) -> dict[str, str]:
 
     An unnamed net takes the name of a named trace on it (``<trace name="SD_DQ0">``: rules,
     net classes and diff pairs can then refer to it), else the first chip pin on it with a real
-    pin name (``U1_VREG_1V2``), else KiCad-style after its first pin (``Net-(R5-Pad2)``).
+    pin name (``U1_VREG_1V2``), else a diode's pin (``D4_A`` / ``D4_K``), a chip's numbered pin (a
+    connector: ``J1_12``), its first pin (``R5_2``).
     ``fixes.rename_auto_nets`` gives the PCB nets the same names (via :func:`pin_net_names`), so
     schematic and board agree.
     """
@@ -173,6 +179,38 @@ def _nets(circuit: list[dict[str, Any]]) -> dict[str, str]:
             and not _GENERIC_PIN.match(name)
         )
 
+    def ref(p: dict[str, Any]) -> str:
+        return str(comps.get(p["source_component_id"], {}).get("name", "?"))
+
+    def diode_pin(p: dict[str, Any]) -> str | None:
+        """A diode's / LED's pin as A or K (tscircuit's pin1 = anode), else None."""
+        comp = comps.get(p["source_component_id"], {})
+        name = str(p["name"]).lower()
+        diode = comp.get("ftype") in {"simple_diode", "simple_led"} or (
+            comp.get("ftype") == "simple_chip" and n_ports.get(p["source_component_id"], 0) == 2
+        )
+        if not diode:
+            return None
+        if name in _ANODE or (comp.get("ftype") != "simple_chip" and name == "pin1"):
+            return "A"
+        if name in _CATHODE or (comp.get("ftype") != "simple_chip" and name == "pin2"):
+            return "K"
+        return None
+
+    def candidates(ports: list[dict[str, Any]]) -> list[str]:
+        """Names for an unnamed net, best first: a chip pin with a real name (``U1_VREG_1V2``), a diode's
+        anode / cathode (``D4_A``), a chip's numbered pin (a connector: ``J1_12``), the first pin (``R5_2``)."""
+        names = [f"{ref(p)}_{p['name']}" for p in ports if chip_pin(p)]
+        names += [f"{ref(p)}_{diode_pin(p)}" for p in ports if diode_pin(p)]
+        chips = [
+            p
+            for p in ports
+            if comps.get(p["source_component_id"], {}).get("ftype") == "simple_chip" or _CONNECTOR.match(ref(p))
+        ]
+        chips.sort(key=lambda p: not _CONNECTOR.match(ref(p)))  # a connector pin first: J1_12, not RN1_4
+        names += [f"{ref(p)}_{p.get('pin_number', p['name'])}" for p in chips]
+        return [*names, *(f"{ref(p)}_{p.get('pin_number', p['name'])}" for p in ports)]
+
     taken = set(named.values())
     out = {}
     for key, ports in by_key.items():
@@ -181,13 +219,8 @@ def _nets(circuit: list[dict[str, Any]]) -> dict[str, str]:
         first = ports[0]
         name = named.get(key)
         if name is None:
-            pin = next((p for p in ports if chip_pin(p)), None)
-            ref = comps.get(first["source_component_id"], {}).get("name", "?")
-            name = f"Net-({ref}-Pad{first.get('pin_number', '?')})"
-            if pin is not None:
-                candidate = f"{comps[pin['source_component_id']]['name']}_{pin['name']}"
-                if candidate not in taken:
-                    name = candidate
+            free = [n for n in candidates(ports) if n not in taken]
+            name = free[0] if free else f"Net-({ref(first)}-Pad{first.get('pin_number', '?')})"
             taken.add(name)
         for p in ports:
             out[p["source_port_id"]] = name
@@ -212,6 +245,19 @@ def pin_net_names(circuit: list[dict[str, Any]]) -> dict[tuple[str, str], str]:
         and e["source_port_id"] in nets
         and e["source_component_id"] in comps
     }
+
+
+def _loose(circuit: list[dict[str, Any]], parts: list[Part]) -> set[str]:
+    """Nets the board leaves unnamed that join just two pins of two-terminal parts (R - C, LED - R):
+    where the drawing joins those two pins by wire it needs no label (see Block._label_nodes)."""
+    named = {str(e["name"]) for e in circuit if e.get("type") == "source_net"}
+    named |= {str(e["name"]) for e in circuit if e.get("type") == "source_trace" and _user_trace_name(e)}
+    pins: dict[str, list[bool]] = {}
+    for part in parts:
+        for pin in part.pins:
+            if pin.net:
+                pins.setdefault(pin.net, []).append(part.two)
+    return {n for n, two in pins.items() if len(two) == 2 and all(two) and n not in named}
 
 
 def _value(comp: dict[str, Any]) -> str:
@@ -256,21 +302,177 @@ def _parts(circuit: list[dict[str, Any]]) -> list[Part]:
 
 
 def sections(source: Path | None) -> dict[str, str]:
-    """Part name -> TSX section title (the ``{/* ===== title ===== */}`` header above it)."""
+    """Part name -> TSX section title (the ``{/* ===== title ===== */}`` header above it), for the
+    parts the board's tree names literally (``name="U1"``); see :func:`blocks_of` for the others."""
+    return blocks_of(source, None)
+
+
+BLOCK_SEP = "\n"  # block key: "section" or "section\ninstance" (a sub-block per sub-component instance)
+_TAG = re.compile(r"<([A-Za-z_][\w.]*)")
+_LITERAL_NAME = re.compile(r"""\bname\s*=\s*(?:["']([^"']+)["']|\{\s*["']([^"']+)["']\s*\})""")
+_ANY_NAME = re.compile(r"\bname\s*=\s*\{")
+_QUOTED = re.compile(r"""["'`]([A-Za-z_]\w*)["'`]""")
+_TEMPLATE_NAME = re.compile(r"\bname\s*=\s*\{\s*`([^`]*)`\s*\}")
+_FIRST_PROP = re.compile(r"""^\s*[A-Za-z_]\w*\s*=\s*(?:["']([^"']*)["']|\{\s*(-?[\d.]+|["'][^"']*["'])\s*\})""")
+
+
+@dataclass
+class _Site:
+    """A place in the board's tree that makes parts it does not name literally: a sub-component
+    instance (``<Channel n={1} />``, ``instance`` = its title) or an element with a computed name
+    (``name={`TP${i + 1}`}`` in a ``.map``, ``pattern`` = the names it can make, if known)."""
+
+    pos: int
+    tag: str
+    instance: str
+    pattern: re.Pattern[str] | None
+
+
+def _tag_end(text: str, start: int) -> int:
+    """Index just past the ``>`` closing the JSX tag opened at ``start`` (braces and strings skipped)."""
+    depth, i, quote = 0, start, ""
+    while i < len(text):
+        c = text[i]
+        if quote:
+            if c == "\\":
+                i += 1
+            elif c == quote:
+                quote = ""
+        elif c in "\"'`":
+            quote = c
+        elif c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+        elif c == ">" and depth == 0:
+            return i + 1
+        i += 1
+    return len(text)
+
+
+_DEFINITION = re.compile(r"^(?:export\s+)?(?:const|let|function|type|interface)\s+(\w+)", re.MULTILINE)
+
+
+def _makes_parts(head: str, tag: str) -> bool:
+    """Whether the component ``tag`` can make parts: its definition in ``head`` (the file above the
+    board's tree) names one (``<Txt>`` for silkscreen text does not); an imported one may."""
+    starts = [(m.start(), m[1]) for m in _DEFINITION.finditer(head)]
+    for i, (pos, name) in enumerate(starts):
+        if name == tag:
+            end = starts[i + 1][0] if i + 1 < len(starts) else len(head)
+            return bool(re.search(r"\bname\s*=", head[pos:end]))
+    return True
+
+
+def _tree(text: str) -> tuple[list[tuple[int, str]], list[_Site], dict[str, int], dict[str, int]]:
+    """The board's tree (``export default`` to the end, else the whole file): its section headers,
+    its sites (see :class:`_Site`), the position of each literal part name in it and of each quoted
+    word. Elements in the sub-component definitions above it are left out: their parts belong where
+    an instance is used."""
+    main = text.find("export default")
+    main = 0 if main < 0 else main
+    headers = [(m.start(), m[1]) for m in _SECTION.finditer(text)]
+    sites: list[_Site] = []
+    named: dict[str, int] = {}
+    count: dict[str, int] = {}
+    mentions: dict[str, int] = {}  # quoted names (a .map's data: [["U10", "V3V3"], ["U11", "V1V1"]])
+    for m in _QUOTED.finditer(text, main):
+        mentions.setdefault(m[1], m.start())
+    for m in _TAG.finditer(text, main):
+        tag = m[1]
+        attrs = text[m.end() : _tag_end(text, m.end()) - 1]
+        literal = _LITERAL_NAME.search(attrs)
+        if literal is not None:
+            named.setdefault(literal[1] or literal[2], m.start())
+        elif _ANY_NAME.search(attrs):
+            template = _TEMPLATE_NAME.search(attrs)
+            pattern = None
+            if template is not None:
+                pieces = re.split(r"\$\{[^}]*\}", template[1])
+                pattern = re.compile("^" + ".+".join(re.escape(p) for p in pieces) + "$")
+            sites.append(_Site(m.start(), tag, "", pattern))
+        elif tag[0].isupper() and "." not in tag and _makes_parts(text[:main], tag):
+            count[tag] = count.get(tag, 0) + 1
+            first = _FIRST_PROP.match(attrs)
+            value = (first[1] or first[2]).strip("\"'") if first is not None else ""
+            sites.append(_Site(m.start(), tag, f"{tag} {value or count[tag]}", None))
+    return headers, sites, named, mentions
+
+
+def blocks_of(source: Path | None, order: list[str] | None) -> dict[str, str]:
+    """Part name -> block key (``section`` or ``section`` + BLOCK_SEP + ``instance``).
+
+    A part named literally in the board's tree takes the section header above it. tscircuit lists
+    the parts in tree order (``order``, the circuit JSON's), so the parts between two literally named
+    ones come from the sites between those two in the source: a sub-component instance's parts go
+    into a sub-block of the section it is used in, titled after the instance (``Channel 1``); a
+    computed name's (a ``.map`` of test points) into that section itself. Neighbouring instances of
+    one component share their run of parts evenly, as each makes the same parts."""
     if source is None or not source.exists():
         return {}
-    out: dict[str, str] = {}
-    title = ""
     text = source.read_text(encoding="utf-8")
-    events = sorted(
-        [(m.start(), "s", m[1]) for m in _SECTION.finditer(text)]
-        + [(m.start(), "n", m[1]) for m in _NAME.finditer(text)]
-    )
-    for _, kind, value in events:
-        if kind == "s":
-            title = value
+    headers, sites, named, mentions = _tree(text)
+
+    def section(pos: int) -> str:
+        return next((t for p, t in reversed(headers) if p < pos), "")
+
+    def key(site: _Site) -> str:
+        return section(site.pos) + (BLOCK_SEP + site.instance if site.instance else "")
+
+    if order is None:
+        return {name: section(pos) for name, pos in named.items()}
+    named = {**{n: p for n, p in mentions.items() if n in set(order)}, **named}
+    known = [n in named for n in order]
+    out = {n: section(named[n]) for n in order if n in named}
+    i = 0
+    while i < len(order):
+        if known[i]:
+            i += 1
+            continue
+        j = i
+        while j < len(order) and not known[j]:
+            j += 1
+        run = order[i:j]
+        lo = named[order[i - 1]] if i else 0
+        hi = named[order[j]] if j < len(order) else len(text)
+        between = [s for s in sites if lo < s.pos < hi]
+        if not between or len({key(s) for s in between}) == 1:  # one block made them all: no split needed
+            out.update(dict.fromkeys(run, key(between[0]) if between else section(lo if i else hi)))
         else:
-            out.setdefault(value, title)
+            out.update(_split(run, between, key))
+        i = j
+    return out
+
+
+def _split(run: list[str], sites: list[_Site], key: Any) -> dict[str, str]:
+    """Share a run of parts (tree order) among the sites that made them (source order)."""
+    out: dict[str, str] = {}
+    k = 0
+    while k < len(sites) and run:
+        site = sites[k]
+        if site.pattern is not None:
+            n = 0
+            while n < len(run) and site.pattern.match(run[n]):
+                n += 1
+            out.update(dict.fromkeys(run[:n], key(site)))
+            run = run[n:]
+            k += 1
+            continue
+        group = [site]
+        while k + len(group) < len(sites) and sites[k + len(group)].pattern is None:
+            group.append(sites[k + len(group)])
+        k += len(group)
+        nxt = sites[k].pattern if k < len(sites) else None
+        n = next((m for m, name in enumerate(run) if nxt is not None and nxt.match(name)), len(run))
+        mine, run = run[:n], run[n:]
+        if len({s.tag for s in group}) == 1 and len(mine) % len(group) == 0:
+            size = len(mine) // len(group)
+            for g, s in enumerate(group):
+                out.update(dict.fromkeys(mine[g * size : (g + 1) * size], key(s)))
+        else:
+            out.update(dict.fromkeys(mine, key(group[0])))
+    if run:  # more parts than the sites explain: the last site's
+        out.update(dict.fromkeys(run, key(sites[-1])))
     return out
 
 
@@ -944,6 +1146,7 @@ class Cell:
     width: float
     height: float
     draw: Any
+    anchor: float = 0.0  # a one-pin part's pin row below the top (rows of them line up on it)
 
 
 _OUTWARD = {0: "left", 180: "right", 90: "down", 270: "up"}  # library pin angle -> side it leaves on
@@ -1027,14 +1230,17 @@ class Block:
         rails: set[str],
         global_nets: set[str],
         symbols: dict[str, symlib.LibSymbol] | None = None,
+        loose: set[str] | None = None,
     ) -> None:
         self.title, self.parts, self.rails, self.global_nets = title, parts, rails, global_nets
         self.symbols = symbols or {}
+        self.loose = loose or set()  # nets drawn as a bare wire where they join their two pins (see _loose)
         self.ctx: str | None = None  # chip whose trees are being built
         self.wired: set[str] = set()
         self.owner: dict[str, str] = {}
         self.placed: set[str] = set()
         self.on_net: dict[str, list[tuple[Part, Pin]]] = {}
+        self.points: list[Cell] = []  # one-pin parts (test points, touch pads): a row at the bottom edge
         for part in parts:
             if part.two:
                 for pin in part.pins:
@@ -1126,7 +1332,8 @@ class Block:
                             counts[pin.net] = counts.get(pin.net, 0) + 1
             net = max(counts, key=lambda n: (counts[n], n not in self.wired))
             root = self._build(net)
-            root.entries.insert(0, Label(net))
+            if net not in self.loose or len(root.entries) < 2:  # a loose net's two parts: joined by the trunk
+                root.entries.insert(0, Label(net))
             roots.append((self.ctx, root))
         bank = [p for p in self.parts if p.two and p.name not in self.placed]
         for row in attached:
@@ -1137,16 +1344,19 @@ class Block:
         for chip, row in zip(chips, attached, strict=True):
             own: list[Cell] = []
             satellites: list[Node] = [r for owner, r in roots if owner == chip.name]
+            extra = [self._root_cell(r) for r in satellites]
+            extra += [self._bank_cell(p) for p in bank if self.owner.get(p.name) == chip.name]
             if chip.name in self.symbols:
                 sym = self.symbols[chip.name]
                 for unit in sorted(sym.units()) or [1]:  # each unit of a dual op-amp its own triangle
                     own.append(self._lib_cell(chip, row, sym, satellites, unit))
             elif len(chip.pins) == 1:
+                if not extra:  # a test point: in the row along the block's bottom edge (see _layouts)
+                    self.points.append(self._point_cell(chip, row[0]))
+                    continue
                 own.append(self._point_cell(chip, row[0]))
             else:
                 own.append(self._chip_cell(chip, row))
-            extra = [self._root_cell(r) for r in satellites]
-            extra += [self._bank_cell(p) for p in bank if self.owner.get(p.name) == chip.name]
             cells.append(_group(own, extra))  # the chip with everything it keeps, as one piece
         cells += [self._root_cell(r) for owner, r in roots if owner not in {c.name for c in chips}]
         cells += [self._bank_cell(p) for p in bank if self.owner.get(p.name) not in {c.name for c in chips}]
@@ -1167,13 +1377,16 @@ class Block:
     def _label_nodes(self, tops: list[End]) -> None:
         """Label every wired net: KiCad names an unlabelled one after a pin of its own choice,
         which no longer matches the PCB's net name (parity, "Update PCB from Schematic").
-        The label goes below the node's parts, so a chain pin - R - node - C runs straight on."""
+        The label goes below the node's parts, so a chain pin - R - node - C runs straight on.
+        A loose net (two passives' pins, nothing else) joined here by the wire alone stays bare:
+        ``fixes.rename_auto_nets`` gives the PCB net KiCad's name for it (:func:`sheet_net_names`)."""
 
         def visit(item: End | Branch) -> None:
             if isinstance(item, Branch):
                 visit(item.end)
             elif isinstance(item, Node):
-                if item.net not in self.rails and not any(isinstance(e, Label) for e in item.entries):
+                both = item.net in self.loose and any(isinstance(e, Branch) for e in item.entries)
+                if item.net not in self.rails and not both and not any(isinstance(e, Label) for e in item.entries):
                     item.entries.append(Label(item.net))
                 for e in item.entries:
                     visit(e)
@@ -1204,7 +1417,13 @@ class Block:
         )
         above, below = _extent(attached) if attached is not None else (0.0, 0.0)
         above, below = max(above, 2 * GRID), max(below, GRID)
-        left = _snap(_width(attached, self.global_nets))
+        # a rail stands off the pin by a stub and has room to turn (supply up, GND down, Sheet.finish)
+        stub = (
+            _snap(max(STUB, _rail_box(attached.net, 0, 0, "up")[2] + 0.6), HALF) if isinstance(attached, Rail) else 0.0
+        )
+        if stub:
+            above = below = max(above, RAIL_TEXT + 2 * HALF)
+        left = _snap(_width(attached, self.global_nets) + stub)
         text = max(_text_w(chip.name), _text_w(chip.value if chip.value != chip.name else ""))
         width = left + PIN_LENGTH + 2 * r + GRID + text
 
@@ -1217,9 +1436,10 @@ class Block:
             sheet.points += [(x, py - above), (tx + text, py + below)]
             sheet.box(px + PIN_LENGTH, py - HALF, tx + text, py + HALF)
             sheet.segments.append((px, py, px + PIN_LENGTH, py))
-            sheet.end(attached, Frame(px, py, "left"))
+            sheet.wire(px - stub, py, px, py)
+            sheet.end(attached, Frame(px - stub, py, "left"))
 
-        return Cell(_snap(width), _snap(above + below), draw)
+        return Cell(_snap(width), _snap(above + below), draw, _snap(above, HALF))
 
     def _chip_cell(self, chip: Part, attached: list[End]) -> Cell:
         pairs = sorted(zip(chip.pins, attached, strict=True), key=lambda pa: self._pin_rank(pa[0]))
@@ -1552,7 +1772,7 @@ class Block:
         top, bottom = sorted(rungs, key=lambda b: -sheet_rank.rank(b.end.net if isinstance(b.end, Rail) else None))
         head = 3 * GRID
         text = max(_part_text(b.part) for b in rungs) + GRID + HALF
-        reach = _width(Label(net), self.global_nets)
+        reach = 0.0 if net in self.loose else _width(Label(net), self.global_nets)
         width = _snap(GRID + max(text, reach, _text_w(top.far.net or "") / 2 + GRID))
         height = _snap(2 * head + 2 * TWO_LEN)
 
@@ -1565,6 +1785,8 @@ class Block:
             sheet.two(top.part, top.far, f, 0, 0)
             sheet.two(bottom.part, bottom.near, f, TWO_LEN, 0)
             sheet.rail(bottom.end.net, *f.pt(2 * TWO_LEN, 0), "down")
+            if net in self.loose:
+                return  # the two parts meet pin to pin (see _label_nodes)
             sheet.junction(cx, y0 + TWO_LEN)
             sheet.wire(cx, y0 + TWO_LEN, cx + STUB, y0 + TWO_LEN)
             sheet.label(net, cx + STUB, y0 + TWO_LEN, "right")
@@ -1599,6 +1821,82 @@ def _group(main: list[Cell], extra: list[Cell]) -> Cell:
             cell.draw(sheet, x + cx, y + top_h + CELL_GAP + cy)
 
     return Cell(max(top_w, bottom_w), top_h + (CELL_GAP + bottom_h if extra else 0.0), draw)
+
+
+SUB_TITLE = 2.0  # title font of a sub-block (a sub-component instance inside its section's block)
+
+
+def _point_rows(points: list[Cell], width: float) -> tuple[Spots, float, float]:
+    """One-pin parts side by side in rows up to ``width`` wide, each row's pins (and so their labels)
+    on one line; returns their top-left corners and the rows' width / height."""
+    rows: list[list[int]] = [[]]
+    x = 0.0
+    for i, cell in enumerate(points):
+        if rows[-1] and x + cell.width > width:
+            rows.append([])
+            x = 0.0
+        rows[-1].append(i)
+        x += cell.width + CELL_GAP
+    spots: Spots = [(0.0, 0.0)] * len(points)
+    y = used_w = 0.0
+    for row in rows:
+        anchor = max(points[i].anchor for i in row)
+        x = 0.0
+        for i in row:
+            spots[i] = (x, y + anchor - points[i].anchor)
+            x = _snap(x + points[i].width + CELL_GAP)
+        used_w = max(used_w, x - CELL_GAP)
+        y = _snap(y + anchor + max(points[i].height - points[i].anchor for i in row) + CELL_GAP)
+    return spots, used_w, y - CELL_GAP
+
+
+def _point_strip(points: list[Cell]) -> Cell:
+    """One-pin parts in one row, as one cell (an unframed sheet)."""
+    spots, w, h = _point_rows(points, math.inf)
+
+    def draw(sheet: Sheet, x: float, y: float) -> None:
+        for cell, (cx, cy) in zip(points, spots, strict=True):
+            cell.draw(sheet, x + cx, y + cy)
+
+    return Cell(_snap(w), _snap(h), draw)
+
+
+def _layouts(block: Block) -> list[tuple[Spots, float, float]]:
+    """Ways to lay out a block's cells (:func:`_packings`; spots in the order of ``block.cells`` +
+    ``block.points``), the one-pin parts in rows along the bottom edge of each, as wide as it."""
+    dims = [(c.width, c.height) for c in block.cells]
+    packings = _packings(dims, math.inf, math.inf) if dims else [([], 0.0, 0.0)]
+    if not block.points:
+        return packings
+    out = []
+    for spots, w, h in packings:
+        row_spots, row_w, row_h = _point_rows(block.points, w if dims else math.inf)
+        top = _snap(h + CELL_GAP) if dims else 0.0
+        out.append(([*spots, *((x, top + y) for x, y in row_spots)], max(w, row_w), top + row_h))
+    return out
+
+
+def _framed(block: Block) -> Cell:
+    """A sub-block as one cell: its cells packed (the least area among not too stretched shapes),
+    framed, its title on top."""
+    title_w = len(block.title) * SUB_TITLE * 0.9
+    head = _snap(2 * SUB_TITLE)  # the cells stay on the connection grid
+    packings = _layouts(block)
+
+    def score(p: tuple[Spots, float, float]) -> tuple[bool, float]:
+        w, h = max(p[1], title_w) + 2 * BLOCK_PAD, p[2] + 2 * BLOCK_PAD + head
+        return max(w / h, h / w) > 2.5, w * h
+
+    spots, w, h = min(packings, key=score)
+    width, height = _snap(max(w, title_w) + 2 * BLOCK_PAD), _snap(h + 2 * BLOCK_PAD + head)
+
+    def draw(sheet: Sheet, x: float, y: float) -> None:
+        sheet.frame(x, y, x + width, y + height)
+        sheet.text(block.title, x + BLOCK_PAD, y + BLOCK_PAD + SUB_TITLE, SUB_TITLE)
+        for cell, (cx, cy) in zip([*block.cells, *block.points], spots, strict=True):
+            cell.draw(sheet, x + BLOCK_PAD + cx, y + BLOCK_PAD + head + cy)
+
+    return Cell(width, height, draw)
 
 
 Shape = tuple[list[tuple[float, float]], float, float]  # a block's cell spots, frame width, frame height
@@ -1827,7 +2125,71 @@ def _library_symbols(
 
 def connectivity_errors(text: str, parts: list[Part]) -> list[str]:
     """Nets the drawn schematic splits or joins, compared with the netlist (empty: it matches)."""
-    sch = sexpr.loads(text)
+    find, pins, _ = _sheet_connectivity(sexpr.loads(text))
+    group_of: dict[str, set[object]] = {}
+    for part in parts:
+        for pin in part.pins:
+            if pin.net and (part.name, pin.number) in pins:
+                group_of.setdefault(pin.net, set()).add(find((part.name, pin.number)))
+    errors = [f"{net} split" for net, groups in group_of.items() if len(groups) > 1]
+    owner: dict[object, str] = {}
+    for net, groups in group_of.items():
+        for g in groups:
+            if g in owner:
+                errors.append(f"{owner[g]} joined to {net}")
+            owner[g] = net
+    for part in parts:  # an unconnected pin touched by a net
+        for pin in part.pins:
+            if not pin.net and (part.name, pin.number) in pins and find((part.name, pin.number)) in owner:
+                errors.append(f"{part.name} pin {pin.number} on {owner[find((part.name, pin.number))]}")
+    return errors
+
+
+def sheet_net_names(sch: list[sexpr.Node]) -> dict[tuple[str, str], str]:
+    """(reference, pin number) -> the net name KiCad gives the pin's net on this sheet: its label's (or
+    rail symbol's) name, else KiCad's own name for an unlabelled net, ``Net-(<ref>-<pin name>)`` of
+    the pin sorting first (``-Pad<number>`` for an unnamed pin or one whose name repeats in its symbol).
+    Pins on no wire / label / other pin are left out."""
+    find, pins, named = _sheet_connectivity(sch)
+    lib = sexpr.child(sch, "lib_symbols")
+    pin_names: dict[str, dict[str, str]] = {}
+    for sym in [] if lib is None else sexpr.children(lib, "symbol"):
+        lib_pins = symlib.pins_of(sym)
+        counts: dict[str, int] = {}
+        for p in lib_pins:
+            counts[p.name] = counts.get(p.name, 0) + 1
+        pin_names[str(sym[1])] = {
+            p.number: f"Pad{p.number}" if p.name in {"", "~"} else p.name + (f"-Pad{p.number}" if counts[p.name] > 1 else "")
+            for p in lib_pins
+        }  # fmt: skip
+    lib_of = {
+        sexpr.property_value(s, "Reference"): str(lib_id[1])
+        for s in sexpr.children(sch, "symbol")
+        if (lib_id := sexpr.child(s, "lib_id")) is not None
+    }
+    members: dict[object, list[tuple[str, str]]] = {}
+    for pin in pins:
+        members.setdefault(find(pin), []).append(pin)
+    out = {}
+    for group, group_pins in members.items():
+        if group in named:
+            name = named[group]
+        elif len(group_pins) > 1:
+            name = min(
+                f"Net-({ref}-{pin_names.get(lib_of.get(ref) or '', {}).get(num, f'Pad{num}')})"
+                for ref, num in group_pins
+            )
+        else:
+            continue
+        out.update(dict.fromkeys(group_pins, name))
+    return out
+
+
+def _sheet_connectivity(
+    sch: list[sexpr.Node],
+) -> tuple[Callable[[object], object], dict[tuple[str, str], None], dict[object, str]]:
+    """Union-find over a sheet's wires, labels, rail symbols and pins (joined as KiCad joins them):
+    ``find``, the symbol pins, and the net name of each group a label or rail symbol names."""
     parent: dict[object, object] = {}
 
     def find(a: object) -> object:
@@ -1860,7 +2222,7 @@ def connectivity_errors(text: str, parts: list[Part]) -> list[str]:
     values = {
         sexpr.property_value(s, "Reference"): sexpr.property_value(s, "Value") for s in sexpr.children(sch, "symbol")
     }
-    pins: dict[tuple[str, str], object] = {}
+    pins: dict[tuple[str, str], None] = {}
     for (ref, number), (x, y) in fixes._pin_positions(sch).items():
         point = (round(x, 3), round(y, 3))
         points.append(point)
@@ -1884,23 +2246,8 @@ def connectivity_errors(text: str, parts: list[Part]) -> list[str]:
         for lo, hi in horizontal.get(py, []):
             if lo < px < hi:
                 union((px, py), (lo, py))
-    group_of: dict[str, set[object]] = {}
-    for part in parts:
-        for pin in part.pins:
-            if pin.net and (part.name, pin.number) in pins:
-                group_of.setdefault(pin.net, set()).add(find((part.name, pin.number)))
-    errors = [f"{net} split" for net, groups in group_of.items() if len(groups) > 1]
-    owner: dict[object, str] = {}
-    for net, groups in group_of.items():
-        for g in groups:
-            if g in owner:
-                errors.append(f"{owner[g]} joined to {net}")
-            owner[g] = net
-    for part in parts:  # an unconnected pin touched by a net
-        for pin in part.pins:
-            if not pin.net and (part.name, pin.number) in pins and find((part.name, pin.number)) in owner:
-                errors.append(f"{part.name} pin {pin.number} on {owner[find((part.name, pin.number))]}")
-    return errors
+    nets = {find(item): str(item[1]) for item in list(parent) if isinstance(item, tuple) and item[:1] == ("net",)}
+    return find, pins, nets
 
 
 def generate(circuit_json: Path, stem: str, source: Path | None = None, library: symlib.Library | None = None) -> str:
@@ -1954,22 +2301,32 @@ def _render(
     source: Path | None,
 ) -> str:
     rails = _rails(circuit, parts)
-    section_of = sections(source)
+    section_of = blocks_of(source, [p.name for p in parts])
     _adopt_decoupling(parts, section_of, rails)
-    titles: list[str] = []
+    keys: list[str] = []
     for part in parts:
         section_of.setdefault(part.name, "")
-        if section_of[part.name] not in titles:
-            titles.append(section_of[part.name])
+        if section_of[part.name] not in keys:
+            keys.append(section_of[part.name])
     net_blocks: dict[str, set[str]] = {}
     for part in parts:
         for pin in part.pins:
             if pin.net:
                 net_blocks.setdefault(pin.net, set()).add(section_of[part.name])
     global_nets = {n for n, b in net_blocks.items() if len(b) > 1 and n not in rails}
+    loose = _loose(circuit, parts) - rails - global_nets
 
     sheet = Sheet(stem, global_nets, _negative(rails, parts))
-    blocks = [Block(t, [p for p in parts if section_of[p.name] == t], rails, global_nets, symbols) for t in titles]
+    titles = list(dict.fromkeys(k.split(BLOCK_SEP)[0] for k in keys))
+    blocks = []
+    for t in titles:  # a section's own parts, then a framed sub-block per sub-component instance in it
+        block = Block(t, [p for p in parts if section_of[p.name] == t], rails, global_nets, symbols, loose)
+        for k in keys:
+            if k.startswith(t + BLOCK_SEP):
+                sub = Block(k.split(BLOCK_SEP, 1)[1], [p for p in parts if section_of[p.name] == k], rails,
+                            global_nets, symbols, loose)  # fmt: skip
+                block.cells.append(_framed(sub))
+        blocks.append(block)
     framed = len(blocks) > 1 or bool(titles and titles[0])
     pad = BLOCK_PAD if framed else 0.0
     head = 2 * TITLE if framed else 0.0
@@ -1977,9 +2334,8 @@ def _render(
         shapes = []
         for block in blocks:
             title_w = len(block.title or "other") * TITLE * 0.9  # the frame holds its title
-            dims = [(c.width, c.height) for c in block.cells]
             options: dict[tuple[float, float], Spots] = {}
-            for spots, w, h in _packings(dims, math.inf, math.inf):
+            for spots, w, h in _layouts(block):
                 options.setdefault((_snap(max(w, title_w) + 2 * pad), _snap(h + 2 * pad + head)), spots)
             shapes.append(_shape_choices(options))
         choice, origins = _arrange(shapes)
@@ -1988,12 +2344,13 @@ def _render(
             bx, by = bx + SHEET_MARGIN, by + SHEET_MARGIN
             sheet.frame(bx, by, bx + w, by + h)
             sheet.text(block.title or "other", bx + pad, by + pad + TITLE, TITLE)
-            for cell, (cx, cy) in zip(block.cells, spots, strict=True):
+            for cell, (cx, cy) in zip([*block.cells, *block.points], spots, strict=True):
                 cell.draw(sheet, bx + pad + cx, by + pad + head + cy)
     else:  # no frame: the cells themselves go round the title block, which the drawing centred must clear
         # fit_schematic_sheet places it by its anchor points, not by its texts: should that put texts
         # outside the frame or onto the title block, the room shrinks by that much and it is drawn again
         cells = [c for block in blocks for c in block.cells]
+        cells += [_point_strip(block.points) for block in blocks if block.points]
         # (fit picking a smaller paper than the room's can defeat that: then the try that sticks out least)
         cut = (0.0, 0.0)
         tries: list[tuple[float, int, str]] = []

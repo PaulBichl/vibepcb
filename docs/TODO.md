@@ -17,14 +17,8 @@
   equal the previous attempt's the rest repeats identically (rev C: 4 identical rounds, ~4 min each). Run the
   prune first and skip the attempt when it matches; better, find which step loses the connection.
 - **Schematic improvements** (`schgen.py`; seen on bench-psu rev C, 2026-10-23):
-  - Parts placed by a TSX sub-component (`<Channel>`, `<Controls>`) fall out of their section: the "output
-    channels" block holds only the two op-amps, the ~150 channel / front-panel parts land in one huge untitled
-    block. Group a component's parts under the section of the place it is used, one sub-block per instance
-    (CH1 / CH2).
   - No signal flow: parts are scattered in a grid, almost everything is joined by net labels, hardly any wires.
     Lay out power chains left to right (in -> regulator -> out) and draw short wires to the passives of a pin.
-  - Auto-named nets reach the sheet (`Net-(R125-Pad1)`, `Net-(D15-Pad1)`): name them from the pins they join, or
-    draw a wire instead of a label for two-pin nets.
   - Block titles overflow into the neighbouring block ("MCU ... antenna at the +x edge"); size blocks to their
     title or wrap it.
   - Poor sheet use: A1 with the drawing in the lower two thirds and a lot of empty space; tiny text at print size.
