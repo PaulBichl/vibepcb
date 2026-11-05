@@ -88,6 +88,7 @@ from vibepcb.kicad.fixes.references import (
     _graphic_points,
     _pad_corners,
     _text_box,
+    clip_footprint_silk,
     place_reference_designators,
 )
 from vibepcb.kicad.fixes.reroute import reroute_tracks
@@ -207,6 +208,7 @@ FIXES: dict[str, Fix] = {
     "thermal_spoke_rule": thermal_spoke_rule,
     "router_clearance_tolerance": router_clearance_tolerance,
     "strict_track_rules": strict_track_rules,
+    "clip_footprint_silk": clip_footprint_silk,
     "place_reference_designators": place_reference_designators,
     "fit_schematic_sheet": fit_schematic_sheet,
 }
@@ -302,6 +304,7 @@ __all__ = [
     "apply_routes",
     "apply_rule_profiles",
     "clean_tracks",
+    "clip_footprint_silk",
     "collapse_bend_stubs",
     "complete_netclasses",
     "copper_vias",

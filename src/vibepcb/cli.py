@@ -748,7 +748,7 @@ def cmd_check(board: str, *, strict: bool = False) -> int:
             loaded = fixes.KicadProject.load(project, board)
     corners = fixes.sharp_corners(loaded)
     unpoured = fixes.unpoured_copper_layers(loaded)
-    summary = [str(erc), str(drc), f"Track bends: {len(corners)} sharper than 135 deg"]
+    summary = [str(erc), str(drc), drc.silk_summary(), f"Track bends: {len(corners)} sharper than 135 deg"]
     summary += [
         f"  [error] sharp_corner: {net} bend of {a:.1f} deg @ ({x:.3f}, {y:.3f}) mm" for net, (x, y), a in corners
     ]
