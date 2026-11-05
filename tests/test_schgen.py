@@ -194,7 +194,7 @@ def test_sub_blocks_are_framed(tmp_path: Path) -> None:
 
 
 def test_test_points_stand_in_a_row_at_the_block_bottom(tmp_path: Path) -> None:
-    parts = {
+    parts: dict[str, tuple[str, list[tuple[str, int | None]]]] = {
         **PARTS,
         "TP1": ("simple_test_point", [("pin1", 0)]),  # VCC: a rail
         "TP2": ("simple_test_point", [("pin1", 2)]),  # FB: a label
@@ -218,7 +218,7 @@ def test_test_points_stand_in_a_row_at_the_block_bottom(tmp_path: Path) -> None:
 
 
 def test_unnamed_nets_get_readable_names_and_loose_ones_no_label(tmp_path: Path) -> None:
-    parts = {
+    parts: dict[str, tuple[str, list[tuple[str, int | None]]]] = {
         **PARTS,
         "R4": ("simple_resistor", [("pin1", 1), ("pin2", 5)]),  # OUT - R4 - net 5 - C3 - GND
         "C3": ("simple_capacitor", [("pin1", 5), ("pin2", 3)]),
