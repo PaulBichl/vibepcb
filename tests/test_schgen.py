@@ -193,6 +193,40 @@ def test_sub_blocks_are_framed(tmp_path: Path) -> None:
                 assert abs(v / schgen.HALF - round(v / schgen.HALF)) < 1e-3
 
 
+def test_unnamed_nets_get_readable_names_and_loose_ones_no_label(tmp_path: Path) -> None:
+    parts = {
+        **PARTS,
+        "R4": ("simple_resistor", [("pin1", 1), ("pin2", 5)]),  # OUT - R4 - net 5 - C3 - GND
+        "C3": ("simple_capacitor", [("pin1", 5), ("pin2", 3)]),
+        "R5": ("simple_resistor", [("pin1", 0), ("pin2", 6)]),  # VCC - R5 - net 6 - D2 - GND
+        "D2": ("simple_led", [("anode", 6), ("cathode", 3)]),
+        "RN1": ("simple_chip", [("pin1", 7), ("pin2", None), ("pin3", 3)]),  # resistor array - header pin
+        "J2": ("simple_pin_header", [("pin1", 7), ("pin2", 3)]),
+    }
+    path = _circuit(tmp_path, parts)
+    elements = json.loads(path.read_text())
+    ports = {(e["source_component_id"], e["name"]): e["source_port_id"] for e in elements if e["type"] == "source_port"}
+    comp = {e["name"]: e["source_component_id"] for e in elements if e["type"] == "source_component"}
+    for ref, pin in (("R4", "pin2"), ("R5", "pin2"), ("U2", "SENSE"), ("J2", "pin1")):  # the unnamed nets are traced
+        elements.append({"type": "source_trace", "connected_source_port_ids": [ports[comp[ref], pin]]})
+    path.write_text(json.dumps(elements))
+
+    names = schgen.pin_net_names(elements)
+    assert names["R4", "2"] == names["C3", "1"] == "R4_2"  # no chip / diode pin: after its first pin
+    assert names["D2", "1"] == "D2_A"  # a diode's anode
+    assert names["RN1", "1"] == "J2_1"  # a connector's pin before another chip's numbered one
+    text = schgen.generate(path, "board", None, _no_library(tmp_path))
+    assert "Net-(" not in text
+    labels = {str(n[1]) for n in sexpr.children(sexpr.loads(text), "global_label")}
+    assert "U2_SENSE" in labels  # a chip pin's net keeps its label
+    assert not labels & {"R4_2", "D2_A"}  # two passives joined by wire: no label
+    drawn = schgen.sheet_net_names(sexpr.loads(text))  # KiCad's own names for them (fixes.rename_auto_nets)
+    assert drawn["R4", "2"] == drawn["C3", "1"] == "Net-(C3-pin1)"
+    assert drawn["D2", "1"] == drawn["R5", "2"] == "Net-(D2-anode)"
+    assert drawn["R3", "2"] == "U2_SENSE"
+    assert schgen.connectivity_errors(text, schgen._parts(elements)) == []
+
+
 def test_generate(tmp_path: Path) -> None:
     sch_path = tmp_path / "board.kicad_sch"
     schgen.write(_circuit(tmp_path), sch_path, "board", _source(tmp_path), _no_library(tmp_path))

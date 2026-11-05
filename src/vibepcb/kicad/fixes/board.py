@@ -319,12 +319,18 @@ def apply_escapes(project: KicadProject) -> list[str]:
 def rename_auto_nets(project: KicadProject) -> list[str]:
     """Replace tscircuit's selector-style net names with the schematic's names for them.
 
-    ``schgen`` names an unnamed net after its chip pin (``U1_VREG_1V2``), else KiCad-style
-    ``Net-(R1-Pad2)``; read from ``../raw/<stem>.circuit.json``, without it KiCad-style always.
+    ``schgen`` names an unnamed net after its chip pin (``U1_VREG_1V2``), else after a diode pin
+    (``D4_A``) or its first pin (``R5_2``); read from ``../raw/<stem>.circuit.json``, without it
+    KiCad-style ``Net-(R1-Pad2)`` always. A net the generated schematic leaves unlabelled (two
+    passives joined by a bare wire) takes the name KiCad gives it there (``Net-(C3-pin1)``), so
+    schematic and board agree.
     """
     pcb = project.pcb
     circuit = _raw_circuit(project)
     pin_names = schgen.pin_net_names(json.loads(circuit.read_text(encoding="utf-8"))) if circuit.exists() else {}
+    generator = sexpr.child(project.sch, "generator")
+    if pin_names and generator is not None and str(generator[1]) == "vibepcb":
+        pin_names.update(schgen.sheet_net_names(project.sch))
     first_pad: dict[str, str] = {}  # net name -> "Net-(R1-Pad2)" after its first pad
     schematic: dict[str, str] = {}  # net name -> the schematic's name for it
     for fp in sexpr.children(pcb, "footprint"):

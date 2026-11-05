@@ -11,7 +11,8 @@ so builds always disable it and the schematic comes from here, in well under a s
   the chip's pin pitch stretched to make room; parts no chip reaches start from a labelled net;
 - GND / supply rails end in rail symbols (``fixes.schematic_power_symbols`` makes them power
   symbols); a net is wired once per block and labelled there, every further appearance is a label
-  (double arrow when the net leaves the block); labels always, so KiCad keeps the PCB's net names;
+  (double arrow when the net leaves the block); labels always, so KiCad keeps the PCB's net names,
+  but on an unnamed net of two passives joined by wire (the PCB takes KiCad's name for it then);
 - capacitors between two rails (decoupling) stand at the supply pin of the chip they serve
   (a wire out of the pin, the caps standing on it with GND below); ones no chip takes stand in a
   row at the block end; two parts in series between two rails (LED + resistor) stand as one column;
@@ -32,6 +33,7 @@ from vibepcb.core import sexpr
 from vibepcb.kicad import easyeda, fixes, symlib
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
 GRID = 2.54  # everything sits on the 1.27 mm connection grid
@@ -71,6 +73,7 @@ _POWER_PIN = re.compile(
 )
 _NEGATIVE_PIN = re.compile(r"NEG|^VEE|^VS?-$", re.IGNORECASE)  # a rail on such a pin is a negative supply
 _GENERIC_PIN = re.compile(r"^(pin)?\d+$", re.IGNORECASE)
+_CONNECTOR = re.compile(r"^(J|P|CN|X)\d+$")
 _ANODE = {"a", "anode", "pos"}
 _CATHODE = {"c", "k", "cathode", "neg"}
 TWO_KINDS = {
@@ -141,7 +144,8 @@ def _nets(circuit: list[dict[str, Any]]) -> dict[str, str]:
 
     An unnamed net takes the name of a named trace on it (``<trace name="SD_DQ0">``: rules,
     net classes and diff pairs can then refer to it), else the first chip pin on it with a real
-    pin name (``U1_VREG_1V2``), else KiCad-style after its first pin (``Net-(R5-Pad2)``).
+    pin name (``U1_VREG_1V2``), else a diode's pin (``D4_A`` / ``D4_K``), a chip's numbered pin (a
+    connector: ``J1_12``), its first pin (``R5_2``).
     ``fixes.rename_auto_nets`` gives the PCB nets the same names (via :func:`pin_net_names`), so
     schematic and board agree.
     """
@@ -174,6 +178,38 @@ def _nets(circuit: list[dict[str, Any]]) -> dict[str, str]:
             and not _GENERIC_PIN.match(name)
         )
 
+    def ref(p: dict[str, Any]) -> str:
+        return str(comps.get(p["source_component_id"], {}).get("name", "?"))
+
+    def diode_pin(p: dict[str, Any]) -> str | None:
+        """A diode's / LED's pin as A or K (tscircuit's pin1 = anode), else None."""
+        comp = comps.get(p["source_component_id"], {})
+        name = str(p["name"]).lower()
+        diode = comp.get("ftype") in {"simple_diode", "simple_led"} or (
+            comp.get("ftype") == "simple_chip" and n_ports.get(p["source_component_id"], 0) == 2
+        )
+        if not diode:
+            return None
+        if name in _ANODE or (comp.get("ftype") != "simple_chip" and name == "pin1"):
+            return "A"
+        if name in _CATHODE or (comp.get("ftype") != "simple_chip" and name == "pin2"):
+            return "K"
+        return None
+
+    def candidates(ports: list[dict[str, Any]]) -> list[str]:
+        """Names for an unnamed net, best first: a chip pin with a real name (``U1_VREG_1V2``), a diode's
+        anode / cathode (``D4_A``), a chip's numbered pin (a connector: ``J1_12``), the first pin (``R5_2``)."""
+        names = [f"{ref(p)}_{p['name']}" for p in ports if chip_pin(p)]
+        names += [f"{ref(p)}_{diode_pin(p)}" for p in ports if diode_pin(p)]
+        chips = [
+            p
+            for p in ports
+            if comps.get(p["source_component_id"], {}).get("ftype") == "simple_chip" or _CONNECTOR.match(ref(p))
+        ]
+        chips.sort(key=lambda p: not _CONNECTOR.match(ref(p)))  # a connector pin first: J1_12, not RN1_4
+        names += [f"{ref(p)}_{p.get('pin_number', p['name'])}" for p in chips]
+        return [*names, *(f"{ref(p)}_{p.get('pin_number', p['name'])}" for p in ports)]
+
     taken = set(named.values())
     out = {}
     for key, ports in by_key.items():
@@ -182,13 +218,8 @@ def _nets(circuit: list[dict[str, Any]]) -> dict[str, str]:
         first = ports[0]
         name = named.get(key)
         if name is None:
-            pin = next((p for p in ports if chip_pin(p)), None)
-            ref = comps.get(first["source_component_id"], {}).get("name", "?")
-            name = f"Net-({ref}-Pad{first.get('pin_number', '?')})"
-            if pin is not None:
-                candidate = f"{comps[pin['source_component_id']]['name']}_{pin['name']}"
-                if candidate not in taken:
-                    name = candidate
+            free = [n for n in candidates(ports) if n not in taken]
+            name = free[0] if free else f"Net-({ref(first)}-Pad{first.get('pin_number', '?')})"
             taken.add(name)
         for p in ports:
             out[p["source_port_id"]] = name
@@ -213,6 +244,19 @@ def pin_net_names(circuit: list[dict[str, Any]]) -> dict[tuple[str, str], str]:
         and e["source_port_id"] in nets
         and e["source_component_id"] in comps
     }
+
+
+def _loose(circuit: list[dict[str, Any]], parts: list[Part]) -> set[str]:
+    """Nets the board leaves unnamed that join just two pins of two-terminal parts (R - C, LED - R):
+    where the drawing joins those two pins by wire it needs no label (see Block._label_nodes)."""
+    named = {str(e["name"]) for e in circuit if e.get("type") == "source_net"}
+    named |= {str(e["name"]) for e in circuit if e.get("type") == "source_trace" and _user_trace_name(e)}
+    pins: dict[str, list[bool]] = {}
+    for part in parts:
+        for pin in part.pins:
+            if pin.net:
+                pins.setdefault(pin.net, []).append(part.two)
+    return {n for n, two in pins.items() if len(two) == 2 and all(two) and n not in named}
 
 
 def _value(comp: dict[str, Any]) -> str:
@@ -1119,9 +1163,11 @@ class Block:
         rails: set[str],
         global_nets: set[str],
         symbols: dict[str, symlib.LibSymbol] | None = None,
+        loose: set[str] | None = None,
     ) -> None:
         self.title, self.parts, self.rails, self.global_nets = title, parts, rails, global_nets
         self.symbols = symbols or {}
+        self.loose = loose or set()  # nets drawn as a bare wire where they join their two pins (see _loose)
         self.ctx: str | None = None  # chip whose trees are being built
         self.wired: set[str] = set()
         self.owner: dict[str, str] = {}
@@ -1269,7 +1315,8 @@ class Block:
                             counts[pin.net] = counts.get(pin.net, 0) + 1
             net = max(counts, key=lambda n: (counts[n], n not in self.wired))
             root = self._build(net)
-            root.entries.insert(0, Label(net))
+            if net not in self.loose or len(root.entries) < 2:  # a loose net's two parts: joined by the trunk
+                root.entries.insert(0, Label(net))
             roots.append((self.ctx, root))
         bank = [p for p in self.parts if p.two and p.name not in self.placed]
         for row in attached:
@@ -1310,13 +1357,16 @@ class Block:
     def _label_nodes(self, tops: list[End]) -> None:
         """Label every wired net: KiCad names an unlabelled one after a pin of its own choice,
         which no longer matches the PCB's net name (parity, "Update PCB from Schematic").
-        The label goes below the node's parts, so a chain pin - R - node - C runs straight on."""
+        The label goes below the node's parts, so a chain pin - R - node - C runs straight on.
+        A loose net (two passives' pins, nothing else) joined here by the wire alone stays bare:
+        ``fixes.rename_auto_nets`` gives the PCB net KiCad's name for it (:func:`sheet_net_names`)."""
 
         def visit(item: End | Branch) -> None:
             if isinstance(item, Branch):
                 visit(item.end)
             elif isinstance(item, Node):
-                if item.net not in self.rails and not any(isinstance(e, Label) for e in item.entries):
+                both = item.net in self.loose and any(isinstance(e, Branch) for e in item.entries)
+                if item.net not in self.rails and not both and not any(isinstance(e, Label) for e in item.entries):
                     item.entries.append(Label(item.net))
                 for e in item.entries:
                     visit(e)
@@ -1695,7 +1745,7 @@ class Block:
         top, bottom = sorted(rungs, key=lambda b: -sheet_rank.rank(b.end.net if isinstance(b.end, Rail) else None))
         head = 3 * GRID
         text = max(_part_text(b.part) for b in rungs) + GRID + HALF
-        reach = _width(Label(net), self.global_nets)
+        reach = 0.0 if net in self.loose else _width(Label(net), self.global_nets)
         width = _snap(GRID + max(text, reach, _text_w(top.far.net or "") / 2 + GRID))
         height = _snap(2 * head + 2 * TWO_LEN)
 
@@ -1708,6 +1758,8 @@ class Block:
             sheet.two(top.part, top.far, f, 0, 0)
             sheet.two(bottom.part, bottom.near, f, TWO_LEN, 0)
             sheet.rail(bottom.end.net, *f.pt(2 * TWO_LEN, 0), "down")
+            if net in self.loose:
+                return  # the two parts meet pin to pin (see _label_nodes)
             sheet.junction(cx, y0 + TWO_LEN)
             sheet.wire(cx, y0 + TWO_LEN, cx + STUB, y0 + TWO_LEN)
             sheet.label(net, cx + STUB, y0 + TWO_LEN, "right")
@@ -1997,7 +2049,71 @@ def _library_symbols(
 
 def connectivity_errors(text: str, parts: list[Part]) -> list[str]:
     """Nets the drawn schematic splits or joins, compared with the netlist (empty: it matches)."""
-    sch = sexpr.loads(text)
+    find, pins, _ = _sheet_connectivity(sexpr.loads(text))
+    group_of: dict[str, set[object]] = {}
+    for part in parts:
+        for pin in part.pins:
+            if pin.net and (part.name, pin.number) in pins:
+                group_of.setdefault(pin.net, set()).add(find((part.name, pin.number)))
+    errors = [f"{net} split" for net, groups in group_of.items() if len(groups) > 1]
+    owner: dict[object, str] = {}
+    for net, groups in group_of.items():
+        for g in groups:
+            if g in owner:
+                errors.append(f"{owner[g]} joined to {net}")
+            owner[g] = net
+    for part in parts:  # an unconnected pin touched by a net
+        for pin in part.pins:
+            if not pin.net and (part.name, pin.number) in pins and find((part.name, pin.number)) in owner:
+                errors.append(f"{part.name} pin {pin.number} on {owner[find((part.name, pin.number))]}")
+    return errors
+
+
+def sheet_net_names(sch: list[sexpr.Node]) -> dict[tuple[str, str], str]:
+    """(reference, pin number) -> the net name KiCad gives the pin's net on this sheet: its label's (or
+    rail symbol's) name, else KiCad's own name for an unlabelled net, ``Net-(<ref>-<pin name>)`` of
+    the pin sorting first (``-Pad<number>`` for an unnamed pin or one whose name repeats in its symbol).
+    Pins on no wire / label / other pin are left out."""
+    find, pins, named = _sheet_connectivity(sch)
+    lib = sexpr.child(sch, "lib_symbols")
+    pin_names: dict[str, dict[str, str]] = {}
+    for sym in [] if lib is None else sexpr.children(lib, "symbol"):
+        lib_pins = symlib.pins_of(sym)
+        counts: dict[str, int] = {}
+        for p in lib_pins:
+            counts[p.name] = counts.get(p.name, 0) + 1
+        pin_names[str(sym[1])] = {
+            p.number: f"Pad{p.number}" if p.name in {"", "~"} else p.name + (f"-Pad{p.number}" if counts[p.name] > 1 else "")
+            for p in lib_pins
+        }  # fmt: skip
+    lib_of = {
+        sexpr.property_value(s, "Reference"): str(lib_id[1])
+        for s in sexpr.children(sch, "symbol")
+        if (lib_id := sexpr.child(s, "lib_id")) is not None
+    }
+    members: dict[object, list[tuple[str, str]]] = {}
+    for pin in pins:
+        members.setdefault(find(pin), []).append(pin)
+    out = {}
+    for group, group_pins in members.items():
+        if group in named:
+            name = named[group]
+        elif len(group_pins) > 1:
+            name = min(
+                f"Net-({ref}-{pin_names.get(lib_of.get(ref) or '', {}).get(num, f'Pad{num}')})"
+                for ref, num in group_pins
+            )
+        else:
+            continue
+        out.update(dict.fromkeys(group_pins, name))
+    return out
+
+
+def _sheet_connectivity(
+    sch: list[sexpr.Node],
+) -> tuple[Callable[[object], object], dict[tuple[str, str], None], dict[object, str]]:
+    """Union-find over a sheet's wires, labels, rail symbols and pins (joined as KiCad joins them):
+    ``find``, the symbol pins, and the net name of each group a label or rail symbol names."""
     parent: dict[object, object] = {}
 
     def find(a: object) -> object:
@@ -2030,7 +2146,7 @@ def connectivity_errors(text: str, parts: list[Part]) -> list[str]:
     values = {
         sexpr.property_value(s, "Reference"): sexpr.property_value(s, "Value") for s in sexpr.children(sch, "symbol")
     }
-    pins: dict[tuple[str, str], object] = {}
+    pins: dict[tuple[str, str], None] = {}
     for (ref, number), (x, y) in fixes._pin_positions(sch).items():
         point = (round(x, 3), round(y, 3))
         points.append(point)
@@ -2054,23 +2170,8 @@ def connectivity_errors(text: str, parts: list[Part]) -> list[str]:
         for lo, hi in horizontal.get(py, []):
             if lo < px < hi:
                 union((px, py), (lo, py))
-    group_of: dict[str, set[object]] = {}
-    for part in parts:
-        for pin in part.pins:
-            if pin.net and (part.name, pin.number) in pins:
-                group_of.setdefault(pin.net, set()).add(find((part.name, pin.number)))
-    errors = [f"{net} split" for net, groups in group_of.items() if len(groups) > 1]
-    owner: dict[object, str] = {}
-    for net, groups in group_of.items():
-        for g in groups:
-            if g in owner:
-                errors.append(f"{owner[g]} joined to {net}")
-            owner[g] = net
-    for part in parts:  # an unconnected pin touched by a net
-        for pin in part.pins:
-            if not pin.net and (part.name, pin.number) in pins and find((part.name, pin.number)) in owner:
-                errors.append(f"{part.name} pin {pin.number} on {owner[find((part.name, pin.number))]}")
-    return errors
+    nets = {find(item): str(item[1]) for item in list(parent) if isinstance(item, tuple) and item[:1] == ("net",)}
+    return find, pins, nets
 
 
 def generate(circuit_json: Path, stem: str, source: Path | None = None, library: symlib.Library | None = None) -> str:
@@ -2137,16 +2238,17 @@ def _render(
             if pin.net:
                 net_blocks.setdefault(pin.net, set()).add(section_of[part.name])
     global_nets = {n for n, b in net_blocks.items() if len(b) > 1 and n not in rails}
+    loose = _loose(circuit, parts) - rails - global_nets
 
     sheet = Sheet(stem, global_nets, _negative(rails, parts))
     titles = list(dict.fromkeys(k.split(BLOCK_SEP)[0] for k in keys))
     blocks = []
     for t in titles:  # a section's own parts, then a framed sub-block per sub-component instance in it
-        block = Block(t, [p for p in parts if section_of[p.name] == t], rails, global_nets, symbols)
+        block = Block(t, [p for p in parts if section_of[p.name] == t], rails, global_nets, symbols, loose)
         for k in keys:
             if k.startswith(t + BLOCK_SEP):
                 sub = Block(k.split(BLOCK_SEP, 1)[1], [p for p in parts if section_of[p.name] == k], rails,
-                            global_nets, symbols)  # fmt: skip
+                            global_nets, symbols, loose)  # fmt: skip
                 block.cells.append(_framed(sub))
         blocks.append(block)
     framed = len(blocks) > 1 or bool(titles and titles[0])
