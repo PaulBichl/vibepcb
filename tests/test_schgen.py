@@ -193,6 +193,30 @@ def test_sub_blocks_are_framed(tmp_path: Path) -> None:
                 assert abs(v / schgen.HALF - round(v / schgen.HALF)) < 1e-3
 
 
+def test_test_points_stand_in_a_row_at_the_block_bottom(tmp_path: Path) -> None:
+    parts = {
+        **PARTS,
+        "TP1": ("simple_test_point", [("pin1", 0)]),  # VCC: a rail
+        "TP2": ("simple_test_point", [("pin1", 2)]),  # FB: a label
+        "TP3": ("simple_test_point", [("pin1", 3)]),  # GND
+    }
+    source = tmp_path / "index.circuit.tsx"
+    source.write_text(TSX.replace("<R name=\"R1\"", '<testpoint name="TP1" /> <testpoint name="TP2" />'
+                                  ' <testpoint name="TP3" /> <R name="R1"'), encoding="utf-8")  # fmt: skip
+    text = schgen.generate(_circuit(tmp_path, parts), "board", source, _no_library(tmp_path))
+    sch = sexpr.loads(text)
+    pins = fixes._pin_positions(sch)
+    rows = {pins["TP1", "1"][1], pins["TP2", "1"][1], pins["TP3", "1"][1]}
+    assert len(rows) == 1  # one row, pins (and labels) level
+    below = rows.pop()
+    for ref in ("U1", "R1", "R2", "C1", "C2"):  # the rest of the "power" block stands above it
+        assert all(y < below for (r, _), (_, y) in pins.items() if r == ref)
+    xs = sorted((pins[tp, "1"][0], tp) for tp in ("TP1", "TP2", "TP3"))
+    assert [tp for _, tp in xs] == ["TP1", "TP2", "TP3"]  # in source order
+    assert _power_at(sch, (pins["TP3", "1"][0] - schgen.STUB, below)) == ("GND", 0)  # a stub off the pin, down
+    assert schgen.connectivity_errors(text, schgen._parts(json.loads(_circuit(tmp_path, parts).read_text()))) == []
+
+
 def test_unnamed_nets_get_readable_names_and_loose_ones_no_label(tmp_path: Path) -> None:
     parts = {
         **PARTS,

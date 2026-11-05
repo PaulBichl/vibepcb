@@ -16,6 +16,7 @@ so builds always disable it and the schematic comes from here, in well under a s
 - capacitors between two rails (decoupling) stand at the supply pin of the chip they serve
   (a wire out of the pin, the caps standing on it with GND below); ones no chip takes stand in a
   row at the block end; two parts in series between two rails (LED + resistor) stand as one column;
+- one-pin parts (test points) stand in a row along the bottom edge of their block, pins level;
 - rail symbols point GND down / supplies up wherever that room is free (``Sheet.finish``).
 """
 
@@ -1145,6 +1146,7 @@ class Cell:
     width: float
     height: float
     draw: Any
+    anchor: float = 0.0  # a one-pin part's pin row below the top (rows of them line up on it)
 
 
 _OUTWARD = {0: "left", 180: "right", 90: "down", 270: "up"}  # library pin angle -> side it leaves on
@@ -1173,6 +1175,7 @@ class Block:
         self.owner: dict[str, str] = {}
         self.placed: set[str] = set()
         self.on_net: dict[str, list[tuple[Part, Pin]]] = {}
+        self.points: list[Cell] = []  # one-pin parts (test points, touch pads): a row at the bottom edge
         for part in parts:
             if part.two:
                 for pin in part.pins:
@@ -1327,16 +1330,19 @@ class Block:
         for chip, row in zip(chips, attached, strict=True):
             own: list[Cell] = []
             satellites: list[Node] = [r for owner, r in roots if owner == chip.name]
+            extra = [self._root_cell(r) for r in satellites]
+            extra += [self._bank_cell(p) for p in bank if self.owner.get(p.name) == chip.name]
             if chip.name in self.symbols:
                 sym = self.symbols[chip.name]
                 for unit in sorted(sym.units()) or [1]:  # each unit of a dual op-amp its own triangle
                     own.append(self._lib_cell(chip, row, sym, satellites, unit))
             elif len(chip.pins) == 1:
+                if not extra:  # a test point: in the row along the block's bottom edge (see _layouts)
+                    self.points.append(self._point_cell(chip, row[0]))
+                    continue
                 own.append(self._point_cell(chip, row[0]))
             else:
                 own.append(self._chip_cell(chip, row))
-            extra = [self._root_cell(r) for r in satellites]
-            extra += [self._bank_cell(p) for p in bank if self.owner.get(p.name) == chip.name]
             cells.append(_group(own, extra))  # the chip with everything it keeps, as one piece
         cells += [self._root_cell(r) for owner, r in roots if owner not in {c.name for c in chips}]
         cells += [self._bank_cell(p) for p in bank if self.owner.get(p.name) not in {c.name for c in chips}]
@@ -1397,7 +1403,13 @@ class Block:
         )
         above, below = _extent(attached) if attached is not None else (0.0, 0.0)
         above, below = max(above, 2 * GRID), max(below, GRID)
-        left = _snap(_width(attached, self.global_nets))
+        # a rail stands off the pin by a stub and has room to turn (supply up, GND down, Sheet.finish)
+        stub = (
+            _snap(max(STUB, _rail_box(attached.net, 0, 0, "up")[2] + 0.6), HALF) if isinstance(attached, Rail) else 0.0
+        )
+        if stub:
+            above = below = max(above, RAIL_TEXT + 2 * HALF)
+        left = _snap(_width(attached, self.global_nets) + stub)
         text = max(_text_w(chip.name), _text_w(chip.value if chip.value != chip.name else ""))
         width = left + PIN_LENGTH + 2 * r + GRID + text
 
@@ -1410,9 +1422,10 @@ class Block:
             sheet.points += [(x, py - above), (tx + text, py + below)]
             sheet.box(px + PIN_LENGTH, py - HALF, tx + text, py + HALF)
             sheet.segments.append((px, py, px + PIN_LENGTH, py))
-            sheet.end(attached, Frame(px, py, "left"))
+            sheet.wire(px - stub, py, px, py)
+            sheet.end(attached, Frame(px - stub, py, "left"))
 
-        return Cell(_snap(width), _snap(above + below), draw)
+        return Cell(_snap(width), _snap(above + below), draw, _snap(above, HALF))
 
     def _chip_cell(self, chip: Part, attached: list[End]) -> Cell:
         pairs = sorted(zip(chip.pins, attached, strict=True), key=lambda pa: self._pin_rank(pa[0]))
@@ -1799,13 +1812,62 @@ def _group(main: list[Cell], extra: list[Cell]) -> Cell:
 SUB_TITLE = 2.0  # title font of a sub-block (a sub-component instance inside its section's block)
 
 
+def _point_rows(points: list[Cell], width: float) -> tuple[Spots, float, float]:
+    """One-pin parts side by side in rows up to ``width`` wide, each row's pins (and so their labels)
+    on one line; returns their top-left corners and the rows' width / height."""
+    rows: list[list[int]] = [[]]
+    x = 0.0
+    for i, cell in enumerate(points):
+        if rows[-1] and x + cell.width > width:
+            rows.append([])
+            x = 0.0
+        rows[-1].append(i)
+        x += cell.width + CELL_GAP
+    spots: Spots = [(0.0, 0.0)] * len(points)
+    y = used_w = 0.0
+    for row in rows:
+        anchor = max(points[i].anchor for i in row)
+        x = 0.0
+        for i in row:
+            spots[i] = (x, y + anchor - points[i].anchor)
+            x = _snap(x + points[i].width + CELL_GAP)
+        used_w = max(used_w, x - CELL_GAP)
+        y = _snap(y + anchor + max(points[i].height - points[i].anchor for i in row) + CELL_GAP)
+    return spots, used_w, y - CELL_GAP
+
+
+def _point_strip(points: list[Cell]) -> Cell:
+    """One-pin parts in one row, as one cell (an unframed sheet)."""
+    spots, w, h = _point_rows(points, math.inf)
+
+    def draw(sheet: Sheet, x: float, y: float) -> None:
+        for cell, (cx, cy) in zip(points, spots, strict=True):
+            cell.draw(sheet, x + cx, y + cy)
+
+    return Cell(_snap(w), _snap(h), draw)
+
+
+def _layouts(block: Block) -> list[tuple[Spots, float, float]]:
+    """Ways to lay out a block's cells (:func:`_packings`; spots in the order of ``block.cells`` +
+    ``block.points``), the one-pin parts in rows along the bottom edge of each, as wide as it."""
+    dims = [(c.width, c.height) for c in block.cells]
+    packings = _packings(dims, math.inf, math.inf) if dims else [([], 0.0, 0.0)]
+    if not block.points:
+        return packings
+    out = []
+    for spots, w, h in packings:
+        row_spots, row_w, row_h = _point_rows(block.points, w if dims else math.inf)
+        top = _snap(h + CELL_GAP) if dims else 0.0
+        out.append(([*spots, *((x, top + y) for x, y in row_spots)], max(w, row_w), top + row_h))
+    return out
+
+
 def _framed(block: Block) -> Cell:
     """A sub-block as one cell: its cells packed (the least area among not too stretched shapes),
     framed, its title on top."""
-    dims = [(c.width, c.height) for c in block.cells]
     title_w = len(block.title) * SUB_TITLE * 0.9
     head = _snap(2 * SUB_TITLE)  # the cells stay on the connection grid
-    packings = _packings(dims, math.inf, math.inf) if dims else [([], 0.0, 0.0)]
+    packings = _layouts(block)
 
     def score(p: tuple[Spots, float, float]) -> tuple[bool, float]:
         w, h = max(p[1], title_w) + 2 * BLOCK_PAD, p[2] + 2 * BLOCK_PAD + head
@@ -1817,7 +1879,7 @@ def _framed(block: Block) -> Cell:
     def draw(sheet: Sheet, x: float, y: float) -> None:
         sheet.frame(x, y, x + width, y + height)
         sheet.text(block.title, x + BLOCK_PAD, y + BLOCK_PAD + SUB_TITLE, SUB_TITLE)
-        for cell, (cx, cy) in zip(block.cells, spots, strict=True):
+        for cell, (cx, cy) in zip([*block.cells, *block.points], spots, strict=True):
             cell.draw(sheet, x + BLOCK_PAD + cx, y + BLOCK_PAD + head + cy)
 
     return Cell(width, height, draw)
@@ -2258,9 +2320,8 @@ def _render(
         shapes = []
         for block in blocks:
             title_w = len(block.title or "other") * TITLE * 0.9  # the frame holds its title
-            dims = [(c.width, c.height) for c in block.cells]
             options: dict[tuple[float, float], Spots] = {}
-            for spots, w, h in _packings(dims, math.inf, math.inf):
+            for spots, w, h in _layouts(block):
                 options.setdefault((_snap(max(w, title_w) + 2 * pad), _snap(h + 2 * pad + head)), spots)
             shapes.append(_shape_choices(options))
         choice, origins = _arrange(shapes)
@@ -2269,12 +2330,13 @@ def _render(
             bx, by = bx + SHEET_MARGIN, by + SHEET_MARGIN
             sheet.frame(bx, by, bx + w, by + h)
             sheet.text(block.title or "other", bx + pad, by + pad + TITLE, TITLE)
-            for cell, (cx, cy) in zip(block.cells, spots, strict=True):
+            for cell, (cx, cy) in zip([*block.cells, *block.points], spots, strict=True):
                 cell.draw(sheet, bx + pad + cx, by + pad + head + cy)
     else:  # no frame: the cells themselves go round the title block, which the drawing centred must clear
         # fit_schematic_sheet places it by its anchor points, not by its texts: should that put texts
         # outside the frame or onto the title block, the room shrinks by that much and it is drawn again
         cells = [c for block in blocks for c in block.cells]
+        cells += [_point_strip(block.points) for block in blocks if block.points]
         # (fit picking a smaller paper than the room's can defeat that: then the try that sticks out least)
         cut = (0.0, 0.0)
         tries: list[tuple[float, int, str]] = []
