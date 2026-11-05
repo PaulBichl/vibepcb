@@ -306,7 +306,7 @@ def buck(l_x: float, *, layer: str = "bottom") -> list[dict[str, Any]]:
     ind = ("L1", "simple_inductor", {"inductance": 6.8e-6}, (l_x, 0.5), (3, 3), [
         ("pin1", "SW", (sw_x, 0.5)), ("pin2", "+5V", (l_x - 1.5, 0.5)),
     ])  # fmt: skip
-    load = (
+    load: tuple[Any, ...] = (
         "U9",
         "simple_chip",
         {},
