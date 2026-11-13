@@ -53,6 +53,8 @@ LONG_PIN_ROW = 12  # on longer pin rows (MCUs) a tree must not push its neighbou
 CELL_GAP = 5.08
 BLOCK_PAD = 2.54
 TITLE = 2.54  # block title font
+NOTE = 1.5  # font of a block's note lines (``{/* note: ... */}`` under the section header)
+NOTE_LINE = 2.54  # their line pitch
 SHEET_MARGIN = 15.24
 INTERNAL_PORT = "_internal_"
 NAMESPACE = uuid.UUID("5b0e6c3e-6f43-4a51-9f7b-2c3f6d1e8a10")
@@ -299,6 +301,25 @@ def _parts(circuit: list[dict[str, Any]]) -> list[Part]:
         pos = (float(center["x"]), float(center["y"])) if center else None
         parts.append(Part(str(comp["name"]), _value(comp), kind, pins, str(lcsc), pos))
     return parts
+
+
+_NOTE = re.compile(r"\{/\*\s*note:\s*(.*?)\s*\*/\}")
+
+
+def notes_of(source: Path | None) -> dict[str, list[str]]:
+    """Section title -> its note lines: the ``{/* note: text */}`` comments between that section's header and
+    the next one, in source order. They are drawn under the block's title (limits, formulas, hints for the
+    reader of the schematic)."""
+    if source is None or not source.exists():
+        return {}
+    text = source.read_text(encoding="utf-8")
+    headers = [(m.start(), m[1]) for m in _SECTION.finditer(text)]
+    out: dict[str, list[str]] = {}
+    for m in _NOTE.finditer(text):
+        title = next((t for pos, t in reversed(headers) if pos < m.start()), None)
+        if title is not None and m[1]:
+            out.setdefault(title, []).append(m[1])
+    return out
 
 
 def sections(source: Path | None) -> dict[str, str]:
@@ -819,6 +840,15 @@ class Sheet:
         self.items.append(
             f"(text {_q(text)} (exclude_from_sim no) (at {_fmt(x)} {_fmt(y)} 0)"
             f" (effects (font (size {_fmt(size)} {_fmt(size)}) (thickness 0.4) bold) (justify left bottom))"
+            f" (uuid {self.uid()}))"
+        )
+        self.box(x, y - size, x + len(text) * size * 0.9, y)
+
+    def note(self, text: str, x: float, y: float, size: float = NOTE) -> None:
+        """A line of plain (not bold) text: a block's note."""
+        self.items.append(
+            f"(text {_q(text)} (exclude_from_sim no) (at {_fmt(x)} {_fmt(y)} 0)"
+            f" (effects (font (size {_fmt(size)} {_fmt(size)})) (justify left bottom))"
             f" (uuid {self.uid()}))"
         )
         self.box(x, y - size, x + len(text) * size * 0.9, y)
@@ -2330,22 +2360,30 @@ def _render(
     framed = len(blocks) > 1 or bool(titles and titles[0])
     pad = BLOCK_PAD if framed else 0.0
     head = 2 * TITLE if framed else 0.0
+    notes = notes_of(source) if framed else {}
     if framed:
         shapes = []
+        heads = []
         for block in blocks:
+            lines = notes.get(block.title, [])
             title_w = len(block.title or "other") * TITLE * 0.9  # the frame holds its title
+            title_w = max([title_w, *(len(line) * NOTE * 0.9 for line in lines)])  # ... and its notes
+            block_head = head + len(lines) * NOTE_LINE + (NOTE_LINE / 2 if lines else 0.0)
+            heads.append(block_head)
             options: dict[tuple[float, float], Spots] = {}
             for spots, w, h in _layouts(block):
-                options.setdefault((_snap(max(w, title_w) + 2 * pad), _snap(h + 2 * pad + head)), spots)
+                options.setdefault((_snap(max(w, title_w) + 2 * pad), _snap(h + 2 * pad + block_head)), spots)
             shapes.append(_shape_choices(options))
         choice, origins = _arrange(shapes)
         layouts = [(block, *opts[i]) for block, opts, i in zip(blocks, shapes, choice, strict=True)]
-        for (block, spots, w, h), (bx, by) in zip(layouts, origins, strict=True):
+        for (block, spots, w, h), (bx, by), block_head in zip(layouts, origins, heads, strict=True):
             bx, by = bx + SHEET_MARGIN, by + SHEET_MARGIN
             sheet.frame(bx, by, bx + w, by + h)
             sheet.text(block.title or "other", bx + pad, by + pad + TITLE, TITLE)
+            for row, line in enumerate(notes.get(block.title, [])):
+                sheet.note(line, bx + pad, by + pad + TITLE + (row + 1) * NOTE_LINE + NOTE_LINE / 2)
             for cell, (cx, cy) in zip([*block.cells, *block.points], spots, strict=True):
-                cell.draw(sheet, bx + pad + cx, by + pad + head + cy)
+                cell.draw(sheet, bx + pad + cx, by + pad + block_head + cy)
     else:  # no frame: the cells themselves go round the title block, which the drawing centred must clear
         # fit_schematic_sheet places it by its anchor points, not by its texts: should that put texts
         # outside the frame or onto the title block, the room shrinks by that much and it is drawn again

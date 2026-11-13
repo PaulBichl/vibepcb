@@ -50,9 +50,17 @@ def zone_thermal_reliefs(project: KicadProject) -> list[str]:
     wide as a 0402 pad and so barely relieves anything.
     """
     changes = []
+    solid = {
+        f"vibepcb:pour:{name}"
+        for name, entry in project.config.get("pour", {}).items()
+        if entry.get("connect") == "solid" and ("area" in entry or "outline" in entry)
+    }  # power polygons of the board config ([pour.<name>] connect = "solid") keep their solid pads
     for zone in sexpr.children(project.pcb, "zone"):
         connect, fill = sexpr.child(zone, "connect_pads"), sexpr.child(zone, "fill")
         if sexpr.child(zone, "keepout") is not None or connect is None or fill is None:
+            continue
+        name = sexpr.child(zone, "name")
+        if name is not None and len(name) > 1 and str(name[1]) in solid:
             continue
         changed = False
         if len(connect) > 1 and connect[1] == Sym("yes"):

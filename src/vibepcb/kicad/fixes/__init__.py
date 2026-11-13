@@ -170,8 +170,8 @@ FIXES: dict[str, Fix] = {
     "apply_pours": apply_pours,
     "pours_to_board_outline": pours_to_board_outline,
     "apply_keepouts": apply_keepouts,
+    "thermal_pad_vias": thermal_pad_vias,  # before the routing and the track fixes: obstacles for them, kept by restore_nets
     "apply_routes": apply_routes,
-    "thermal_pad_vias": thermal_pad_vias,  # before the track fixes: obstacles for them, kept by restore_nets
     "repair_zero_width_tracks": repair_zero_width_tracks,
     "drop_tracks_inside_pads": drop_tracks_inside_pads,
     "net_placed_vias": net_placed_vias,  # before the track fixes: they judge copper by net

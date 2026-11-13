@@ -349,7 +349,10 @@ def apply_pours(project: KicadProject) -> list[str]:
     board's existing pour settings (else KiCad's usual ones), over the board outline inset by ``margin``.
     With ``area`` (x0, y0, x1, y1, board mm) the pour covers only that box - a split plane or a patch on a
     signal layer (e.g. a BGA's core supply under it) - and ``priority`` lets it win over a full pour of the
-    same layer; such pours are rewritten from the config on every run.
+    same layer; such pours are rewritten from the config on every run. ``outline`` (points, board mm) gives a
+    polygon instead of a box. An area pour may set its own
+    ``clearance`` (the fill's distance to other nets: a high-voltage polygon) and ``connect = "solid"`` (pads
+    join the fill without thermal spokes: a power polygon; ``zone_thermal_reliefs`` leaves it alone).
     """
     cfg = project.config.get("pour", {})
     zones = [z for z in sexpr.children(project.pcb, "zone") if sexpr.child(z, "keepout") is None]
@@ -381,9 +384,14 @@ def apply_pours(project: KicadProject) -> list[str]:
             continue
         x0, y0, x1, y1 = _bbox(edge_points, -margin)
         area = entry.get("area")
+        shape = entry.get("outline")  # a polygon instead of a box (an L-shaped power polygon)
         if area is not None:  # a region of the layer (a split plane, a patch under a part), inside the outline
             ax0, ay0, ax1, ay1 = (float(v) for v in area)
             x0, y0, x1, y1 = max(x0, ax0), max(y0, ay0), min(x1, ax1), min(y1, ay1)
+        points = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+        if shape is not None:
+            points = [(min(max(float(px), x0), x1), min(max(float(py), y0), y1)) for px, py in shape]
+            area = shape
         for layer in entry["layers"]:
             if area is None and (net, layer) in have:
                 continue
@@ -395,9 +403,7 @@ def apply_pours(project: KicadProject) -> list[str]:
             head = [copy.deepcopy(declared), [Sym("layer"), layer]]
             if len(declared) > 2:  # (net <id> "<name>") on a pad: a zone writes (net <id>) (net_name "<name>")
                 head = [[Sym("net"), declared[1]], [Sym("net_name"), net], [Sym("layer"), layer]]
-            outline = sexpr.loads(
-                f"(polygon (pts (xy {_mm(x0)} {_mm(y0)}) (xy {_mm(x1)} {_mm(y0)}) (xy {_mm(x1)} {_mm(y1)}) (xy {_mm(x0)} {_mm(y1)})))"
-            )
+            outline = sexpr.loads("(polygon (pts " + " ".join(f"(xy {_mm(px)} {_mm(py)})" for px, py in points) + "))")
             uid_node = sexpr.child(zone, "uuid")
             if uid_node is not None:
                 uid_node[1] = str(uid)
@@ -407,11 +413,36 @@ def apply_pours(project: KicadProject) -> list[str]:
                 for old in list(sexpr.children(zone, "priority")):
                     zone.remove(old)
                 zone.insert(len(head) + 2, [Sym("priority"), Sym(str(int(entry.get("priority", 1))))])
+                _pour_connection(zone, entry)
             zone.append(outline)
             project.pcb.append(zone)
             where = f" in ({_mm(x0)}, {_mm(y0)})-({_mm(x1)}, {_mm(y1)})" if area is not None else ""
+            if shape is not None:
+                bx0, by0, bx1, by1 = _bbox(points)
+                where = f" in a {len(points)}-point outline within ({_mm(bx0)}, {_mm(by0)})-({_mm(bx1)}, {_mm(by1)})"
             changes.append(f"{name}: {net} pour on {layer}{where}")
     return changes
+
+
+def _pour_connection(zone: list[Node], entry: dict[str, object]) -> None:
+    """An area pour's own ``clearance`` and pad connection (``connect = "solid"``) in its ``connect_pads`` node."""
+    connect = sexpr.child(zone, "connect_pads")
+    if connect is None:
+        connect = [Sym("connect_pads"), [Sym("clearance"), Sym("0.2")]]
+        zone.insert(len(zone) - 1, connect)
+    solid = entry.get("connect") == "solid"
+    has_yes = len(connect) > 1 and connect[1] == Sym("yes")
+    if solid and not has_yes:
+        connect.insert(1, Sym("yes"))
+    elif not solid and has_yes:
+        del connect[1]
+    if "clearance" in entry:
+        node = sexpr.child(connect, "clearance")
+        value = Sym(_mm(float(str(entry["clearance"]))))
+        if node is None:
+            connect.append([Sym("clearance"), value])
+        else:
+            node[1] = value
 
 
 def pours_to_board_outline(project: KicadProject) -> list[str]:

@@ -33,6 +33,10 @@ these from the board's config file into the KiCad project (:func:`fixes.apply_bo
     layers = ["In2.Cu"]
     # area = [x0, y0, x1, y1]        #   optional: only this box (board mm) - a split plane / a patch under a part;
     # priority = 2                   #   it wins over a full pour of the layer (KiCad zone priority)
+    # outline = [[x, y], ...]        #   instead of area: a polygon (board mm, 3+ points), e.g. an L-shaped power polygon
+    # clearance = 0.6                #   optional, area pours: the fill's distance to other nets (a high-voltage polygon)
+    # connect = "solid"              #   optional, area pours: pads join the fill solid, not through thermal spokes
+                                   #   (a power polygon: FET, inductor, bulk-capacitor pads carry amps and heat)
 
     [keepout.antenna]              # rule area (KiCad enforces it: pour fill + DRC); with "tracks" blocked also a
                                    #   <keepout> for tscircuit's router (vibepcb.build.tscircuit.router_keepouts)
@@ -92,6 +96,7 @@ if TYPE_CHECKING:
 CONFIG_NAME = "vibepcb.toml"
 ESCAPE_KEYS = ("track_width", "clearance", "via_diameter", "via_drill", "layers")
 KEEPOUT_KEYS = {"ref", "area", "margin", "layers", "block"}
+POUR_KEYS = {"net", "layers", "margin", "area", "outline", "priority", "clearance", "connect"}
 THERMAL_VIA_KEYS = {"pad", "pitch", "drill", "size", "margin"}
 # rule-profile values (mm; vibepcb.rules): fab / application minimums, the Default net class, the board
 RULE_MIN_KEYS = (
@@ -196,9 +201,39 @@ def validate(data: dict[str, Any], where: str = CONFIG_NAME) -> None:
         if "net" not in k or not k.get("layers"):
             msg = f'{where}: pour {name!r} needs net = "NAME" and layers = ["In2.Cu", ...]'
             raise ConfigError(msg)
-        if bad := set(k) - {"net", "layers", "margin", "area", "priority"}:
-            msg = f"{where}: pour {name!r}: unknown key(s) {sorted(bad)} (known: area, layers, margin, net, priority)"
+        if bad := set(k) - POUR_KEYS:
+            msg = f"{where}: pour {name!r}: unknown key(s) {sorted(bad)} (known: {', '.join(sorted(POUR_KEYS))})"
             raise ConfigError(msg)
+        if k.get("connect", "thermal") not in ("thermal", "solid"):
+            msg = f'{where}: pour {name!r}: connect is "thermal" (spokes, the default) or "solid"'
+            raise ConfigError(msg)
+        if "clearance" in k and (
+            isinstance(k["clearance"], bool) or not isinstance(k["clearance"], int | float) or k["clearance"] <= 0
+        ):
+            msg = f"{where}: pour {name!r}: clearance must be a positive number (mm)"
+            raise ConfigError(msg)
+        if ({"clearance", "connect"} & set(k)) and not ({"area", "outline"} & set(k)):
+            msg = (
+                f"{where}: pour {name!r}: clearance / connect go with an area pour (area = [x0, y0, x1, y1] or outline)"
+            )
+            raise ConfigError(msg)
+        if "outline" in k:
+            pts = k["outline"]
+            if "area" in k:
+                msg = f"{where}: pour {name!r}: give either area or outline, not both"
+                raise ConfigError(msg)
+            if (
+                not isinstance(pts, list)
+                or len(pts) < 3
+                or not all(
+                    isinstance(q, list)
+                    and len(q) == 2
+                    and all(isinstance(v, int | float) and not isinstance(v, bool) for v in q)
+                    for q in pts
+                )
+            ):
+                msg = f"{where}: pour {name!r}: outline needs 3+ points [[x, y], ...] (board mm)"
+                raise ConfigError(msg)
         if "area" in k and len(k["area"]) != 4:
             msg = f"{where}: pour {name!r}: area needs 4 numbers (x0 y0 x1 y1, board mm)"
             raise ConfigError(msg)

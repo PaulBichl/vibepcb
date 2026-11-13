@@ -154,6 +154,24 @@ export default () => (
 """
 
 
+def test_notes_of_collects_the_note_comments_of_each_section(tmp_path: Path) -> None:
+    source = tmp_path / "index.circuit.tsx"
+    source.write_text(
+        "export default () => (<board>\n"
+        "{/* note: before any section: ignored */}\n"
+        "{/* ===== Input ===== */}\n"
+        "{/* note: VIN 15..80 V, 7 A max */}\n"
+        '<resistor name="R1" />\n'
+        "{/* note: second line */}\n"
+        "{/* ===== Output ===== */}\n"
+        '<resistor name="R2" />\n'
+        "</board>)\n",
+        encoding="utf-8",
+    )
+    assert schgen.notes_of(source) == {"Input": ["VIN 15..80 V, 7 A max", "second line"]}
+    assert schgen.notes_of(None) == {}
+
+
 def test_blocks_of_sub_components(tmp_path: Path) -> None:
     source = tmp_path / "index.circuit.tsx"
     source.write_text(BOARD_TSX, encoding="utf-8")

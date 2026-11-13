@@ -1848,6 +1848,50 @@ def test_apply_pours_area_pour_is_a_named_prioritised_box(project: fixes.KicadPr
     assert len([z for z in sexpr.children(project.pcb, "zone") if fixes._is_pour_zone(z)]) == 1
 
 
+def test_apply_pours_area_pour_clearance_and_solid_connection(project: fixes.KicadProject) -> None:
+    project.config = {
+        "pour": {
+            "vin": {"net": "VCC", "layers": ["B.Cu"], "area": [95, 95, 100, 100], "clearance": 0.6, "connect": "solid"},
+            "aux": {"net": "VCC", "layers": ["F.Cu"], "area": [95, 95, 100, 100]},
+        }
+    }
+    fixes.apply_pours(project)
+    zones = {
+        str((sexpr.child(z, "name") or ["name", ""])[1]): z
+        for z in sexpr.children(project.pcb, "zone")
+        if fixes._is_pour_zone(z)
+    }
+    vin = sexpr.child(zones["vibepcb:pour:vin"], "connect_pads")
+    assert vin is not None
+    assert vin[1] == Sym("yes")
+    assert sexpr.child(vin, "clearance") == ["clearance", Sym("0.6")]
+    aux = sexpr.child(zones["vibepcb:pour:aux"], "connect_pads")
+    assert aux is not None
+    assert aux[1] != Sym("yes")
+    fixes.zone_thermal_reliefs(project)  # spokes for every other zone, the solid power polygon stays solid
+    assert vin[1] == Sym("yes")
+    assert aux[1] != Sym("yes")
+
+
+def test_apply_pours_outline_pour_is_a_polygon(project: fixes.KicadProject) -> None:
+    shape = [[95, 95], [100, 95], [100, 98], [98, 98], [98, 100], [95, 100]]
+    project.config = {"pour": {"ell": {"net": "VCC", "layers": ["B.Cu"], "outline": shape, "connect": "solid"}}}
+    changes = fixes.apply_pours(project)
+    assert changes == ["ell: VCC pour on B.Cu in a 6-point outline within (95, 95)-(100, 100)"]
+    zone = next(z for z in sexpr.children(project.pcb, "zone") if fixes._is_pour_zone(z))
+    pts = [
+        [float(str(xy[1])), float(str(xy[2]))]
+        for xy in sexpr.walk(sexpr.child(zone, "polygon") or [])
+        if sexpr.head(xy) == "xy"
+    ]
+    assert pts == [[float(x), float(y)] for x, y in shape]
+    connect = sexpr.child(zone, "connect_pads")
+    assert connect is not None
+    assert connect[1] == Sym("yes")
+    fixes.apply_pours(project)  # rewritten, not added twice
+    assert len([z for z in sexpr.children(project.pcb, "zone") if fixes._is_pour_zone(z)]) == 1
+
+
 EXPOSED_PAD_PART = """(footprint "tscircuit:soic8_ep" (layer F.Cu) (at 110 110 90)
   (fp_text reference "U7" (at 0 -3 0) (layer F.SilkS) (effects (font (size 0.8 0.8) (thickness 0.15))))
   (pad "1" smd rect (at -1.9 -2.5 0) (size 0.6 1.5) (layers F.Cu F.Paste F.Mask) (net 1 "VCC"))

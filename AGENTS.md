@@ -161,6 +161,8 @@ shared helpers in `base` / `copper`; a module imports only from modules before i
   blocks are the TSX sections - group the parts under `{/* ===== title ===== */}` headers
   by function (supply, MCU, ...); a part's passives go in its section. A sub-component used in a section
   (`<Channel n={1} />`) becomes a framed sub-block there, one per instance.
+  `{/* note: text */}` comments under a section header become text lines under the block's title (voltage / current
+  limits, formulas, jumper settings).
 - If `check` leaves a few sharp bends/junctions in a cramped spot, the routing there
   is the problem: try `autorouterEffortLevel` (10x fixed one cramped board) and 0.2-0.5 mm
   nudges of the parts around it; tscircuit routing is deterministic, so compare
@@ -206,6 +208,11 @@ shared helpers in `base` / `copper`; a module imports only from modules before i
   don't use its fanout (dogbone + pour crashes, tscircuit/core#4660; saved `pcbTracePaths` + `routeRemaining`
   crash, #4663). Use `[escape.<ref>]`. Saved paths, if ever needed: group-relative coordinates, the first
   point within 1e-4 mm of the pad, every connection of the chip covered.
+- Power boards (first one: the LM5146 buck, `../BUCK`): the high-current nets are polygons, not tracks:
+  `[pour.<name>]` with `outline = [[x, y], ...]` (or `area`), `clearance` (0.6 mm for 80 V nets) and
+  `connect = "solid"`, the same outline on several layers; stitch them with `<via connectsTo="net.X">` arrays in
+  the TSX (they export with their net and stay as long as the net has zones on two layers there); route only the
+  taps (`[routing] mode = "manual"`, `routes.toml`). Tracks leaving 0.5 mm pitch pins: `width = 0.25` on that leg.
 - SPICE: chips have no models, so per-board ngspice decks with behavioural models live in
   `boards/<name>/sim/*.cir`; `check` runs them (`ngspice -b`) and judges the `.measure` results against
   `* range: <measure> <min> <max> source=datasheet:...` lines (a range without a source is "assumed"; the deck's
